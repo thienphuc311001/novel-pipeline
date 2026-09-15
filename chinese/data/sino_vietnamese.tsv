@@ -1,0 +1,895 @@
+# Hán-Việt reading per single character (bundled offline dictionary).
+# Format: character <TAB> reading <TAB> optional gloss
+# Lines starting with '#' are comments.  Add more files through
+# Settings.dictionary_paths; user edits are always kept.
+一	nhất	một
+丁	đinh
+七	thất	bảy
+万	vạn	mười nghìn
+三	tam	ba
+上	thượng	trên
+下	hạ	dưới
+不	bất	không
+与	dữ	cùng
+专	chuyên
+业	nghiệp
+东	đông
+丝	ty
+两	lưỡng	hai
+严	nghiêm
+个	cá
+中	trung
+为	vi	làm
+主	chủ
+久	cửu	lâu
+之	chi	của
+乌	ô
+乐	lạc	vui
+九	cửu	chín
+也	dã	cũng
+习	tập
+书	thư
+买	mãi	mua
+了	liễu
+事	sự
+二	nhị	hai
+于	vu	ở
+云	vân	mây
+五	ngũ	năm
+亡	vong
+交	giao
+亦	diệc
+产	sản
+亮	lượng
+人	nhân	người
+亿	ức	trăm triệu
+什	thập
+今	kim	nay
+从	tòng	từ
+他	tha	hắn
+仙	tiên
+代	đại	thay
+令	lệnh
+以	dĩ	lấy
+们	môn
+件	kiện
+价	giá
+任	nhậm
+份	phần
+休	hưu
+会	hội
+传	truyền
+伤	thương
+但	đãn	nhưng
+位	vị
+低	đê	thấp
+体	thể	thân thể
+何	hà
+余	dư
+佛	phật
+你	nễ	ngươi
+使	sử
+侠	hiệp
+侧	trắc
+信	tín
+修	tu
+倒	đảo
+候	hậu
+做	tố
+停	đình
+像	tượng
+元	nguyên
+兄	huynh	anh
+光	quang	ánh sáng
+克	khắc
+免	miễn
+入	nhập	vào
+全	toàn
+公	công
+六	lục	sáu
+兰	lan
+关	quan
+兵	binh
+其	kỳ
+典	điển
+养	dưỡng
+兽	thú
+内	nội	trong
+再	tái
+军	quân
+冲	xung
+决	quyết
+况	huống
+冷	lãnh	lạnh
+准	chuẩn
+凉	lương
+刀	đao
+分	phân
+切	thiết
+列	liệt
+则	tắc
+刚	cương
+创	sang
+别	biệt
+利	lợi
+到	đáo	đến
+制	chế
+刻	khắc
+剑	kiếm
+力	lực
+功	công
+加	gia
+动	động
+势	thế
+勇	dũng
+勤	cần
+化	hoá
+北	bắc
+区	khu
+医	y
+十	thập	mười
+千	thiên	nghìn
+半	bán
+华	hoa
+单	đơn
+南	nam
+卡	tạp
+印	ấn
+卷	quyển
+危	nguy
+却	khước
+厚	hậu
+原	nguyên
+去	khứ	đi
+参	tham
+又	hựu	lại
+反	phản
+发	phát
+取	thủ
+受	thụ
+变	biến
+口	khẩu	miệng
+古	cổ
+只	chỉ
+叫	khiếu	gọi
+可	khả
+台	đài
+史	sử
+右	hữu
+号	hiệu
+司	tư
+吃	ngật	ăn
+各	các
+合	hợp
+同	đồng
+名	danh	tên
+后	hậu	sau
+吐	thổ
+向	hướng
+吗	ma
+君	quân
+听	thính	nghe
+吾	ngô
+呀	nha
+呆	ngai
+告	cáo
+周	chu
+味	vị
+命	mệnh
+和	hoà
+哈	cáp
+响	hưởng
+哪	na
+哭	khốc	khóc
+善	thiện
+喜	hỉ
+喝	hát
+四	tứ	bốn
+回	hồi
+因	nhân
+国	quốc
+图	đồ
+土	thổ	đất
+在	tại	ở
+地	địa	đất
+场	trường
+坐	toạ	ngồi
+坚	kiên
+埋	mai
+城	thành
+域	vực
+基	cơ
+堂	đường
+塔	tháp
+境	cảnh
+增	tăng
+士	sĩ
+声	thanh	tiếng
+处	xứ
+备	bị
+复	phục
+外	ngoại	ngoài
+多	đa
+夜	dạ	đêm
+大	đại	lớn
+天	thiên	trời
+太	thái
+夫	phu	chồng
+失	thất
+头	đầu
+奇	kỳ
+女	nữ
+奴	nô
+好	hảo	tốt
+如	như
+妙	diệu
+妹	muội	em gái
+妻	thê	vợ
+姐	tỷ	chị
+始	thuỷ	bắt đầu
+姨	di
+娘	nương
+婆	bà
+婚	hôn
+子	tử	con
+字	tự	chữ
+存	tồn
+孙	tôn
+孝	hiếu
+学	học
+宁	ninh
+它	tha
+安	an
+完	hoàn
+宗	tông
+定	định
+宝	bảo
+实	thực
+客	khách
+宣	tuyên
+宫	cung
+害	hại
+家	gia	nhà
+容	dung
+寒	hàn
+对	đối
+封	phong
+将	tướng
+尊	tôn
+小	tiểu	nhỏ
+少	thiếu
+尔	nhĩ
+尽	tận
+层	tằng
+尾	vĩ
+局	cục
+屈	khuất
+屋	ốc
+山	sơn	núi
+岁	tuế
+岛	đảo
+峰	phong
+川	xuyên
+州	châu
+工	công
+左	tả
+己	kỷ
+已	dĩ
+巴	ba
+市	thị
+布	bố
+师	sư
+希	hy
+帮	bang
+带	đới
+常	thường
+帽	mạo
+幅	bức
+干	can
+平	bình
+年	niên	năm
+并	tinh
+幸	hạnh
+幻	huyễn
+幽	u
+广	quảng
+庄	trang
+庆	khánh
+床	sàng
+序	tự
+库	khố
+应	ứng
+底	để
+店	điếm
+府	phủ
+度	độ
+座	toạ
+庭	đình
+康	khang
+延	diên
+建	kiến
+开	khai
+异	dị
+弟	đệ	em trai
+张	trương
+强	cường
+归	quy
+当	đương
+形	hình
+影	ảnh
+往	vãng
+待	đãi
+很	hận
+得	đắc
+心	tâm	tim
+必	tất
+快	khoái
+念	niệm
+忽	hốt
+怀	hoài
+态	thái
+怎	chẩm
+怕	phạ	sợ
+思	tư
+性	tính
+怨	oán
+恐	khủng
+息	tức
+悦	duyệt
+情	tình
+惊	kinh
+想	tưởng
+意	ý
+感	cảm
+愿	nguyện
+慢	mạn
+慧	tuệ
+成	thành
+我	ngã	tôi
+戒	giới
+或	hoặc
+战	chiến
+截	tiệt
+所	sở
+手	thủ	tay
+才	tài
+打	đả	đánh
+托	thác
+执	chấp
+扬	dương
+找	triệu
+承	thừa
+技	kỹ
+把	bả
+护	hộ
+报	báo
+招	chiêu
+拜	bái
+指	chỉ
+按	án
+换	hoán
+据	cứ
+掌	chưởng
+排	bài
+探	thám
+接	tiếp
+控	khống
+推	suy
+提	đề
+插	tháp
+握	ác
+摆	bãi
+数	số
+敌	địch
+散	tán
+敬	kính
+整	chỉnh
+文	văn
+斑	ban
+斩	trảm
+断	đoạn
+新	tân	mới
+方	phương
+无	vô	không
+既	kí
+日	nhật
+旧	cựu
+早	tảo
+时	thời
+明	minh
+星	tinh
+春	xuân
+是	thị	là
+显	hiển
+晋	tấn
+晒	sái
+晚	vãn
+晨	thần
+普	phổ
+景	cảnh
+暗	ám
+暴	bạo
+更	cánh
+最	tối
+月	nguyệt
+有	hữu	có
+朋	bằng
+服	phục
+朝	triều
+期	kỳ
+木	mộc	cây
+未	vị
+末	mạt
+本	bổn
+术	thuật
+机	cơ
+杀	sát	giết
+杂	tạp
+权	quyền
+李	lý
+村	thôn
+束	thúc
+条	điều
+来	lai	đến
+杨	dương
+极	cực
+果	quả
+枪	thương
+架	giá
+某	mỗ
+柔	nhu
+查	tra
+柱	trụ
+树	thụ
+根	căn
+格	cách
+桃	đào
+梦	mộng
+棋	kỳ
+楼	lâu
+榜	bảng
+模	mô
+次	thứ
+欢	hoan
+欣	hân
+欲	dục
+歌	ca
+止	chỉ
+正	chính
+此	thử
+武	vũ
+死	tử	chết
+残	tàn
+段	đoạn
+每	mỗi
+比	tỷ
+毛	mao
+气	khí
+水	thuỷ	nước
+永	vĩnh
+求	cầu
+汉	hán
+江	giang
+池	trì
+汤	thang
+汪	uông
+沉	trầm
+沙	sa
+没	một
+油	du
+法	pháp
+波	ba
+注	chú
+泪	lệ
+泰	thái
+泽	trạch
+洋	dương
+活	hoạt
+流	lưu
+浅	thiển
+海	hải
+消	tiêu
+清	thanh
+渐	tiệm
+渡	độ
+湖	hồ
+满	mãn
+滴	tích
+灵	linh
+灾	tai
+炉	lô
+炎	viêm
+烟	yên
+热	nhiệt
+然	nhiên
+照	chiếu
+父	phụ
+爷	gia
+片	phiến
+牛	ngưu
+物	vật
+特	đặc
+犯	phạm
+状	trạng
+狂	cuồng
+狐	hồ
+狗	cẩu
+独	độc
+狠	ngận
+狼	lang
+猛	mãnh
+猴	hầu
+玄	huyền
+玉	ngọc
+王	vương
+玩	ngoạn
+环	hoàn
+现	hiện
+珠	châu
+班	ban
+理	lý
+生	sinh
+用	dụng
+田	điền
+由	do
+甲	giáp
+电	điện
+男	nam
+画	hoạ
+留	lưu
+略	lược
+番	phiên
+疑	nghi
+疗	liệu
+疯	phong
+白	bạch
+百	bách	trăm
+的	đích
+皆	giai
+皇	hoàng
+皮	bì
+盈	doanh
+益	ích
+盐	diêm
+盖	cái
+盘	bàn
+目	mục
+直	trực
+相	tương
+看	khán
+真	chân
+眼	nhãn
+着	trước
+知	tri
+短	đoản
+石	thạch	đá
+码	mã
+破	phá
+确	xác
+碎	toái
+碗	uyển
+碰	phanh
+礼	lễ
+神	thần
+祥	tường
+禁	cấm
+福	phúc
+离	ly
+秀	tú
+私	tư
+种	chủng
+科	khoa
+程	trình
+空	không
+穿	xuyên
+突	đột
+窗	song
+立	lập
+竟	cánh
+章	chương
+童	đồng
+端	đoan
+笑	tiếu	cười
+笔	bút
+第	đệ
+等	đẳng
+答	đáp
+策	sách
+算	toán
+签	thiêm
+简	giản
+米	mễ
+类	loại
+粉	phấn
+精	tinh
+系	hệ
+素	tố
+紫	tử
+红	hồng
+级	cấp
+纪	kỷ
+纯	thuần
+线	tuyến
+练	luyện
+组	tổ
+经	kinh
+结	kết
+绕	nhiễu
+绘	hội
+给	cấp
+络	lạc
+统	thống
+绿	lục
+缓	hoãn
+网	võng
+罗	la
+罚	phạt
+美	mỹ
+群	quần
+羽	vũ
+老	lão
+考	khảo
+者	giả
+而	nhi
+耳	nhĩ
+聊	liêu
+肃	túc
+肉	nhục
+肌	cơ
+股	cổ
+肩	kiên
+肯	khẳng
+肤	phu
+肥	phì
+胁	hiếp
+胆	đảm
+背	bối
+胜	thắng
+胡	hồ
+胸	hung
+能	năng
+脑	não
+脚	cước
+脸	kiểm
+腰	yêu
+腿	thoái
+臂	tý
+自	tự
+至	chí
+致	trí
+舌	thiệt
+舍	xá
+舞	vũ
+舟	chu
+航	hàng
+船	thuyền
+色	sắc
+花	hoa
+苏	tô
+苦	khổ
+英	anh
+若	nhược
+苗	miêu
+草	thảo
+荒	hoang
+荣	vinh
+药	dược
+荷	hà
+莫	mạc
+落	lạc
+葡	bồ
+蒸	chưng
+蓝	lam
+藏	tàng
+虎	hổ
+虚	hư
+蛇	xà
+蜂	phong
+蝶	điệp
+血	huyết
+行	hành
+街	nhai
+衣	y
+表	biểu
+袋	đại
+西	tây
+要	yếu
+见	kiến	thấy
+观	quan
+规	quy
+视	thị
+觉	giác
+角	giác
+解	giải
+计	kế
+认	nhận
+讨	thảo
+让	nhượng
+训	huấn
+议	nghị
+记	ký
+讲	giảng
+论	luận
+设	thiết
+访	phỏng
+证	chứng
+评	bình
+识	thức
+诉	tố
+词	từ
+试	thí
+话	thoại
+详	tường
+语	ngữ
+说	thuyết
+请	thỉnh
+读	độc
+谁	thuỳ
+课	khoá
+调	điều
+谈	đàm
+谋	mưu
+谎	hoang
+谱	phổ
+贝	bối
+负	phụ
+财	tài
+责	trách
+货	hoá
+质	chất
+贵	quý
+费	phí
+资	tư
+贼	tặc
+赛	tái
+赞	tán
+赶	cản
+起	khởi
+超	siêu
+越	việt
+足	túc
+跑	bào
+跟	cân
+路	lộ
+跳	khiêu
+身	thân
+车	xa
+转	chuyển
+轮	luân
+软	nhuyễn
+轻	khinh
+载	tải
+输	thâu
+辛	tân
+辞	từ
+辨	biện
+边	biên
+达	đạt
+迁	thiên
+过	quá
+迎	nghinh
+运	vận
+近	cận
+还	hoàn
+这	giá
+进	tiến
+远	viễn
+违	vi
+连	liên
+迫	bách
+追	truy
+退	thoái
+送	tống
+适	thích
+选	tuyển
+逃	đào
+通	thông
+速	tốc
+造	tạo
+逢	phùng
+逼	bức
+遇	ngộ
+遍	biến
+道	đạo
+遗	di
+避	tị
+那	na
+部	bộ
+都	đô
+酒	tửu
+醉	túy
+里	lý
+重	trọng
+野	dã
+量	lượng
+金	kim
+针	châm
+钉	đinh
+钟	chung
+钱	tiền
+铁	thiết
+银	ngân
+锁	toả
+镇	trấn
+镜	kính
+长	trường
+门	môn
+闭	bế
+问	vấn
+间	gian
+闻	văn
+阁	các
+队	đội
+阶	giai
+阳	dương
+阴	âm
+阵	trận
+附	phụ
+际	tế
+陆	lục
+陈	trần
+降	giáng
+限	hạn
+除	trừ
+险	hiểm
+院	viện
+陪	bồi
+随	tuỳ
+隐	ẩn
+雄	hùng
+雅	nhã
+集	tập
+难	nan
+雨	vũ
+雪	tuyết
+零	linh
+雷	lôi
+需	nhu
+青	thanh
+静	tĩnh
+非	phi
+靠	kháo
+面	diện
+鞋	hài
+音	âm
+顺	thuận
+预	dự
+领	lĩnh
+频	tần
+题	đề
+颜	nhan
+风	phong
+飞	phi
+食	thực
+饭	phạn
+饮	ẩm
+饰	sức
+饼	bính
+首	thủ
+香	hương
+马	mã
+骑	kỵ
+验	nghiệm
+骨	cốt
+高	cao
+鬼	quỷ
+魔	ma
+魂	hồn
+鱼	ngư
+鲁	lỗ
+鲜	tiên
+鸟	điểu
+鸡	kê
+鸣	minh
+鹏	bằng
+鹰	ưng
+黄	hoàng
+黑	hắc
+默	mặc
+鼓	cổ
+鼠	thử
+鼻	tỵ
+齐	tề
+齿	xỉ
+龙	long
+龟	quy

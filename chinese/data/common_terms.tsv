@@ -1,0 +1,264 @@
+# Common web-novel terms: Chinese phrase <TAB> Vietnamese translation.
+# Longer phrases always win over shorter ones (the replacement engine sorts by
+# length), so add specific terms freely.
+修炼	tu luyện
+修炼者	tu luyện giả
+灵气	linh khí
+灵根	linh căn
+丹田	đan điền
+境界	cảnh giới
+突破	đột phá
+功法	công pháp
+法术	pháp thuật
+元神	nguyên thần
+神魂	thần hồn
+金丹	kim đan
+元婴	nguyên anh
+渡劫	độ kiếp
+天劫	thiên kiếp
+雷劫	lôi kiếp
+心魔	tâm ma
+心法	tâm pháp
+经脉	kinh mạch
+穴道	huyệt đạo
+内力	nội lực
+真元	chân nguyên
+真气	chân khí
+真气护体	chân khí hộ thể
+掌法	chưởng pháp
+剑法	kiếm pháp
+刀法	đao pháp
+身法	thân pháp
+轻功	khinh công
+武功	võ công
+武技	võ kỹ
+武学	võ học
+武者	võ giả
+剑客	kiếm khách
+道友	đạo hữu
+前辈	tiền bối
+师尊	sư tôn
+师父	sư phụ
+师兄	sư huynh
+师弟	sư đệ
+师姐	sư tỷ
+师妹	sư muội
+弟子	đệ tử
+掌门	chưởng môn
+门派	môn phái
+宗门	tông môn
+家族	gia tộc
+长老	trưởng lão
+宗主	tông chủ
+坊市	phường thị
+拍卖会	buổi đấu giá
+灵石	linh thạch
+丹药	đan dược
+仙丹	tiên đan
+灵药	linh dược
+毒药	độc dược
+符箓	phù lục
+阵法	trận pháp
+禁制	cấm chế
+结界	kết giới
+空间	không gian
+储物袋	túi trữ vật
+储物戒指	nhẫn trữ vật
+法宝	pháp bảo
+灵器	linh khí
+飞剑	phi kiếm
+妖兽	yêu thú
+凶兽	hung thú
+灵兽	linh thú
+魔兽	ma thú
+妖怪	yêu quái
+鬼怪	quỷ quái
+恶魔	ác ma
+修士	tu sĩ
+仙人	tiên nhân
+神仙	thần tiên
+妖怪作乱	yêu quái tác loạn
+魔族	ma tộc
+妖族	yêu tộc
+人族	nhân tộc
+神族	thần tộc
+龙族	long tộc
+仙界	tiên giới
+魔界	ma giới
+冥界	minh giới
+人间	nhân gian
+凡间	phàm gian
+大陆	đại lục
+帝国	đế quốc
+王国	vương quốc
+王朝	vương triều
+皇朝	hoàng triều
+皇帝	hoàng đế
+皇后	hoàng hậu
+太子	thái tử
+公主	công chúa
+王爷	vương gia
+将军	tướng quân
+城主	thành chủ
+国王	quốc vương
+贵族	quý tộc
+奴隶	nô lệ
+江湖	giang hồ
+武林	võ lâm
+天下	thiên hạ
+高手	cao thủ
+大师	đại sư
+刺客	thích khách
+杀手	sát thủ
+佣兵	dong binh
+猎人	thợ săn
+冒险者	mạo hiểm giả
+魔导师	ma đạo sư
+法师	pháp sư
+牧师	mục sư
+骑士	kỵ sĩ
+圣骑士	thánh kỵ sĩ
+城堡	lâu đài
+村庄	thôn trang
+小镇	thị trấn
+县城	huyện thành
+秘境	bí cảnh
+遗迹	di tích
+洞府	động phủ
+宝库	bảo khố
+宝藏	kho báu
+地图	bản đồ
+任务	nhiệm vụ
+系统	hệ thống
+属性	thuộc tính
+技能	kỹ năng
+等级	đẳng cấp
+升级	thăng cấp
+经验	kinh nghiệm
+封印	phong ấn
+契约	khế ước
+血脉	huyết mạch
+天赋	thiên phú
+资质	tư chất
+气运	khí vận
+因果	nhân quả
+轮回	luân hồi
+生死	sinh tử
+命运	vận mệnh
+意志	ý chí
+灵魂	tinh thần - linh hồn
+意识	ý thức
+记忆	ký ức
+情绪	cảm xúc
+冷静	lạnh tĩnh
+愤怒	phẫn nộ
+恐惧	khủng bố
+惊喜	kinh hỉ
+无奈	bất đắc dĩ
+苦笑	khổ cười
+微笑	mỉm cười
+冷哼一声	hừ lạnh một tiếng
+淡淡说道	thản nhiên nói
+开口道	mở miệng nói
+沉声道	trầm giọng nói
+眉头一皱	mày nhíu lại
+眼神	ánh mắt
+脸色	sắc mặt
+点了点头	gật đầu
+摇了摇头	lắc đầu
+深吸一口气	hít sâu một hơi
+不慌不忙	không vội không vàng
+你死我活	ngươi chết ta sống
+一战	một trận chiến
+大战	đại chiến
+决斗	quyết đấu
+厮杀	tư sát
+鲜血	tiên huyết
+尸骨	thi cốt
+尸体	thi thể
+死亡的威胁	uy hiếp của cái chết
+不复存在	bất phục tồn tại
+毁灭	huỷ diệt
+重生	trùng sinh
+转世	chuyển thế
+穿越	xuyền việt
+系统提示	hệ thống nhắc nhở
+任务完成	nhiệm vụ hoàn thành
+恭喜宿主	chúc mừng túc chủ
+怎么可能	tại sao có thể
+没想到	không ngờ tới
+不知道	không biết
+什么东西	đồ vật gì
+你是谁	ngươi là ai
+怎么会	cớ sao lại
+不可能	không thể nào
+原来如此	thì ra là thế
+有意思	có ý tứ
+好久不见	lâu rồi không gặp
+多谢	đa tạ
+对不起	xin lỗi
+没关系	không sao
+怎么回事	chuyện gì xảy ra
+干什么	làm gì
+为什么	tại sao
+怎么办	làm thế nào
+随便	tuỳ tiện
+一定	nhất định
+立刻	lập tức
+突然	đột nhiên
+果然	quả nhiên
+居然	cư nhiên
+竟然	cư nhiên
+终于	cuối cùng
+然后	sau đó
+因此	bởi vậy
+所以	cho nên
+不过	bất quá
+于是	thế là
+而且	hơn nữa
+虽然	tuy rằng
+如果	nếu như
+但是	nhưng mà
+何况	huống chi
+除此之外	ngoài ra
+与此同时	cùng lúc đó
+另一边	một bên khác
+此时此刻	giờ khắc này
+数日后	vài ngày sau
+第二天	ngày hôm sau
+傍晚	chạng vạng
+清晨	sớm mai
+正午	giữa trưa
+深夜	đêm khuya
+月光	ánh trăng
+阳光	ánh mặt trời
+火焰	hoả diễm
+寒风	hàn phong
+暴雨	bão tố
+雷电	lôi điện
+风暴	phong bạo
+大地	đại địa
+天空	bầu trời
+山河	sơn hà
+森林	rừng rậm
+沙漠	sa mạc
+海洋	đại dương
+洞窟	động khố
+悬崖	huyền nhai
+山峰	sơn phong
+城门	thành môn
+街道	đường phố
+酒楼	tửu lâu
+客栈	khách sạn
+茶馆	trà quán
+书房	thư phòng
+卧室	phòng ngủ
+大厅	đại sảnh
+广场	quảng trường
+学院	học viện
+学校	trường học
+老师	lão sư
+学生	học sinh
+书籍	thư tịch
+银子	bạc trắng
+金子	vàng

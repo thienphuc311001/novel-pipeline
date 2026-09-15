@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.backup
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application data
+*.log
+
+# User data (keep config template but ignore actual user data)
+/config/*.json
+!/config/settings.py
+
+# Test outputs
+/output/
+/exports/
+*.zip
+novel_export.json
