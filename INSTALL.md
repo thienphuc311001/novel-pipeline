@@ -4,6 +4,8 @@
 
 - Python 3.11 or newer
 - PyQt6
+- Pillow and edge-tts (installed by `requirements.txt`)
+- FFmpeg on your system PATH (required to combine audiobook MP3 chunks)
 - ~10 MB disk space
 
 ## Quick Install
@@ -78,6 +80,9 @@ venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Linux example for the MP3 merge tool
+# sudo apt install ffmpeg
 
 # Run
 python app.py

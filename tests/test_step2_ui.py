@@ -29,7 +29,7 @@ class Step2UiTests(unittest.TestCase):
         self.temp.cleanup()
 
     def make_window(self, text: str) -> MainWindow:
-        window = MainWindow(Settings(), master_dictionary=self.dictionary)
+        window = MainWindow(Settings(output_dir=self.temp.name), master_dictionary=self.dictionary)
         window.document.load_original_input(text)
         window.document.normalized_text = text
         window.document.normalized_revision = 1

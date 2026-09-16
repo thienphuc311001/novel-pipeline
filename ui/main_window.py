@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -22,9 +23,12 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QGroupBox,
     QFormLayout,
+    QProgressBar,
+    QSizePolicy,
+    QSplitter,
 )
 
-from config.settings import Settings
+from config.settings import DEFAULT_TTS_VOICE, Settings
 from pipeline.document import (
     PipelineDocument,
     PipelineStateError,
@@ -32,6 +36,131 @@ from pipeline.document import (
     derive_chapters_from_text,
     render_chapters_text,
 )
+
+
+class _TtsWorker(QObject):
+    """Run network-bound TTS work outside the Qt UI thread."""
+
+    progress = pyqtSignal(int, int, str)
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, processor, output_path):
+        super().__init__()
+        self.processor = processor
+        self.output_path = output_path
+        # Bridge the Qt-free processor callback to a queued Qt signal.
+        self.processor.progress = self.progress.emit
+
+    def run(self):
+        try:
+            result = self.processor.run()
+            if not result.failures and not result.cancelled:
+                self.processor.merge(result, self.output_path)
+            self.completed.emit(self.processor, result)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class _MergeWorker(QObject):
+    """Run the potentially large FFmpeg final merge off the UI thread."""
+
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, processor, result, output_path):
+        super().__init__()
+        self.processor = processor
+        self.result = result
+        self.output_path = output_path
+
+    def run(self):
+        try:
+            self.processor.merge(self.result, self.output_path, skip_failed=True)
+            self.completed.emit(self.processor, self.result)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class _FailedChunksDialog(QDialog):
+    """Review every failed chunk before deciding whether to skip it."""
+
+    def __init__(self, failures, *, allow_merge: bool, parent=None):
+        super().__init__(parent)
+        self.failures = [self._as_dict(item) for item in failures]
+        self.setWindowTitle("Failed TTS Chunks")
+        self.resize(900, 650)
+
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            f"{len(self.failures)} chunk(s) failed. Review the complete text and error "
+            "before deciding whether to merge without them."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        self.failure_selector = QComboBox()
+        for failure in self.failures:
+            number = failure.get("chunk_number", "?")
+            part = failure.get("failed_part", "whole")
+            self.failure_selector.addItem(f"Chunk {number} — {part}")
+        self.failure_selector.currentIndexChanged.connect(self._show_failure)
+        layout.addWidget(self.failure_selector)
+
+        self.failure_details = QLabel("")
+        self.failure_details.setWordWrap(True)
+        layout.addWidget(self.failure_details)
+
+        self.failure_text = QTextEdit()
+        self.failure_text.setReadOnly(True)
+        layout.addWidget(self.failure_text, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.merge_button = None
+        if allow_merge:
+            self.merge_button = QPushButton("1 — Merge and skip failed chunks")
+            self.merge_button.clicked.connect(self.accept)
+            buttons.addWidget(self.merge_button)
+            cancel = QPushButton("2 — Cancel merge")
+        else:
+            cancel = QPushButton("Close")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        self._show_failure(0)
+
+    @staticmethod
+    def _as_dict(item) -> dict:
+        if isinstance(item, dict):
+            return dict(item)
+        return dict(getattr(item, "__dict__", {}))
+
+    def _show_failure(self, index: int) -> None:
+        if index < 0 or index >= len(self.failures):
+            self.failure_details.setText("")
+            self.failure_text.setPlainText("")
+            return
+        failure = self.failures[index]
+        details = [
+            f"Chunk: {failure.get('chunk_number', '?')}",
+            f"Failed part: {failure.get('failed_part', 'whole')}",
+            f"Attempts: {failure.get('attempts', '?')}",
+            f"Error: {failure.get('error_type', 'Error')}: "
+            f"{failure.get('error_message', 'Unknown error')}",
+        ]
+        if failure.get("main_error_message"):
+            details.append(
+                f"Main request error: {failure.get('main_error_type', 'Error')}: "
+                f"{failure['main_error_message']}"
+            )
+        self.failure_details.setText("\n".join(details))
+
+        sections = ["ORIGINAL CHUNK TEXT:\n" + str(failure.get("original_text", ""))]
+        failed_part_text = str(failure.get("failed_part_text", "") or "")
+        if failed_part_text:
+            sections.append("FAILED PART TEXT:\n" + failed_part_text)
+        self.failure_text.setPlainText("\n\n".join(sections))
 
 
 class MainWindow(QMainWindow):
@@ -43,10 +172,16 @@ class MainWindow(QMainWindow):
         self.document = PipelineDocument()
         self._updating_widgets = False
         self._updating_review_widgets = False
+        self._updating_job_widgets = False
         self._manual_edit_mode = False
         self._master_dictionary = master_dictionary
         self._dictionary_attempted = master_dictionary is not None
         self._dictionary_error = ""
+        self._tts_thread = None
+        self._tts_worker = None
+        self._tts_processor = None
+        self._merge_thread = None
+        self._merge_worker = None
         
         self.setWindowTitle("Novel Pipeline v2")
         self.resize(1400, 900)
@@ -95,19 +230,31 @@ class MainWindow(QMainWindow):
         self.stage3_widget = self._create_stage3_tab()
         self.tabs.addTab(self.stage3_widget, "3️⃣ Clean & Chunk")
         
-        # Stage 4: Filter & Export
+        # Stage 4: Thumbnail & Audiobook
         self.stage4_widget = self._create_stage4_tab()
-        self.tabs.addTab(self.stage4_widget, "4️⃣ Filter & Export")
+        self.tabs.addTab(self.stage4_widget, "4️⃣ Thumbnail & Audiobook")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         
-        layout.addWidget(self.tabs)
-        
-        # Bottom status panel
+        # Pipeline workspace and diagnostics share a draggable vertical split.
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(8)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.main_splitter.addWidget(self.tabs)
+
+        diagnostics_widget = QWidget()
+        diagnostics_widget.setMinimumHeight(180)
+        diagnostics_layout = QVBoxLayout(diagnostics_widget)
+        diagnostics_layout.setContentsMargins(0, 0, 0, 0)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setMaximumHeight(150)
-        layout.addWidget(QLabel("Status & Diagnostics:"))
-        layout.addWidget(self.status_text)
+        diagnostics_layout.addWidget(QLabel("Status & Diagnostics:"))
+        diagnostics_layout.addWidget(self.status_text)
+        self.main_splitter.addWidget(diagnostics_widget)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setSizes([640, 260])
+        layout.addWidget(self.main_splitter, 1)
 
     def _create_stage1_tab(self) -> QWidget:
         """Input loading and chapter normalization."""
@@ -243,12 +390,42 @@ class MainWindow(QMainWindow):
         """Text cleaning and chunking."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
+
+        job_group = QGroupBox("Title / Chapter Configuration")
+        job_form = QFormLayout(job_group)
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        self.stage3_title_combo = QComboBox()
+        self.stage3_title_combo.setEditable(True)
+        self.stage3_title_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.stage3_title_combo.addItems(self.settings.title_history)
+        self.stage3_title_edit = self.stage3_title_combo.lineEdit()
+        self.stage3_title_edit.setPlaceholderText("Novel Title")
+        self.stage3_title_combo.currentTextChanged.connect(self._on_job_identity_changed)
+        self.stage3_title_edit.editingFinished.connect(self._remember_current_title)
+        title_layout.addWidget(self.stage3_title_combo, 1)
+        self.stage3_remove_title_btn = QPushButton("Remove")
+        self.stage3_remove_title_btn.setToolTip("Remove the current title from saved title history")
+        self.stage3_remove_title_btn.clicked.connect(self._on_remove_saved_title)
+        title_layout.addWidget(self.stage3_remove_title_btn)
+        job_form.addRow("Title", title_container)
+        self.stage3_chapter_edit = QLineEdit()
+        self.stage3_chapter_edit.setPlaceholderText("Chapter Number")
+        self.stage3_chapter_edit.textChanged.connect(self._on_job_identity_changed)
+        job_form.addRow("Chapter", self.stage3_chapter_edit)
+        layout.addWidget(job_group)
         
         btn_layout = QHBoxLayout()
         
         clean_btn = QPushButton("🧹 Clean & Chunk")
         clean_btn.clicked.connect(self._on_clean_chunk)
         btn_layout.addWidget(clean_btn)
+
+        self.stage3_continue_btn = QPushButton("Continue to Step 4 →")
+        self.stage3_continue_btn.setEnabled(False)
+        self.stage3_continue_btn.clicked.connect(self._continue_to_stage4)
+        btn_layout.addWidget(self.stage3_continue_btn)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -260,19 +437,72 @@ class MainWindow(QMainWindow):
         return widget
 
     def _create_stage4_tab(self) -> QWidget:
-        """Chapter filtering and export."""
+        """Step 3 bundle preview, thumbnail, and resumable audiobook."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        
-        btn_layout = QHBoxLayout()
-        
-        export_btn = QPushButton("💾 Export")
-        export_btn.clicked.connect(self._on_export)
-        btn_layout.addWidget(export_btn)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-        
+
+        self.stage4_source_label = QLabel("Source: Run Step 3 first")
+        self.stage4_source_label.setWordWrap(True)
+        layout.addWidget(self.stage4_source_label)
+
+        config_group = QGroupBox("Title / Chapter")
+        config_form = QFormLayout(config_group)
+        self.stage4_title_label = QLabel("—")
+        self.stage4_chapter_label = QLabel("—")
+        config_form.addRow("Title", self.stage4_title_label)
+        config_form.addRow("Chapter", self.stage4_chapter_label)
+        layout.addWidget(config_group)
+
+        layout.addWidget(QLabel("First chapter from Step 3 TXT:"))
+        self.stage4_first_chapter = QTextEdit()
+        self.stage4_first_chapter.setReadOnly(True)
+        self.stage4_first_chapter.setMaximumHeight(190)
+        layout.addWidget(self.stage4_first_chapter)
+
+        thumbnail_group = QGroupBox("YouTube Thumbnail")
+        thumbnail_layout = QVBoxLayout(thumbnail_group)
+        thumbnail_row = QHBoxLayout()
+        self.stage4_thumbnail_btn = QPushButton("🖼 Select Image & Generate Thumbnail")
+        self.stage4_thumbnail_btn.clicked.connect(self._on_generate_thumbnail)
+        thumbnail_row.addWidget(self.stage4_thumbnail_btn)
+        thumbnail_row.addStretch()
+        thumbnail_layout.addLayout(thumbnail_row)
+        self.stage4_thumbnail_preview = QLabel("No thumbnail generated")
+        self.stage4_thumbnail_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stage4_thumbnail_preview.setMinimumHeight(170)
+        thumbnail_layout.addWidget(self.stage4_thumbnail_preview)
+        self.stage4_thumbnail_path = QLabel("")
+        self.stage4_thumbnail_path.setWordWrap(True)
+        thumbnail_layout.addWidget(self.stage4_thumbnail_path)
+        layout.addWidget(thumbnail_group)
+
+        tts_group = QGroupBox("TXT → Edge-TTS Audiobook")
+        tts_layout = QVBoxLayout(tts_group)
+        tts_actions = QHBoxLayout()
+        self.stage4_tts_btn = QPushButton("🔊 Generate / Resume Audiobook")
+        self.stage4_tts_btn.clicked.connect(self._on_generate_audiobook)
+        tts_actions.addWidget(self.stage4_tts_btn)
+        self.stage4_cancel_tts_btn = QPushButton("Cancel TTS")
+        self.stage4_cancel_tts_btn.setEnabled(False)
+        self.stage4_cancel_tts_btn.clicked.connect(self._on_cancel_tts)
+        tts_actions.addWidget(self.stage4_cancel_tts_btn)
+        self.stage4_failed_chunks_btn = QPushButton("Review Failed Chunks")
+        self.stage4_failed_chunks_btn.setEnabled(False)
+        self.stage4_failed_chunks_btn.clicked.connect(self._on_review_failed_chunks)
+        tts_actions.addWidget(self.stage4_failed_chunks_btn)
+        tts_actions.addStretch()
+        tts_layout.addLayout(tts_actions)
+        self.stage4_tts_progress = QProgressBar()
+        self.stage4_tts_progress.setRange(0, 1)
+        self.stage4_tts_progress.setValue(0)
+        self.stage4_tts_progress.setTextVisible(True)
+        self.stage4_tts_progress.setFormat("%v / %m chunks (%p%)")
+        tts_layout.addWidget(self.stage4_tts_progress)
+        self.stage4_tts_status = QLabel("Ready")
+        self.stage4_tts_status.setWordWrap(True)
+        tts_layout.addWidget(self.stage4_tts_status)
+        layout.addWidget(tts_group)
+
         self.stage4_output = QTextEdit()
         self.stage4_output.setReadOnly(True)
         layout.addWidget(self.stage4_output)
@@ -313,6 +543,8 @@ class MainWindow(QMainWindow):
                 result.diagnostics.extend(inserted)
             self.document.source_files = result.files
             self.document.load_original_input(result.text)
+            default_title = Path(paths[0]).stem or "Novel Title"
+            self._set_job_editors(default_title, "")
             self.document.diagnostics.extend(result.diagnostics)
             self._log(f"✓ {result.summary()}")
             self._set_editor_text(self.stage1_output, result.text)
@@ -326,8 +558,10 @@ class MainWindow(QMainWindow):
                 "Total sentences: 0    Resolved: 0    Remaining: 0"
             )
             self.stage2_continue_btn.setEnabled(False)
+            self.stage3_continue_btn.setEnabled(False)
             self._set_editor_text(self.stage3_output, "")
             self._set_editor_text(self.stage4_output, "")
+            self._refresh_stage4_ui()
             self._update_status()
         except Exception as error:
             self._error(f"Load failed: {error}")
@@ -353,6 +587,8 @@ class MainWindow(QMainWindow):
             self._log(f"✓ Detected {len(chapters)} chapters")
             self._set_editor_text(self.stage1_output, normalized_text)
             self.stage1_output.setReadOnly(False)
+            if not self.document.job_chapter and chapters:
+                self._set_job_editors(self.document.job_title or "Novel Title", chapters[0].header_line)
             self.stage2_continue_btn.setEnabled(False)
             self.stage2_source_label.setText("Source: Step 1 ready — open Step 2 to review")
             self._update_status()
@@ -430,12 +666,24 @@ class MainWindow(QMainWindow):
             from chunking import split_chapters
             from chapters import build_patterns
             from cleaning import CleaningOptions, clean_text
+            from media.artifacts import write_step3_artifacts
+
             source_text = self.document.require_step2_confirmed_output()
             patterns = build_patterns(self.settings)
             chapters = derive_chapters_from_text(source_text, patterns, source_name="pipeline")
             if not chapters:
                 self._error("No chapter boundaries found in the current pipeline output.")
                 return
+            title = self.stage3_title_edit.text().strip() or self.document.job_title
+            chapter_label = self.stage3_chapter_edit.text().strip() or self.document.job_chapter
+            if not title:
+                source_name = self.document.source_files[0].name if self.document.source_files else ""
+                title = Path(source_name).stem or "Novel Title"
+            if not chapter_label:
+                chapter_label = chapters[0].header_line
+            if title != self.stage3_title_edit.text().strip() or chapter_label != self.stage3_chapter_edit.text().strip():
+                self._set_job_editors(title, chapter_label)
+            self.document.set_job_identity(title, chapter_label)
             cleaning_options = CleaningOptions.from_settings(self.settings)
             clean_reports = []
             for chapter in chapters:
@@ -450,11 +698,19 @@ class MainWindow(QMainWindow):
             chunks, plan, diagnostics = split_chapters(
                 chapters,
                 limit,
-                include_header=False,
+                include_header=True,
                 min_chunk=max(50, int(self.settings.min_chunk_chars or 200)),
             )
             self.document.chunks = chunks
             self.document.diagnostics.extend(diagnostics)
+            bundle = write_step3_artifacts(
+                self.document,
+                self.settings.resolved_output_dir(),
+                title=title,
+                chapter=chapter_label,
+                chunk_limit=limit,
+            )
+            self.document.set_step3_artifacts(bundle)
             self.document.stage("clean_chunk").touch(
                 f"{len(self.document.chapters)} chapters", f"{len(chunks)} chunks",
                 {
@@ -463,11 +719,13 @@ class MainWindow(QMainWindow):
                     "cleaned_after": sum(report.after_chars for report in clean_reports),
                 }
             )
-            self._log(f"✓ Created {len(chunks)} chunks")
+            self._log(f"✓ Created {len(chunks)} chunks and Step 3 TXT/JSON bundle")
             self.stage3_output.setPlainText(
-                f"Created {len(chunks)} chunks:\n\n" +
+                f"TXT: {bundle.txt_path}\nJSON: {bundle.json_path}\n\nCreated {len(chunks)} chunks:\n\n" +
                 "\n".join(f"• Ch {c.chapter} part {c.part}/{c.parts}: {c.char_count} chars" for c in chunks[:50])
             )
+            self.stage3_continue_btn.setEnabled(True)
+            self._refresh_stage4_ui()
             self._update_status()
         except PipelineStateError as error:
             self._error(str(error))
@@ -508,6 +766,337 @@ class MainWindow(QMainWindow):
             self.stage4_output.setPlainText(f"Exported {len(self.document.chunks)} chunks to:\n{path}")
         except Exception as error:
             self._error(f"Export failed: {error}")
+
+    # ------------------------------------------------------- Step 3/4 job
+    def _set_job_editors(self, title: str, chapter: str) -> None:
+        self._updating_job_widgets = True
+        try:
+            self.stage3_title_combo.blockSignals(True)
+            self.stage3_chapter_edit.blockSignals(True)
+            self.stage3_title_combo.setEditText(title or "")
+            self.stage3_chapter_edit.setText(chapter or "")
+        finally:
+            self.stage3_title_combo.blockSignals(False)
+            self.stage3_chapter_edit.blockSignals(False)
+            self._updating_job_widgets = False
+        self.document.set_job_identity(title, chapter)
+
+    def _populate_title_history(self, current: str = "") -> None:
+        self.stage3_title_combo.blockSignals(True)
+        try:
+            self.stage3_title_combo.clear()
+            self.stage3_title_combo.addItems(self.settings.title_history)
+            self.stage3_title_combo.setEditText(current)
+        finally:
+            self.stage3_title_combo.blockSignals(False)
+
+    def _remember_current_title(self) -> None:
+        title = self.stage3_title_combo.currentText().strip()
+        if not title:
+            return
+        history = [item for item in self.settings.title_history if item != title]
+        self.settings.title_history = [title, *history]
+        self._populate_title_history(title)
+        try:
+            self.settings.save()
+            self._log(f"Remembered title: {title}")
+        except OSError as error:
+            self._log(f"Could not save title history: {error}")
+
+    def _on_remove_saved_title(self) -> None:
+        title = self.stage3_title_combo.currentText().strip()
+        if not title:
+            return
+        self.settings.title_history = [item for item in self.settings.title_history if item != title]
+        self._populate_title_history("")
+        self._on_job_identity_changed()
+        try:
+            self.settings.save()
+            self._log(f"Removed saved title: {title}")
+        except OSError as error:
+            self._log(f"Could not save title history: {error}")
+
+    def _on_job_identity_changed(self) -> None:
+        if self._updating_job_widgets:
+            return
+        changed = self.document.set_job_identity(
+            self.stage3_title_edit.text(), self.stage3_chapter_edit.text()
+        )
+        if changed:
+            self.stage3_continue_btn.setEnabled(False)
+            self._refresh_stage4_ui()
+
+    def _refresh_stage4_ui(self) -> None:
+        bundle = self.document.step3_artifacts
+        if bundle is None:
+            self.stage4_source_label.setText("Source: Run Step 3 first")
+            self.stage4_title_label.setText("—")
+            self.stage4_chapter_label.setText("—")
+            self._set_editor_text(self.stage4_first_chapter, "")
+            self.stage4_thumbnail_btn.setEnabled(False)
+            self.stage4_tts_btn.setEnabled(False)
+            self.stage4_failed_chunks_btn.setEnabled(False)
+            self.stage4_thumbnail_path.setText("")
+            return
+        self.stage4_source_label.setText(f"TXT: {bundle.txt_path}\nJSON: {bundle.json_path}")
+        self.stage4_title_label.setText(bundle.title)
+        self.stage4_chapter_label.setText(bundle.chapter)
+        first = self.document.chapters[0].body(include_header=True) if self.document.chapters else ""
+        self._set_editor_text(self.stage4_first_chapter, first)
+        tts_running = self._tts_thread is not None and self._tts_thread.isRunning()
+        running = tts_running or (self._merge_thread is not None and self._merge_thread.isRunning())
+        self.stage4_thumbnail_btn.setEnabled(True)
+        self.stage4_tts_btn.setEnabled(not running)
+        self.stage4_cancel_tts_btn.setEnabled(tts_running)
+        self.stage4_failed_chunks_btn.setEnabled(bool(self.document.tts_failures))
+        if self.document.thumbnail_path and Path(self.document.thumbnail_path).is_file():
+            self._show_thumbnail(Path(self.document.thumbnail_path))
+        else:
+            self.stage4_thumbnail_preview.setPixmap(QPixmap())
+            self.stage4_thumbnail_preview.setText("No thumbnail generated")
+            self.stage4_thumbnail_path.setText("")
+        details = []
+        if self.document.audiobook_path:
+            details.append(f"Audiobook: {self.document.audiobook_path}")
+        if self.document.audio_chunks_dir:
+            details.append(f"Audio chunks: {self.document.audio_chunks_dir}")
+        if self.document.tts_failures:
+            details.append(f"Failed chunks: {len(self.document.tts_failures)}")
+            first = self.document.tts_failures[0]
+            error_type = first.get("error_type", "Error")
+            error_message = first.get("error_message", "Unknown TTS error")
+            details.append(f"Failure: {error_type}: {error_message}")
+        self._set_editor_text(self.stage4_output, "\n".join(details))
+
+    def _show_thumbnail(self, path: Path) -> None:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            self.stage4_thumbnail_preview.setText("Could not display generated thumbnail")
+            return
+        self.stage4_thumbnail_preview.setText("")
+        self.stage4_thumbnail_preview.setPixmap(
+            pixmap.scaled(
+                480, 270,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.stage4_thumbnail_path.setText(f"Saved thumbnail: {path}")
+
+    def _on_generate_thumbnail(self) -> None:
+        try:
+            bundle = self.document.require_step3_artifacts()
+        except PipelineStateError as error:
+            self._error(str(error))
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select thumbnail image",
+            self.settings.resolved_input_dir(),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            from media.thumbnail import generate_thumbnail
+
+            output = generate_thumbnail(
+                Path(path), Path(bundle.output_dir), title=bundle.title,
+                chapter=bundle.chapter,
+                banner_height=self.settings.thumbnail_bottom_height,
+                quality=self.settings.thumbnail_jpeg_quality,
+            )
+            self.document.set_thumbnail_output(str(output))
+            self._show_thumbnail(output)
+            self._log(f"✓ Đã tạo thumbnail: {output}")
+        except Exception as error:
+            self._error(f"Thumbnail failed: {error}")
+
+    def _on_generate_audiobook(self) -> None:
+        try:
+            from media.artifacts import artifact_paths, load_bundle_json
+            from media.tts import TtsChunk, TtsProcessor
+
+            bundle = self.document.require_step3_artifacts()
+            data = load_bundle_json(bundle)
+            chunks = [
+                TtsChunk(
+                    order=int(item["order"]),
+                    chapter=int(item.get("chapter", 0)),
+                    text=str(item["text"]),
+                    text_sha256=str(item.get("text_sha256", "")),
+                )
+                for item in data.get("chunks", [])
+            ]
+            if not chunks:
+                raise ValueError("Step 3 JSON contains no chunks.")
+            paths = artifact_paths(Path(bundle.output_dir).parent, bundle.title, bundle.chapter)
+            voice = str(self.settings.tts_voice or "").strip() or DEFAULT_TTS_VOICE
+            self.settings.tts_voice = voice
+            processor = TtsProcessor(
+                chunks,
+                paths["audio_dir"],
+                voice=voice,
+                max_concurrency=self.settings.tts_max_concurrency,
+                timeout_seconds=self.settings.tts_timeout_seconds,
+                retry_count=self.settings.tts_retry_count,
+                fallback_retry_count=self.settings.tts_fallback_retry_count,
+            )
+            # Detect a missing dependency or invalid voice before launching
+            # hundreds of concurrent chunk tasks.
+            processor.validate_dependencies()
+            self.document.set_tts_output(
+                audio_chunks_dir=str(paths["audio_dir"]),
+                manifest_path=str(paths["manifest"]),
+                audiobook_path="",
+                failures=[],
+            )
+            self._tts_processor = processor
+            self.stage4_tts_progress.setRange(0, len(chunks))
+            self.stage4_tts_progress.setValue(0)
+            message = f"Đang tạo audiobook với giọng: {voice}"
+            self.stage4_tts_status.setText(message)
+            self._log(message)
+            self._refresh_stage4_ui()
+            self.stage4_tts_btn.setEnabled(False)
+            self.stage4_cancel_tts_btn.setEnabled(True)
+            thread = QThread(self)
+            worker = _TtsWorker(processor, paths["audiobook"])
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.progress.connect(self._on_tts_progress)
+            worker.completed.connect(self._on_tts_completed)
+            worker.failed.connect(self._on_tts_failed)
+            worker.completed.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(self._on_tts_thread_finished)
+            self._tts_thread = thread
+            self._tts_worker = worker
+            thread.start()
+        except Exception as error:
+            self._error(f"Không thể tạo audiobook: {error}")
+
+    def _on_tts_progress(self, complete: int, total: int, message: str) -> None:
+        self.stage4_tts_progress.setRange(0, max(total, 1))
+        self.stage4_tts_progress.setValue(complete)
+        self.stage4_tts_status.setText(message)
+        self._log(message)
+
+    def _on_cancel_tts(self) -> None:
+        if self._tts_processor is not None:
+            self._tts_processor.cancel_event.set()
+            self.stage4_tts_status.setText("Đang hủy; các MP3 đã hoàn tất sẽ được giữ lại…")
+
+    def _on_review_failed_chunks(self) -> None:
+        if not self.document.tts_failures:
+            return
+        _FailedChunksDialog(
+            self.document.tts_failures,
+            allow_merge=False,
+            parent=self,
+        ).exec()
+
+    def _on_tts_completed(self, processor, result) -> None:
+        from media.artifacts import artifact_paths
+
+        if result.cancelled:
+            self.stage4_tts_status.setText("Đã hủy. Các đoạn MP3 hoàn tất được giữ để tiếp tục sau.")
+        elif result.failures:
+            if not result.successful_orders:
+                first = result.failures[0]
+                message = (
+                    "❌ Không tạo được đoạn MP3 nào; không thể gộp audiobook. "
+                    f"Lỗi: {first.error_type}: {first.error_message}"
+                )
+                self.stage4_tts_status.setText(message)
+                self._log(message)
+                self._record_tts_result(processor, result)
+                self._refresh_stage4_ui()
+                _FailedChunksDialog(result.failures, allow_merge=False, parent=self).exec()
+                return
+            dialog = _FailedChunksDialog(result.failures, allow_merge=True, parent=self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                try:
+                    bundle = self.document.require_step3_artifacts()
+                    paths = artifact_paths(Path(bundle.output_dir).parent, bundle.title, bundle.chapter)
+                    self._record_tts_result(processor, result)
+                    self._start_merge_worker(processor, result, paths["audiobook"])
+                    self.stage4_tts_status.setText("Đang gộp audiobook, bỏ qua các đoạn lỗi…")
+                    self._refresh_stage4_ui()
+                    return
+                except Exception as error:
+                    self._error(f"Merge failed: {error}")
+            else:
+                self.stage4_tts_status.setText("Đã hủy gộp. Có thể chạy lại để tiếp tục các đoạn lỗi.")
+        else:
+            self.stage4_tts_status.setText("✓ Đã tạo audiobook hoàn chỉnh.")
+
+        self._record_tts_result(processor, result)
+        self._refresh_stage4_ui()
+
+    def _record_tts_result(self, processor, result) -> None:
+        from media.artifacts import artifact_paths
+
+        bundle = self.document.step3_artifacts
+        if bundle is None:
+            return
+        paths = artifact_paths(Path(bundle.output_dir).parent, bundle.title, bundle.chapter)
+        self.document.set_tts_output(
+            audio_chunks_dir=str(paths["audio_dir"]),
+            manifest_path=str(paths["manifest"]),
+            audiobook_path=result.audiobook_path,
+            failures=[item.__dict__ for item in result.failures],
+        )
+        if result.audiobook_path:
+            self.document.stage(StageKey.FILTER_EXPORT).touch(
+                f"{len(result.successful_orders)} audio chunks",
+                "Audiobook created",
+                {"failed_chunks": len(result.failures)},
+            )
+
+    def _start_merge_worker(self, processor, result, output_path) -> None:
+        thread = QThread(self)
+        worker = _MergeWorker(processor, result, output_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._on_merge_completed)
+        worker.failed.connect(self._on_merge_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda: self._on_merge_thread_finished(thread))
+        self._merge_thread = thread
+        self._merge_worker = worker
+        self.stage4_tts_btn.setEnabled(False)
+        thread.start()
+
+    def _on_merge_completed(self, processor, result) -> None:
+        self.stage4_tts_status.setText("Đã gộp audiobook, bỏ qua các đoạn lỗi.")
+        self._record_tts_result(processor, result)
+        self._refresh_stage4_ui()
+
+    def _on_merge_failed(self, message: str) -> None:
+        self.stage4_tts_status.setText(f"❌ Merge failed: {message}")
+        self._log(f"❌ Merge failed: {message}")
+
+    def _on_merge_thread_finished(self, thread) -> None:
+        if self._merge_thread is thread:
+            self._merge_thread = None
+            self._merge_worker = None
+            self.stage4_tts_btn.setEnabled(self.document.step3_artifacts is not None)
+
+    def _on_tts_failed(self, message: str) -> None:
+        self.stage4_tts_status.setText(f"❌ {message}")
+        self._log(f"❌ TTS failed: {message}")
+
+    def _on_tts_thread_finished(self) -> None:
+        merge_running = self._merge_thread is not None and self._merge_thread.isRunning()
+        self.stage4_tts_btn.setEnabled(self.document.step3_artifacts is not None and not merge_running)
+        self.stage4_cancel_tts_btn.setEnabled(False)
+        self._tts_thread = None
+        self._tts_worker = None
+        self._tts_processor = None
     
     def _on_save_settings(self):
         try:
@@ -596,6 +1185,14 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(2)
 
+    def _continue_to_stage4(self) -> None:
+        try:
+            self.document.require_step3_artifacts()
+        except PipelineStateError as error:
+            self._error(str(error))
+            return
+        self.tabs.setCurrentIndex(3)
+
     def _on_tab_changed(self, index: int) -> None:
         if index == 1:
             self._enter_stage2()
@@ -607,6 +1204,15 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(1)
                 self.tabs.blockSignals(False)
                 self._enter_stage2()
+                self._error(str(error))
+        elif index == 3:
+            try:
+                self.document.require_step3_artifacts()
+                self._refresh_stage4_ui()
+            except PipelineStateError as error:
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(2)
+                self.tabs.blockSignals(False)
                 self._error(str(error))
 
     def _enter_stage2(self) -> bool:

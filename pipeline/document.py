@@ -8,6 +8,7 @@ continue: intermediate results live in memory only.
 from __future__ import annotations
 
 import copy
+import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,6 +163,47 @@ class Chunk:
 
 
 @dataclass
+class Step3ArtifactBundle:
+    """The immutable-on-disk bundle materialized by Step 3.
+
+    The strings stay in :class:`PipelineDocument`; this object only records the
+    exact files that represent that state and the fingerprints needed to reject
+    stale or manually modified files before Step 4 consumes them.
+    """
+
+    title: str
+    chapter: str
+    slug: str
+    output_dir: str
+    txt_path: str
+    json_path: str
+    source_revision: int
+    text_sha256: str
+    chunks_sha256: str
+    txt_sha256: str
+    json_sha256: str
+    chunk_count: int
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "title": self.title,
+            "chapter": self.chapter,
+            "slug": self.slug,
+            "output_dir": self.output_dir,
+            "txt_path": self.txt_path,
+            "json_path": self.json_path,
+            "source_revision": self.source_revision,
+            "text_sha256": self.text_sha256,
+            "chunks_sha256": self.chunks_sha256,
+            "txt_sha256": self.txt_sha256,
+            "json_sha256": self.json_sha256,
+            "chunk_count": self.chunk_count,
+            "config": dict(self.config),
+        }
+
+
+@dataclass
 class StageStatus:
     key: str
     name: str
@@ -214,7 +256,7 @@ class StageKey:
         NORMALIZE: "Chuẩn hoá chương",
         CHINESE: "Duyệt & dịch Trung",
         CLEAN_CHUNK: "Làm sạch & chia đoạn",
-        FILTER_EXPORT: "Lọc & xuất",
+        FILTER_EXPORT: "Thumbnail & audiobook",
     }
 
 
@@ -292,7 +334,19 @@ class PipelineDocument:
         self.chinese_review_session: Optional[Any] = None
         self._chinese_review_source_text: Optional[str] = None
         self.normalized_revision: int = 0
+        self.step2_revision: int = 0
         self.cleaned_text: Optional[str] = None
+        # Step 3/4 job state is intentionally distinct from the text stages.
+        # Existing files are never deleted by invalidation; only the in-memory
+        # authority to use them is withdrawn.
+        self.job_title: str = ""
+        self.job_chapter: str = ""
+        self.step3_artifacts: Optional[Step3ArtifactBundle] = None
+        self.thumbnail_path: str = ""
+        self.audio_chunks_dir: str = ""
+        self.audiobook_path: str = ""
+        self.tts_manifest_path: str = ""
+        self.tts_failures: List[Dict[str, Any]] = []
         self.filtered_output: Optional[str] = None
         self.text: str = ""
         # Kept for compatibility with older callers.  It is never used to
@@ -331,7 +385,16 @@ class PipelineDocument:
         )
         clone._chinese_review_source_text = self._chinese_review_source_text
         clone.normalized_revision = self.normalized_revision
+        clone.step2_revision = self.step2_revision
         clone.cleaned_text = self.cleaned_text
+        clone.job_title = self.job_title
+        clone.job_chapter = self.job_chapter
+        clone.step3_artifacts = copy.copy(self.step3_artifacts)
+        clone.thumbnail_path = self.thumbnail_path
+        clone.audio_chunks_dir = self.audio_chunks_dir
+        clone.audiobook_path = self.audiobook_path
+        clone.tts_manifest_path = self.tts_manifest_path
+        clone.tts_failures = copy.deepcopy(self.tts_failures)
         clone.filtered_output = self.filtered_output
         clone.text = self.text
         clone.original_text = self.original_text
@@ -398,7 +461,11 @@ class PipelineDocument:
         self.chinese_review_session = None
         self._chinese_review_source_text = None
         self.normalized_revision = 0
+        self.step2_revision = 0
         self.cleaned_text = None
+        self.job_title = ""
+        self.job_chapter = ""
+        self._clear_step3_artifacts()
         self.filtered_output = None
         self.chapters = []
         self.chunks = []
@@ -422,6 +489,7 @@ class PipelineDocument:
         self.chinese_review_session = None
         self._chinese_review_source_text = None
         self.cleaned_text = None
+        self._clear_step3_artifacts()
         self.filtered_output = None
         self.chunks = []
         self.reset_downstream(StageKey.NORMALIZE)
@@ -440,6 +508,7 @@ class PipelineDocument:
             self.chinese_review_session = None
             self._chinese_review_source_text = None
             self.cleaned_text = None
+            self._clear_step3_artifacts()
             self.filtered_output = None
             self.chunks = []
             self.reset_downstream(StageKey.NORMALIZE)
@@ -497,10 +566,16 @@ class PipelineDocument:
             and self.chinese_review_session.working_text != value
         ):
             self.chinese_review_session = None
+        changed = value != self.chinese_review_text
         self.chinese_review_text = value
+        if changed:
+            self.step2_revision += 1
+        if not changed:
+            return
         self.step2_confirmed_output = None
         self.text = self.chinese_review_text
         self.cleaned_text = None
+        self._clear_step3_artifacts()
         self.filtered_output = None
         self.chunks = []
         self.reset_downstream(StageKey.CHINESE)
@@ -515,13 +590,18 @@ class PipelineDocument:
             raise PipelineStateError(
                 "Step 2 cannot be completed while Chinese Han characters remain."
             )
+        changed = value != self.chinese_review_text or self.step2_confirmed_output != value
+        if changed:
+            self.step2_revision += 1
         self.chinese_review_text = value
         self.step2_confirmed_output = value
         self.text = value
-        self.cleaned_text = None
-        self.filtered_output = None
-        self.chunks = []
-        self.reset_downstream(StageKey.CHINESE)
+        if changed:
+            self.cleaned_text = None
+            self._clear_step3_artifacts()
+            self.filtered_output = None
+            self.chunks = []
+            self.reset_downstream(StageKey.CHINESE)
         return value
 
     def require_step2_confirmed_output(self) -> str:
@@ -547,11 +627,88 @@ class PipelineDocument:
         return self.require_step2_confirmed_output()
 
     def set_cleaned_output(self, text: str) -> None:
-        self.cleaned_text = text or ""
+        value = text or ""
+        if value != self.cleaned_text:
+            self._clear_step3_artifacts()
+        self.cleaned_text = value
         self.text = self.cleaned_text
 
     def set_filtered_output(self, text: str) -> None:
         self.filtered_output = text or ""
+
+    # ---------------------------------------------------------- Step 3/4
+    def set_job_identity(self, title: str, chapter: str) -> bool:
+        """Set editable per-job labels and invalidate only derived artifacts."""
+        title = (title or "").strip()
+        chapter = (chapter or "").strip()
+        changed = (title, chapter) != (self.job_title, self.job_chapter)
+        self.job_title, self.job_chapter = title, chapter
+        if changed:
+            self._clear_step3_artifacts()
+            self.filtered_output = None
+            self.reset_downstream(StageKey.CLEAN_CHUNK)
+        return changed
+
+    def set_step3_artifacts(self, bundle: Step3ArtifactBundle) -> None:
+        self.step3_artifacts = bundle
+        self.thumbnail_path = ""
+        self.audio_chunks_dir = ""
+        self.audiobook_path = ""
+        self.tts_manifest_path = ""
+        self.tts_failures = []
+
+    def set_thumbnail_output(self, path: str) -> None:
+        self.thumbnail_path = path or ""
+
+    def set_tts_output(
+        self,
+        *,
+        audio_chunks_dir: str,
+        manifest_path: str,
+        audiobook_path: str = "",
+        failures: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> None:
+        self.audio_chunks_dir = audio_chunks_dir
+        self.tts_manifest_path = manifest_path
+        self.audiobook_path = audiobook_path
+        self.tts_failures = [dict(item) for item in (failures or [])]
+
+    def _clear_step3_artifacts(self) -> None:
+        self.step3_artifacts = None
+        self.thumbnail_path = ""
+        self.audio_chunks_dir = ""
+        self.audiobook_path = ""
+        self.tts_manifest_path = ""
+        self.tts_failures = []
+
+    def require_step3_artifacts(self) -> Step3ArtifactBundle:
+        """Return the current bundle only when it still matches disk and state."""
+        bundle = self.step3_artifacts
+        if bundle is None:
+            raise PipelineStateError(
+                "Run Step 3 Clean & Chunk to create the TXT/JSON job bundle first."
+            )
+        if self.cleaned_text is None or bundle.source_revision != self.step2_revision:
+            raise PipelineStateError("Step 3 bundle is stale; run Step 3 again.")
+        text_hash = hashlib.sha256(self.cleaned_text.encode("utf-8")).hexdigest()
+        chunks_hash = self.chunk_fingerprint()
+        if text_hash != bundle.text_sha256 or chunks_hash != bundle.chunks_sha256:
+            raise PipelineStateError("Step 3 bundle no longer matches the current pipeline output.")
+        try:
+            from media.artifacts import validate_step3_bundle
+
+            validate_step3_bundle(bundle)
+        except ImportError:
+            raise
+        except Exception as error:
+            raise PipelineStateError(f"Step 3 bundle is unavailable or modified: {error}") from error
+        return bundle
+
+    def chunk_fingerprint(self) -> str:
+        payload = "\n".join(
+            f"{chunk.order}\0{chunk.chapter}\0{chunk.text}" for chunk in self.chunks
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def set_text(self, text: str, *, record_original: bool = False) -> None:
         if record_original and not self.original_text:

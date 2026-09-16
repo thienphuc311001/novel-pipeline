@@ -37,6 +37,7 @@ class PipelineDataFlowTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.settings = Settings(output_dir=self.temp.name)
         self.master_dictionary = create_dictionary_fixture(Path(self.temp.name))
 
     def tearDown(self):
@@ -162,6 +163,23 @@ class PipelineDataFlowTests(unittest.TestCase):
         self.assertIn("tu luyện giả", chunk_text)
         self.assertNotIn("修炼者", chunk_text)
         self.assertEqual(document.cleaned_text, document.chinese_review_text)
+
+    def test_step3_bundle_unlocks_step4_with_first_chapter_preview(self):
+        document = self.make_document()
+        window = self.make_window(document)
+        window._enter_stage2()
+        document.translations = {"修炼者": "tu luyện giả", "修炼": "tu luyện"}
+        window._on_translate()
+        window._on_clean_chunk()
+
+        bundle = document.require_step3_artifacts()
+        self.assertTrue(Path(bundle.txt_path).is_file())
+        self.assertTrue(Path(bundle.json_path).is_file())
+        window._continue_to_stage4()
+        self.assertEqual(window.tabs.currentIndex(), 3)
+        self.assertIn("Chương 327", window.stage4_first_chapter.toPlainText())
+        self.assertIn("Đám lao dịch", window.stage4_first_chapter.toPlainText())
+        self.assertFalse(hasattr(window, "stage4_txt_upload_btn"))
 
     def test_step4_export_uses_step3_output(self):
         document = self.make_document()

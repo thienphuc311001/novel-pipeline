@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 
 APP_DIR_NAME = "novel-pipeline-v2"
 CONFIG_FILE_NAME = "config.json"
+DEFAULT_TTS_VOICE = "vi-VN-HoaiMyNeural"
 
 # ---------------------------------------------------------------- constants
 
@@ -157,7 +158,7 @@ class Settings:
     ai_timeout: int = 60
 
     # --- chunking ---------------------------------------------------------
-    max_chunk_chars: int = 3000
+    max_chunk_chars: int = 1200
     min_chunk_chars: int = 200
     chunk_by_chapters: bool = True
 
@@ -169,13 +170,22 @@ class Settings:
     zip_folder_per_range: bool = False
 
     # --- tts --------------------------------------------------------------
-    tts_engine: str = "auto"
-    tts_voice: str = ""
+    tts_engine: str = "edge-tts"
+    tts_voice: str = DEFAULT_TTS_VOICE
     tts_rate: int = 175
+    tts_max_concurrency: int = 60
+    tts_timeout_seconds: int = 120
+    tts_retry_count: int = 5
+    tts_fallback_retry_count: int = 3
+
+    # --- thumbnail --------------------------------------------------------
+    thumbnail_bottom_height: int = 145
+    thumbnail_jpeg_quality: int = 95
 
     # --- ui ---------------------------------------------------------------
     font_size: int = 10
     max_log_lines: int = 2000
+    title_history: List[str] = field(default_factory=list)
     window_geometry: str = ""
 
     # ---------------------------------------------------------------- io
@@ -192,6 +202,12 @@ class Settings:
             settings.custom_rules = []
         if not isinstance(settings.encoding_chain, list) or not settings.encoding_chain:
             settings.encoding_chain = list(ENCODING_CHAIN)
+        if not isinstance(settings.title_history, list):
+            settings.title_history = []
+        settings.title_history = list(dict.fromkeys(
+            str(title).strip() for title in settings.title_history if str(title).strip()
+        ))
+        settings.tts_voice = str(settings.tts_voice or "").strip() or DEFAULT_TTS_VOICE
         return settings
 
     @classmethod
@@ -204,7 +220,9 @@ class Settings:
             return cls()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        data = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        data["tts_voice"] = str(data.get("tts_voice") or "").strip() or DEFAULT_TTS_VOICE
+        return data
 
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()

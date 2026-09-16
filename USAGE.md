@@ -116,7 +116,7 @@ Removes TTS-unfriendly elements:
 
 Click **"🧹 Clean & Chunk"** to split chapters into TTS-ready chunks.
 
-**Default limit:** 3000 characters per chunk
+**Default limit:** 1200 characters per chunk
 
 **Break preference:**
 1. Paragraph boundaries (`\n\n`)
@@ -137,49 +137,13 @@ Created 45 chunks:
 • Ch 1 part 3/3: 1200 chars
 ```
 
-## Stage 4: Filter & Export
+## Stage 4: Thumbnail & Audiobook
 
-### Filtering by Range
-
-**Range syntax:**
-```
-1-20          → Chapters 1 through 20
-25            → Just chapter 25
-30-40, 45, 50 → Multiple ranges
-```
-
-**Quick blocks:**
-- 10 chapters: Generates 1-10, 11-20, 21-30...
-- 20 chapters: Generates 1-20, 21-40, 41-60...
-- etc.
-
-### Export Formats
-
-**JSON export:**
-```json
-{
-  "chunks": [...],
-  "chapters": [...],
-  "summary": {...}
-}
-```
-
-**TXT export:**
-```
-=== Chương 1: Khởi đầu ===
-
-Text of chunk 1...
-
-Text of chunk 2...
-
-=== Chương 2: Tiếp tục ===
-...
-```
-
-**ZIP batch export:**
-- Multiple ranges in one archive
-- Includes manifest.json
-- One file or folder per range
+Step 4 uses only the TXT/JSON bundle created by Step 3. It displays the first
+chapter, creates a 1280×720 YouTube thumbnail from one selected image, and
+generates/resumes a Vietnamese Edge-TTS audiobook. Output is saved directly in
+the Step 3 title/chapter job folder. FFmpeg must be installed to combine MP3
+chunks into the final audiobook.
 
 ## Common Workflows
 
@@ -188,8 +152,9 @@ Text of chunk 2...
 ```
 1. Load TXT files
 2. Normalize chapters
-3. Clean & chunk
-4. Export JSON
+3. Complete Chinese review
+4. Clean & chunk to create TXT/JSON
+5. Generate thumbnail and/or audiobook
 ```
 
 ### Chinese to Vietnamese Translation
@@ -200,8 +165,8 @@ Text of chunk 2...
 3. Scan Chinese
 4. Translate (manual or AI)
 5. Apply translations
-6. Clean & chunk
-7. Export
+6. Clean & chunk to create TXT/JSON
+7. Generate thumbnail and/or audiobook
 ```
 
 ### TTS Preparation
@@ -209,9 +174,9 @@ Text of chunk 2...
 ```
 1. Load pre-translated text
 2. Normalize chapters
-3. Clean & chunk (with TTS settings)
-4. Filter to desired range
-5. Export TXT for TTS engine
+3. Confirm Step 2 has no Chinese residue
+4. Clean & chunk (with TTS settings)
+5. Generate/resume the Edge-TTS audiobook
 ```
 
 ## Settings
@@ -222,10 +187,10 @@ Settings are auto-saved to:
 
 **Key settings:**
 - Chapter prefix format: `Chương {n}`, `Chapter {n}`, etc.
-- Maximum chunk size: 50-20000 characters
+- Maximum chunk size: defaults to 1200 characters
 - Encoding chain: Order of encoding attempts
 - TTS cleaning rules: What to remove/convert
-- AI translation: Model, batch size, timeout
+- Edge-TTS: voice, concurrency, timeout, and retry counts
 
 ## Diagnostics
 

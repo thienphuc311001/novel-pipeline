@@ -20,8 +20,8 @@ Raw TXT / ZIP
   → Clean Text for TTS
   → Detect Chapters
   → Chunk Text
-  → Select Chapter Ranges
-  → Export TXT / JSON / ZIP
+  → Create Step 3 TXT / JSON job bundle
+  → Generate YouTube thumbnail / resumable audiobook
 ```
 
 ### Stage 1: Chapter Normalization
@@ -46,7 +46,7 @@ Raw TXT / ZIP
 - **Optional AI translation** - Google Gemini (requires API key, fully optional)
 - **Longest-first replacement** - Prevents substring corruption (修炼者 before 修炼)
 
-### Stage 3: Text Cleaning & Chunking
+### Stage 3: Clean, Chunk & Create Job Files
 
 - **TTS cleaning** - Removes control chars, HTML, configurable quotes/brackets
 - **Symbol-to-word conversion** - `&` → "và", `%` → "phần trăm"
@@ -55,14 +55,17 @@ Raw TXT / ZIP
 - **Sentence-aware splitting** - Break preference: paragraph → sentence → clause → space
 - **Hard-split warnings** - Flags chunks where natural breaks weren't possible
 
-### Stage 4: Chapter Range Filtering & Export
+- **Per-job title and chapter** - Defaults from the loaded input and first chapter, both editable
+- **UTF-8 TXT** - Cleaned novel text with normalized headers and no technical metadata
+- **Ordered JSON chunks** - Includes source hashes and TTS-ready chunks with spoken chapter headers
+- **Safe reuse** - Existing job folders are reused while stale artifacts are rejected by fingerprints
 
-- **Range syntax** - `1-20, 25, 30-40` (comma-separated, inclusive)
-- **Quick blocks** - Generate 10/20/25/50/100 chapter blocks automatically
-- **Sequential renumbering** - Repair action for out-of-order chapters
-- **JSON export** - Structured output with metadata
-- **TXT export** - Plain text with configurable headers
-- **ZIP batch export** - Multiple ranges in one archive
+### Stage 4: Thumbnail & Audiobook
+
+- **First chapter preview** - Displays the exact first chapter from the validated Step 3 bundle
+- **YouTube thumbnail** - Center-crops an image into a 1280×720 JPEG with a black title/chapter band
+- **Edge-TTS audiobook** - Resumable ordered MP3 chunks, retries, fallback splitting, and FFmpeg merge
+- **Job folder output** - Contains the TXT, JSON, thumbnail, final MP3, and audio-chunk resume data
 
 ## Installation
 
@@ -70,6 +73,7 @@ Raw TXT / ZIP
 
 - Python 3.11+
 - PyQt6
+- FFmpeg (for joining MP3 chunks)
 
 ### Setup
 

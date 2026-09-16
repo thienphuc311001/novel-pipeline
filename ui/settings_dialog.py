@@ -42,6 +42,9 @@ class SettingsDialog(QDialog):
         "chinese_context_chars",
         "dictionary_enabled",
         "dictionary_paths",
+        "tts_engine",
+        "tts_rate",
+        "title_history",
     }
 
     def __init__(self, settings: Settings, parent=None):
@@ -156,9 +159,14 @@ class SettingsDialog(QDialog):
         self._bool(form, "zip_folder_per_range", "Folder per ZIP range")
 
         form = self._tab("TTS & UI")
-        self._text(form, "tts_engine", "TTS engine")
+        form.addRow("TTS engine", QLabel("Edge-TTS (online)"))
         self._text(form, "tts_voice", "TTS voice")
-        self._int(form, "tts_rate", "TTS rate", 50, 500)
+        self._int(form, "tts_max_concurrency", "Maximum concurrent requests", 1, 100)
+        self._int(form, "tts_timeout_seconds", "Chunk timeout (seconds)", 10, 600)
+        self._int(form, "tts_retry_count", "Attempts per chunk", 1, 10)
+        self._int(form, "tts_fallback_retry_count", "Attempts per fallback part", 1, 10)
+        self._int(form, "thumbnail_bottom_height", "Thumbnail black band (pixels)", 100, 300)
+        self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
         self._int(form, "font_size", "Application font size", 7, 32)
         self._int(form, "max_log_lines", "Maximum diagnostic lines", 100, 100000)
 
@@ -293,6 +301,10 @@ class SettingsDialog(QDialog):
             raise ValueError("Every bracket pair must contain exactly two characters.")
         if settings.min_chunk_chars > settings.max_chunk_chars:
             raise ValueError("Minimum chunk size cannot exceed maximum chunk size.")
+        voice = str(data.get("tts_voice") or "").strip()
+        if not voice:
+            raise ValueError("TTS voice cannot be empty (for example: vi-VN-HoaiMyNeural).")
+        settings.tts_voice = voice
         if settings.use_custom_chapter_regex:
             validate_custom_regex(settings.custom_chapter_regex)
         return settings

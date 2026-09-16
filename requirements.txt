@@ -1,5 +1,7 @@
 # Desktop UI
 PyQt6>=6.5.0
+Pillow>=10.0.0
+edge-tts>=7.2.8
 
 # Optional: For better Unicode handling in some environments
 # unicodedata2>=15.0.0
