@@ -22,6 +22,8 @@ Raw TXT / ZIP
   → Chunk Text
   → Create Step 3 TXT / JSON job bundle
   → Generate YouTube thumbnail / resumable audiobook
+  → Create a hardware-accelerated static-image MP4
+  → Upload to YouTube with desktop OAuth and resumable recovery
 ```
 
 ### Stage 1: Chapter Normalization
@@ -67,13 +69,33 @@ Raw TXT / ZIP
 - **Edge-TTS audiobook** - Resumable ordered MP3 chunks, retries, fallback splitting, and FFmpeg merge
 - **Job folder output** - Contains the TXT, JSON, thumbnail, final MP3, and audio-chunk resume data
 
+### Stage 5: Create Video
+
+- **Automatic inputs** - Uses the current Step 4 thumbnail and audiobook without another upload
+- **Verified acceleration** - Detects the GPU and performs a real test encode before selecting VA-API, Quick Sync, NVENC, AMF, or VideoToolbox
+- **Reliable fallback** - Retries with the next verified encoder and always keeps `libx264` as the CPU fallback
+- **YouTube-ready MP4** - Creates a 1920×1080 H.264 video with live progress and clean cancellation
+- **Input-relative jobs** - By default the job folder is created beside the first Step 1 input; Settings can override the output root
+
+### Stage 6: YouTube Upload
+
+- Uses the current Step 5 MP4 and Step 4 thumbnail automatically.
+- Connects through the system browser; credentials and resumable session URLs live in the OS credential store.
+- Reviews editable title, description, tags, category, visibility, made-for-kids, playlist, and optional publication time.
+- Shows transferred bytes, percentage, and speed, with bounded retries and saved-session recovery.
+- Stores `youtube_upload.json` in the job folder; another video upload requires explicit action.
+- Retries thumbnail and playlist failures independently using the saved video ID.
+- Exposes `final.txt`, `final.json`, `thumbnail.jpg`, and `audiobook.mp3` alongside existing filenames (hard links where supported).
+
+See [YouTube setup and recovery](USAGE.md#step-6-youtube-upload) before first use.
+
 ## Installation
 
 ### Requirements
 
 - Python 3.11+
 - PyQt6
-- FFmpeg (for joining MP3 chunks)
+- FFmpeg and FFprobe (for joining MP3 chunks and creating/validating video)
 
 ### Setup
 
@@ -82,7 +104,7 @@ Raw TXT / ZIP
 sudo pacman -S python-pyqt6
 
 # Or via pip
-pip install PyQt6
+pip install -r requirements.txt
 
 # Clone and run
 git clone <repo>
@@ -98,7 +120,9 @@ python app.py
 2. **Normalize Chapters** - Detect and clean chapter structure
 3. **Scan Chinese** (optional) - Find remaining Chinese text
 4. **Clean & Chunk** - Split into TTS-ready chunks
-5. **Export** - Save as JSON/TXT
+5. **Generate media** - Create the thumbnail and audiobook
+6. **Create video** - Combine the current Step 4 outputs into MP4
+7. **YouTube Upload** - Connect your channel, review metadata, and upload the current MP4
 
 ### Configuration
 

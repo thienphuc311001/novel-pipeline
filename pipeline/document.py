@@ -204,6 +204,34 @@ class Step3ArtifactBundle:
 
 
 @dataclass
+class Step4MediaBundle:
+    """Validated media inputs that Step 5 is allowed to consume."""
+
+    title: str
+    chapter: str
+    slug: str
+    output_dir: str
+    thumbnail_path: str
+    audiobook_path: str
+    video_path: str
+    thumbnail_fingerprint: Dict[str, Any]
+    audiobook_fingerprint: Dict[str, Any]
+
+
+@dataclass
+class Step5UploadBundle:
+    """Current generated video and thumbnail that Step 6 may upload."""
+
+    title: str
+    chapter: str
+    output_dir: str
+    video_path: str
+    thumbnail_path: str
+    video_fingerprint: Dict[str, Any]
+    thumbnail_fingerprint: Dict[str, Any]
+
+
+@dataclass
 class StageStatus:
     key: str
     name: str
@@ -250,13 +278,17 @@ class StageKey:
     CHINESE = "chinese"
     CLEAN_CHUNK = "clean_chunk"
     FILTER_EXPORT = "filter_export"
+    VIDEO = "video"
+    YOUTUBE = "youtube"
 
-    ORDER = [NORMALIZE, CHINESE, CLEAN_CHUNK, FILTER_EXPORT]
+    ORDER = [NORMALIZE, CHINESE, CLEAN_CHUNK, FILTER_EXPORT, VIDEO, YOUTUBE]
     NAMES = {
         NORMALIZE: "Chuẩn hoá chương",
         CHINESE: "Duyệt & dịch Trung",
         CLEAN_CHUNK: "Làm sạch & chia đoạn",
         FILTER_EXPORT: "Thumbnail & audiobook",
+        VIDEO: "Tạo video",
+        YOUTUBE: "Tải lên YouTube",
     }
 
 
@@ -316,11 +348,12 @@ def derive_chapters_from_text(text: str, pattern_set: Any, *, source_name: str =
 
 
 class PipelineDocument:
-    """Mutable working document shared by all four stages."""
+    """Mutable working document shared by every pipeline stage."""
 
     def __init__(self) -> None:
         self.source_bytes: bytes = b""
         self.source_path: str = ""
+        self.input_directory: str = ""
         self.source_files: List[SourceFile] = []
         self.source_encoding: str = ""
         self.entry_names: List[str] = []
@@ -336,17 +369,24 @@ class PipelineDocument:
         self.normalized_revision: int = 0
         self.step2_revision: int = 0
         self.cleaned_text: Optional[str] = None
-        # Step 3/4 job state is intentionally distinct from the text stages.
+        # Step 3/4/5/6 job state is intentionally distinct from the text stages.
         # Existing files are never deleted by invalidation; only the in-memory
         # authority to use them is withdrawn.
         self.job_title: str = ""
         self.job_chapter: str = ""
         self.step3_artifacts: Optional[Step3ArtifactBundle] = None
         self.thumbnail_path: str = ""
+        self.thumbnail_fingerprint: Dict[str, Any] = {}
         self.audio_chunks_dir: str = ""
         self.audiobook_path: str = ""
+        self.audiobook_fingerprint: Dict[str, Any] = {}
         self.tts_manifest_path: str = ""
         self.tts_failures: List[Dict[str, Any]] = []
+        self.video_path: str = ""
+        self.video_fingerprint: Dict[str, Any] = {}
+        self.video_metadata: Dict[str, Any] = {}
+        self._video_source_fingerprint: Dict[str, Any] = {}
+        self.youtube_upload_state: Dict[str, Any] = {}
         self.filtered_output: Optional[str] = None
         self.text: str = ""
         # Kept for compatibility with older callers.  It is never used to
@@ -371,6 +411,7 @@ class PipelineDocument:
         clone = PipelineDocument()
         clone.source_bytes = self.source_bytes
         clone.source_path = self.source_path
+        clone.input_directory = self.input_directory
         clone.source_encoding = self.source_encoding
         clone.entry_names = list(self.entry_names)
         clone.merge_order = list(self.merge_order)
@@ -391,10 +432,17 @@ class PipelineDocument:
         clone.job_chapter = self.job_chapter
         clone.step3_artifacts = copy.copy(self.step3_artifacts)
         clone.thumbnail_path = self.thumbnail_path
+        clone.thumbnail_fingerprint = dict(self.thumbnail_fingerprint)
         clone.audio_chunks_dir = self.audio_chunks_dir
         clone.audiobook_path = self.audiobook_path
+        clone.audiobook_fingerprint = dict(self.audiobook_fingerprint)
         clone.tts_manifest_path = self.tts_manifest_path
         clone.tts_failures = copy.deepcopy(self.tts_failures)
+        clone.video_path = self.video_path
+        clone.video_fingerprint = dict(self.video_fingerprint)
+        clone.video_metadata = copy.deepcopy(self.video_metadata)
+        clone._video_source_fingerprint = copy.deepcopy(self._video_source_fingerprint)
+        clone.youtube_upload_state = copy.deepcopy(self.youtube_upload_state)
         clone.filtered_output = self.filtered_output
         clone.text = self.text
         clone.original_text = self.original_text
@@ -450,8 +498,16 @@ class PipelineDocument:
         self.diagnostics = [d for d in self.diagnostics if d.stage != stage]
 
     # ------------------------------------------------------------ helpers
-    def load_original_input(self, text: str) -> None:
+    def load_original_input(
+        self,
+        text: str,
+        *,
+        source_path: str = "",
+        input_directory: str = "",
+    ) -> None:
         """Start a new run while preserving the loaded text as the source."""
+        self.source_path = source_path or ""
+        self.input_directory = input_directory or ""
         self.original_input_text = text or ""
         self.original_text = self.original_input_text
         self.text = self.original_input_text
@@ -652,13 +708,18 @@ class PipelineDocument:
     def set_step3_artifacts(self, bundle: Step3ArtifactBundle) -> None:
         self.step3_artifacts = bundle
         self.thumbnail_path = ""
+        self.thumbnail_fingerprint = {}
         self.audio_chunks_dir = ""
         self.audiobook_path = ""
+        self.audiobook_fingerprint = {}
         self.tts_manifest_path = ""
         self.tts_failures = []
+        self._clear_video_output()
 
     def set_thumbnail_output(self, path: str) -> None:
         self.thumbnail_path = path or ""
+        self.thumbnail_fingerprint = self._fingerprint_file(self.thumbnail_path)
+        self._clear_video_output()
 
     def set_tts_output(
         self,
@@ -671,15 +732,92 @@ class PipelineDocument:
         self.audio_chunks_dir = audio_chunks_dir
         self.tts_manifest_path = manifest_path
         self.audiobook_path = audiobook_path
+        self.audiobook_fingerprint = self._fingerprint_file(self.audiobook_path)
         self.tts_failures = [dict(item) for item in (failures or [])]
+        self._clear_video_output()
+
+    def set_video_output(self, path: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        media = self.require_step4_outputs()
+        self.video_path = path or ""
+        self.video_fingerprint = self._fingerprint_file(self.video_path)
+        self.video_metadata = dict(metadata or {})
+        self._video_source_fingerprint = self._current_video_source_fingerprint(media)
+        self._clear_youtube_upload_state()
+
+    def _clear_video_output(self) -> None:
+        self.video_path = ""
+        self.video_fingerprint = {}
+        self.video_metadata = {}
+        self._video_source_fingerprint = {}
+        self._clear_youtube_upload_state()
+        if StageKey.VIDEO in self.stage_status:
+            self.stage_status[StageKey.VIDEO] = StageStatus(
+                key=StageKey.VIDEO,
+                name=StageKey.NAMES[StageKey.VIDEO],
+            )
+
+    def set_youtube_upload_state(self, state: Dict[str, Any]) -> None:
+        """Mirror upload state in memory; the upload service owns persistence."""
+        self.youtube_upload_state = copy.deepcopy(state)
+        status = self.stage(StageKey.YOUTUBE)
+        if state.get("status") == "completed" and state.get("video_id"):
+            status.touch("Step 5 video", "YouTube upload completed", {
+                "video_id": state["video_id"], "thumbnail_uploaded": state.get("thumbnail_uploaded", False),
+                "playlist_added": state.get("playlist_added", False),
+            })
+        elif state:
+            status.ran = True
+            status.ok = False
+            status.result_summary = str(state.get("status", "pending"))
+            status.error = str(state.get("error", ""))
+
+    def _clear_youtube_upload_state(self) -> None:
+        """Withdraw UI authority without touching the on-disk duplicate guard."""
+        self.youtube_upload_state = {}
+        if StageKey.YOUTUBE in self.stage_status:
+            self.stage_status[StageKey.YOUTUBE] = StageStatus(
+                key=StageKey.YOUTUBE,
+                name=StageKey.NAMES[StageKey.YOUTUBE],
+            )
+
+    def _current_video_source_fingerprint(self, media: Step4MediaBundle) -> Dict[str, Any]:
+        bundle = self.step3_artifacts
+        if bundle is None:
+            raise PipelineStateError("Step 3 bundle is missing; regenerate the video.")
+        return {
+            "source_revision": bundle.source_revision,
+            "text_sha256": bundle.text_sha256,
+            "chunks_sha256": bundle.chunks_sha256,
+            "thumbnail": dict(media.thumbnail_fingerprint),
+            "audiobook": dict(media.audiobook_fingerprint),
+            "output_path": str(Path(media.video_path).expanduser().resolve()),
+        }
+
+    @staticmethod
+    def _fingerprint_file(path: str) -> Dict[str, Any]:
+        if not path:
+            return {}
+        candidate = Path(path)
+        try:
+            stat = candidate.stat()
+        except OSError:
+            return {}
+        return {
+            "path": str(candidate.expanduser().resolve()),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
 
     def _clear_step3_artifacts(self) -> None:
         self.step3_artifacts = None
         self.thumbnail_path = ""
+        self.thumbnail_fingerprint = {}
         self.audio_chunks_dir = ""
         self.audiobook_path = ""
+        self.audiobook_fingerprint = {}
         self.tts_manifest_path = ""
         self.tts_failures = []
+        self._clear_video_output()
 
     def require_step3_artifacts(self) -> Step3ArtifactBundle:
         """Return the current bundle only when it still matches disk and state."""
@@ -703,6 +841,75 @@ class PipelineDocument:
         except Exception as error:
             raise PipelineStateError(f"Step 3 bundle is unavailable or modified: {error}") from error
         return bundle
+
+    def require_step4_outputs(self) -> Step4MediaBundle:
+        """Return only the current, validated thumbnail and audiobook pair."""
+        bundle = self.require_step3_artifacts()
+        if not self.thumbnail_path:
+            raise PipelineStateError("Generate the Step 4 thumbnail before opening Step 5.")
+        if not self.audiobook_path:
+            raise PipelineStateError("Generate the Step 4 audiobook before opening Step 5.")
+
+        output_dir = Path(bundle.output_dir).expanduser().resolve()
+        current = (
+            ("thumbnail", self.thumbnail_path, self.thumbnail_fingerprint),
+            ("audiobook", self.audiobook_path, self.audiobook_fingerprint),
+        )
+        for label, value, recorded in current:
+            path = Path(value).expanduser()
+            fingerprint = self._fingerprint_file(str(path))
+            if not fingerprint or fingerprint["size"] <= 0:
+                raise PipelineStateError(f"Step 4 {label} is missing or empty: {path}")
+            if path.resolve().parent != output_dir:
+                raise PipelineStateError(f"Step 4 {label} is outside the current job folder.")
+            if not recorded or fingerprint != recorded:
+                raise PipelineStateError(
+                    f"Step 4 {label} changed after it was generated; regenerate it before Step 5."
+                )
+
+        return Step4MediaBundle(
+            title=bundle.title,
+            chapter=bundle.chapter,
+            slug=bundle.slug,
+            output_dir=bundle.output_dir,
+            thumbnail_path=self.thumbnail_path,
+            audiobook_path=self.audiobook_path,
+            video_path=str(output_dir / f"{bundle.slug}.mp4"),
+            thumbnail_fingerprint=dict(self.thumbnail_fingerprint),
+            audiobook_fingerprint=dict(self.audiobook_fingerprint),
+        )
+
+    def require_step5_outputs(self) -> Step5UploadBundle:
+        """Fail closed unless Step 6 would upload the current generated video."""
+        media = self.require_step4_outputs()
+        if not self.video_path:
+            raise PipelineStateError("Create the Step 5 video before opening Step 6.")
+        path = Path(self.video_path).expanduser()
+        fingerprint = self._fingerprint_file(str(path))
+        if not fingerprint or fingerprint["size"] <= 0 or not path.is_file():
+            raise PipelineStateError(f"Step 5 video is missing or empty: {path}")
+        if (
+            path.resolve().parent != Path(media.output_dir).expanduser().resolve()
+            or path.resolve() != Path(media.video_path).expanduser().resolve()
+        ):
+            raise PipelineStateError("Step 5 video is not the generated MP4 for the current job.")
+        if not self.video_fingerprint or fingerprint != self.video_fingerprint:
+            raise PipelineStateError(
+                "Step 5 video changed after it was generated; create it again before Step 6."
+            )
+        if self._video_source_fingerprint != self._current_video_source_fingerprint(media):
+            raise PipelineStateError(
+                "Step 5 video no longer matches the current Step 4 outputs; create it again."
+            )
+        return Step5UploadBundle(
+            title=media.title,
+            chapter=media.chapter,
+            output_dir=media.output_dir,
+            video_path=self.video_path,
+            thumbnail_path=media.thumbnail_path,
+            video_fingerprint=dict(self.video_fingerprint),
+            thumbnail_fingerprint=dict(media.thumbnail_fingerprint),
+        )
 
     def chunk_fingerprint(self) -> str:
         payload = "\n".join(
@@ -757,6 +964,8 @@ class PipelineDocument:
         index = StageKey.ORDER.index(stage_key)
         for key in StageKey.ORDER[index + 1:]:
             self.stage_status[key] = StageStatus(key=key, name=StageKey.NAMES[key])
+        if index < StageKey.ORDER.index(StageKey.YOUTUBE):
+            self._clear_youtube_upload_state()
         self.diagnostics = [d for d in self.diagnostics if d.stage in StageKey.ORDER[: index + 1]]
         if stage_key in (StageKey.NORMALIZE, StageKey.CHINESE):
             self.chunks = []

@@ -16,7 +16,8 @@
    - Tab 1: Normalize chapters
    - Tab 2: Review Chinese text (optional)
    - Tab 3: Clean and chunk
-   - Tab 4: Filter and export
+   - Tab 4: Generate thumbnail and audiobook
+   - Tab 5: Create the final MP4
 
 ## Stage 1: Input & Normalize
 
@@ -145,6 +146,23 @@ generates/resumes a Vietnamese Edge-TTS audiobook. Output is saved directly in
 the Step 3 title/chapter job folder. FFmpeg must be installed to combine MP3
 chunks into the final audiobook.
 
+Unless **Output folder override** is set in Settings, the Step 3 job folder is
+created beside the first TXT/ZIP selected in Step 1. Steps 4 and 5 continue to
+use that same folder.
+
+## Stage 5: Create Video
+
+Step 5 automatically uses the current Step 4 thumbnail and audiobook. It
+detects the installed GPU, drivers, FFmpeg hardware backends, and H.264
+encoders, then performs a real short encode before selecting an encoder. A
+failed hardware encoder falls back to another verified option and finally to
+`libx264`.
+
+Click **Create Video** to produce a 1920×1080 H.264 MP4. The image is preserved
+without stretching, FFmpeg progress and speed remain visible, and **Cancel**
+stops only the partial render. The completed file is saved automatically as
+`<title>_<chapter>.mp4` in the current job folder.
+
 ## Common Workflows
 
 ### Basic Novel Processing
@@ -155,6 +173,7 @@ chunks into the final audiobook.
 3. Complete Chinese review
 4. Clean & chunk to create TXT/JSON
 5. Generate thumbnail and/or audiobook
+6. Create MP4 video
 ```
 
 ### Chinese to Vietnamese Translation
@@ -167,6 +186,7 @@ chunks into the final audiobook.
 5. Apply translations
 6. Clean & chunk to create TXT/JSON
 7. Generate thumbnail and/or audiobook
+8. Create MP4 video
 ```
 
 ### TTS Preparation
@@ -177,6 +197,7 @@ chunks into the final audiobook.
 3. Confirm Step 2 has no Chinese residue
 4. Clean & chunk (with TTS settings)
 5. Generate/resume the Edge-TTS audiobook
+6. Create the final MP4
 ```
 
 ## Settings
@@ -191,6 +212,7 @@ Settings are auto-saved to:
 - Encoding chain: Order of encoding attempts
 - TTS cleaning rules: What to remove/convert
 - Edge-TTS: voice, concurrency, timeout, and retry counts
+- Output folder override: leave blank to save beside the Step 1 input
 
 ## Diagnostics
 
@@ -249,6 +271,36 @@ The bottom status panel shows:
 - Verify text actually contains Han characters
 - Check encoding (must decode correctly)
 - Look at the Unicode ranges in source
+
+## Step 6: YouTube Upload
+
+Create the Step 5 video, then click **Continue to Step 6** (direct tab selection uses the same validation). The current MP4 and Step 4 thumbnail appear automatically. Step 6 never selects a separate video or renders another MP4.
+
+Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings → YouTube** once; see [installation setup](INSTALL.md#optional-youtube-desktop-oauth). Click **Connect YouTube Account** and authorize in your system browser. The panel shows the connected email and channel. **Disconnect** removes the local saved credentials; it does not remove previously uploaded videos or job records.
+
+Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
+
+Click **Upload to YouTube**. Progress shows bytes transferred, percentage, and upload speed. Temporary upload failures use bounded backoff and query the server's received position before retransmission. **Cancel** stops at the next safe request boundary, retaining resumable recovery data. The current HTTP request has a bounded timeout. Upstream controls are disabled while an operation runs to preserve its inputs.
+
+`youtube_upload.json` persists video ID/URL, metadata, byte position, and independent video/thumbnail/playlist outcomes. Resumable URLs and OAuth tokens remain in the OS credential store. **Resume Upload** queries that existing session rather than creating a new video. Resume uses the metadata originally sent; edit metadata for a new upload only. If a session expires or completion cannot be confirmed, the app stops. Check YouTube Studio to establish the previous outcome before explicitly using **Upload Again**. It never automatically creates another upload from an uncertain state.
+
+After video upload, thumbnail and optional playlist operations run separately. A failure preserves the video ID. Use **Retry Thumbnail** or **Retry Playlist**; these controls do not upload the video again. An uncertain playlist insert is checked for existing membership before another insertion. An explicit retry rechecks after bounded delays and inserts only if the video remains absent; it does not automatically repeat an uncertain playlist write. If YouTube cannot confirm membership, check the playlist and retry later.
+
+A completed job shows **This job has already been uploaded**, its ID, URL, actual visibility, thumbnail status, and playlist status. **Open YouTube Video** opens the URL; **Copy URL** copies it. **Upload Again** requires a separate explicit confirmation. Keep `youtube_upload.json` and the secure credential store for recovery; corrupt/missing session records cannot silently start another copy.
+
+Upload preparation exposes this layout without renaming the app's existing artifacts:
+
+```text
+<title>_<chapter>/
+    final.txt
+    final.json
+    thumbnail.jpg
+    audiobook.mp3
+    <title>_<chapter>.mp4
+    youtube_upload.json
+```
+
+The four convenience filenames use hard links when supported, so large MP3s do not require another copy. Other filesystems use cancellable atomic copies. Existing job-derived names and the audio-chunk resume directory remain available.
 
 ## Keyboard Shortcuts
 

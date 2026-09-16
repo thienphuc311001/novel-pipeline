@@ -5,7 +5,8 @@
 - Python 3.11 or newer
 - PyQt6
 - Pillow and edge-tts (installed by `requirements.txt`)
-- FFmpeg on your system PATH (required to combine audiobook MP3 chunks)
+- FFmpeg and FFprobe on your system PATH (required for audiobook merge and Step 5 video)
+- Optional GPU drivers/runtime for VA-API, Quick Sync, NVENC, AMF, or VideoToolbox
 - ~10 MB disk space
 
 ## Quick Install
@@ -81,7 +82,7 @@ venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Linux example for the MP3 merge tool
+# Linux example for the MP3 merge and video tools (includes ffprobe)
 # sudo apt install ffmpeg
 
 # Run
@@ -109,6 +110,21 @@ To enable AI translation:
 4. Save settings
 
 The app works fully offline without this feature.
+
+## Optional: YouTube desktop OAuth
+
+Install the project requirements in the same environment used to run `app.py`:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python app.py
+```
+
+Enable YouTube Data API v3 in Google Cloud, configure the consent screen, add your account as a test user if the project is in testing, and create an OAuth client of type **Desktop app**. Download its client JSON and select it once in **Settings → YouTube**. The JSON path is a setting; access/refresh tokens are stored only in the OS credential store.
+
+Linux requires an unlocked Secret Service or KWallet; macOS uses Keychain and Windows uses Credential Manager. The app reports unavailable/locked credential stores and does not substitute plaintext token files. Linux keyring support (`SecretStorage`/`jeepney`) is installed with the Python requirements.
+
+Google projects may need OAuth verification/API auditing for production use. Google restricts uploads from some unverified API projects to private visibility; the app reports the visibility returned by YouTube. See [desktop OAuth setup](https://developers.google.com/identity/protocols/oauth2/native-app) and [YouTube videos.insert restrictions](https://developers.google.com/youtube/v3/docs/videos/insert).
 
 ## Troubleshooting
 

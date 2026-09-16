@@ -3,5 +3,11 @@ PyQt6>=6.5.0
 Pillow>=10.0.0
 edge-tts>=7.2.8
 
+# YouTube desktop OAuth, secure credential storage, and resumable uploads
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+keyring>=25.0.0
+requests>=2.31.0
+
 # Optional: For better Unicode handling in some environments
 # unicodedata2>=15.0.0

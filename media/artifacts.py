@@ -50,6 +50,7 @@ def artifact_paths(output_root: Path, title: str, chapter: str) -> Dict[str, Pat
         "audio_dir": directory / f"{slug}_audio_chunks",
         "manifest": directory / f"{slug}_audio_chunks" / "manifest.json",
         "audiobook": directory / f"{slug}_audiobook.mp3",
+        "video": directory / f"{slug}.mp4",
     }
 
 
@@ -79,6 +80,48 @@ def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
         path,
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False).encode("utf-8"),
     )
+
+
+def publish_job_file_names(bundle: Step3ArtifactBundle, media, cancel_event) -> None:
+    """Expose the requested final job layout while keeping existing filenames.
+
+    Same-folder hard links avoid copying large audiobooks. Filesystems without
+    hard links use a cancellable copy. Each alias replaces atomically only after
+    its complete contents are available; source artifacts remain authoritative.
+    """
+    from media.youtube import UploadCancelled
+
+    job = Path(bundle.output_dir).resolve()
+    sources = {
+        "final.txt": Path(bundle.txt_path), "final.json": Path(bundle.json_path),
+        "thumbnail.jpg": Path(media.thumbnail_path), "audiobook.mp3": Path(media.audiobook_path),
+    }
+    for name, source in sources.items():
+        if cancel_event.is_set():
+            raise UploadCancelled("Preparation cancelled. Existing job files were preserved.")
+        if source.resolve().parent != job or not source.is_file() or source.stat().st_size <= 0:
+            raise PipelineStateError("Final job files must come from the current validated pipeline outputs.")
+        destination = job / name
+        if destination.exists() and os.path.samefile(source, destination):
+            continue
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=job)
+        os.close(descriptor)
+        try:
+            os.unlink(temporary)
+            try:
+                os.link(source, temporary)
+            except OSError:
+                with source.open("rb") as reader, open(temporary, "wb") as writer:
+                    for block in iter(lambda: reader.read(1024 * 1024), b""):
+                        if cancel_event.is_set():
+                            raise UploadCancelled("Preparation cancelled. Existing job files were preserved.")
+                        writer.write(block)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def _canonical_cleaned_text(document: PipelineDocument) -> str:

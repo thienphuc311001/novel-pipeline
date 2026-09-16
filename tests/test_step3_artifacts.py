@@ -64,6 +64,34 @@ class Step3ArtifactTests(unittest.TestCase):
             self.assertIsNone(document.step3_artifacts)
             self.assertTrue(Path(bundle.txt_path).exists())
 
+    def test_step4_media_is_fingerprinted_for_step5(self):
+        document = self.make_document()
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = write_step3_artifacts(
+                document, Path(directory), title=document.job_title,
+                chapter=document.job_chapter, chunk_limit=1200,
+            )
+            document.set_step3_artifacts(bundle)
+            thumbnail = Path(bundle.output_dir) / "cover_youtube.jpg"
+            audiobook = Path(bundle.output_dir) / f"{bundle.slug}_audiobook.mp3"
+            thumbnail.write_bytes(b"jpeg")
+            audiobook.write_bytes(b"mp3")
+            document.set_thumbnail_output(str(thumbnail))
+            document.set_tts_output(
+                audio_chunks_dir=str(Path(bundle.output_dir) / "audio"),
+                manifest_path=str(Path(bundle.output_dir) / "manifest.json"),
+                audiobook_path=str(audiobook),
+            )
+
+            media = document.require_step4_outputs()
+            self.assertEqual(media.thumbnail_path, str(thumbnail))
+            self.assertEqual(media.audiobook_path, str(audiobook))
+            self.assertEqual(media.video_path, str(Path(bundle.output_dir) / f"{bundle.slug}.mp4"))
+
+            audiobook.write_bytes(b"changed")
+            with self.assertRaises(PipelineStateError):
+                document.require_step4_outputs()
+
 
 if __name__ == "__main__":
     unittest.main()

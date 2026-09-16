@@ -152,7 +152,7 @@ class SettingsDialog(QDialog):
         self._int(form, "min_chunk_chars", "Minimum chunk characters", 50, 20000)
         self._int(form, "max_chunk_chars", "Maximum chunk characters", 50, 20000)
         self._bool(form, "chunk_by_chapters", "Keep chunks inside chapters")
-        self._path(form, "output_dir", "Default output folder")
+        self._path(form, "output_dir", "Output folder override (blank = input folder)")
         self._combo(form, "export_encoding", "Export encoding", {"UTF-8": "utf-8", "UTF-8 with BOM": "utf-8-sig", "UTF-16": "utf-16"})
         self._text(form, "filename_template", "Filename template")
         self._bool(form, "zip_include_manifest", "Include ZIP manifest")
@@ -169,6 +169,26 @@ class SettingsDialog(QDialog):
         self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
         self._int(form, "font_size", "Application font size", 7, 32)
         self._int(form, "max_log_lines", "Maximum diagnostic lines", 100, 100000)
+
+        form = self._tab("YouTube")
+        note = QLabel(
+            "Enable YouTube Data API v3 in your Google Cloud project and create an "
+            "OAuth client of type Desktop app. Choose its downloaded JSON once. "
+            "Sign-in tokens are stored in your operating system credential store."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        self._text(form, "youtube_client_secrets_path", "Desktop OAuth client JSON")
+        browse = QPushButton("Choose OAuth client JSON…")
+        browse.clicked.connect(self._browse_youtube_client)
+        form.addRow("", browse)
+
+    def _browse_youtube_client(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Desktop OAuth client configuration", "", "JSON files (*.json)"
+        )
+        if path:
+            self.controls["youtube_client_secrets_path"].setText(path)
 
     # ------------------------------------------------------------ controls
     def _register(

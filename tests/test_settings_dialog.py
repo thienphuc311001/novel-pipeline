@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,7 +27,7 @@ class SettingsDialogTests(unittest.TestCase):
         expected = set(Settings.__dataclass_fields__) - SettingsDialog.HIDDEN_FIELDS
 
         self.assertEqual(dialog.editable_fields(), expected)
-        self.assertEqual(dialog.tabs.count(), 7)
+        self.assertEqual(dialog.tabs.count(), 8)
 
     def test_collects_changed_values(self):
         dialog = SettingsDialog(Settings())
@@ -118,7 +119,9 @@ class SettingsDialogTests(unittest.TestCase):
         window.close()
 
     def test_cleaning_settings_affect_step3(self):
-        settings = Settings(symbol_map={"%": " phần trăm "}, remove_html=True)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        settings = Settings(output_dir=temporary.name, symbol_map={"%": " phần trăm "}, remove_html=True)
         window = MainWindow(settings)
         raw = "Chương 1\n<p>Giá trị 10%</p>"
         window.document.load_original_input(raw)

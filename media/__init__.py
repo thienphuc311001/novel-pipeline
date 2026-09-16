@@ -1,4 +1,4 @@
-"""Step 3 artifact, thumbnail, and audiobook helpers."""
+"""Step 3 artifact, thumbnail, audiobook, and video helpers."""
 
 from .artifacts import (
     artifact_paths,

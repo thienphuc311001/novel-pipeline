@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -80,6 +81,207 @@ class _MergeWorker(QObject):
             self.completed.emit(self.processor, self.result)
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class _VideoDetectionWorker(QObject):
+    """Run system inspection and real encoder probes away from the UI thread."""
+
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            from media.video import detect_video_capabilities
+
+            self.completed.emit(detect_video_capabilities())
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class _VideoRenderSession(QObject):
+    """Drive ordered FFmpeg encoder attempts through an asynchronous QProcess."""
+
+    progress = pyqtSignal(object)
+    status = pyqtSignal(str)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, capabilities, media, duration: float, *, audio_copy: bool, parent=None):
+        super().__init__(parent)
+        self.capabilities = capabilities
+        self.media = media
+        self.duration = float(duration)
+        self.audio_copy = bool(audio_copy)
+        self.candidates = list(capabilities.verified_candidates)
+        self.attempt_index = -1
+        self.process: QProcess | None = None
+        self.partial_path = Path(media.video_path).with_name(
+            f".{Path(media.video_path).stem}.part.mp4"
+        )
+        self._progress_buffer = ""
+        self._progress_state = {}
+        self._stderr = ""
+        self._last_progress = {"elapsed": 0.0, "percentage": 0.0, "speed": 0.0, "eta": 0.0}
+        self._cancel_requested = False
+        self._attempt_handled = False
+        self.attempt_errors: list[str] = []
+
+    def start(self) -> None:
+        if not self.candidates:
+            self.failed.emit("No verified H.264 encoder is available.")
+            return
+        self.partial_path.parent.mkdir(parents=True, exist_ok=True)
+        self._start_next_attempt()
+
+    def _start_next_attempt(self) -> None:
+        from media.video import build_video_command
+
+        self.attempt_index += 1
+        if self.attempt_index >= len(self.candidates):
+            details = "\n\n".join(self.attempt_errors) or "All verified encoders failed."
+            self.failed.emit(details)
+            return
+        candidate = self.candidates[self.attempt_index]
+        self.partial_path.unlink(missing_ok=True)
+        self._progress_buffer = ""
+        self._progress_state = {}
+        self._stderr = ""
+        self._attempt_handled = False
+        self._last_progress = {"elapsed": 0.0, "percentage": 0.0, "speed": 0.0, "eta": 0.0}
+        self.progress.emit(dict(self._last_progress))
+        self.status.emit(
+            f"Rendering with {candidate.name} ({self.attempt_index + 1}/{len(self.candidates)})…"
+        )
+        command = build_video_command(
+            self.capabilities.ffmpeg_path,
+            candidate,
+            Path(self.media.thumbnail_path),
+            Path(self.media.audiobook_path),
+            self.partial_path,
+            audio_copy=self.audio_copy,
+        )
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        process.readyReadStandardOutput.connect(lambda current=process: self._read_progress(current))
+        process.readyReadStandardError.connect(lambda current=process: self._read_error(current))
+        process.finished.connect(
+            lambda code, status, current=process: self._on_finished(current, code, status)
+        )
+        process.errorOccurred.connect(
+            lambda error, current=process: self._on_process_error(current, error)
+        )
+        self.process = process
+        process.start(command[0], command[1:])
+
+    def _read_progress(self, process: QProcess) -> None:
+        from media.video import parse_progress_line
+
+        if process is not self.process:
+            return
+        self._progress_buffer += bytes(process.readAllStandardOutput()).decode("utf-8", "replace")
+        lines = self._progress_buffer.split("\n")
+        self._progress_buffer = lines.pop()
+        for line in lines:
+            update = parse_progress_line(self._progress_state, line, self.duration)
+            if update is not None:
+                self._last_progress = update
+                self.progress.emit(dict(update))
+
+    def _read_error(self, process: QProcess) -> None:
+        if process is not self.process:
+            return
+        self._stderr += bytes(process.readAllStandardError()).decode("utf-8", "replace")
+        self._stderr = self._stderr[-30000:]
+
+    def _on_process_error(self, process: QProcess, error) -> None:
+        if process is not self.process:
+            return
+        if error == QProcess.ProcessError.FailedToStart:
+            self._handle_attempt_failure("FFmpeg process could not be started.")
+
+    def _on_finished(self, process: QProcess, exit_code: int, _exit_status) -> None:
+        if process is not self.process:
+            return
+        if self._attempt_handled:
+            return
+        self._attempt_handled = True
+        if self._cancel_requested:
+            self.partial_path.unlink(missing_ok=True)
+            self.cancelled.emit()
+            return
+        candidate = self.candidates[self.attempt_index]
+        if exit_code != 0:
+            self._handle_attempt_failure(
+                self._stderr.strip() or f"FFmpeg exited with status {exit_code}."
+            )
+            return
+        try:
+            from media.video import VideoRenderResult, validate_rendered_video
+
+            duration = validate_rendered_video(
+                self.partial_path, self.duration, self.capabilities.ffprobe_path
+            )
+            final_path = Path(self.media.video_path)
+            os.replace(self.partial_path, final_path)
+            result = VideoRenderResult(
+                output_path=str(final_path),
+                duration=duration,
+                file_size=final_path.stat().st_size,
+                encoder=candidate.name,
+                backend=candidate.backend,
+                render_speed=float(self._last_progress.get("speed") or 0.0),
+                audio_mode="copy" if self.audio_copy else "aac-192k",
+                attempt_errors=list(self.attempt_errors),
+            )
+            self.completed.emit(result)
+        except Exception as error:
+            self._handle_attempt_failure(str(error))
+
+    def _handle_attempt_failure(self, message: str) -> None:
+        if self._attempt_handled and self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self._attempt_handled = True
+        self.partial_path.unlink(missing_ok=True)
+        if self._cancel_requested:
+            self.cancelled.emit()
+            return
+        candidate = self.candidates[self.attempt_index]
+        detail = f"{candidate.name} failed: {message}"
+        self.attempt_errors.append(detail)
+        fatal_markers = (
+            "no space left on device",
+            "permission denied",
+            "read-only file system",
+            "no such file or directory",
+            "error opening input",
+            "invalid data found when processing input",
+        )
+        if any(marker in message.lower() for marker in fatal_markers):
+            self.failed.emit(detail)
+            return
+        if self.attempt_index + 1 < len(self.candidates):
+            next_name = self.candidates[self.attempt_index + 1].name
+            summary = message.strip().splitlines()[0] if message.strip() else "unknown error"
+            self.status.emit(
+                f"{candidate.name} failed: {summary}\nFalling back to {next_name}…"
+            )
+            QTimer.singleShot(0, self._start_next_attempt)
+        else:
+            self.failed.emit("\n\n".join(self.attempt_errors))
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        process = self.process
+        if process is None or process.state() == QProcess.ProcessState.NotRunning:
+            self.partial_path.unlink(missing_ok=True)
+            self.cancelled.emit()
+            return
+        process.terminate()
+        QTimer.singleShot(
+            3000,
+            lambda: process.kill() if process.state() != QProcess.ProcessState.NotRunning else None,
+        )
 
 
 class _FailedChunksDialog(QDialog):
@@ -164,7 +366,7 @@ class _FailedChunksDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    """Main window with four-stage pipeline tabs."""
+    """Main window with the complete six-stage pipeline."""
 
     def __init__(self, settings: Settings, parent=None, *, master_dictionary=None):
         super().__init__(parent)
@@ -182,6 +384,13 @@ class MainWindow(QMainWindow):
         self._tts_processor = None
         self._merge_thread = None
         self._merge_worker = None
+        self._video_detection_thread = None
+        self._video_detection_worker = None
+        self._video_capabilities = None
+        self._video_detection_error = ""
+        self._video_media = None
+        self._video_audio_probe = None
+        self._video_render_session = None
         
         self.setWindowTitle("Novel Pipeline v2")
         self.resize(1400, 900)
@@ -233,6 +442,16 @@ class MainWindow(QMainWindow):
         # Stage 4: Thumbnail & Audiobook
         self.stage4_widget = self._create_stage4_tab()
         self.tabs.addTab(self.stage4_widget, "4️⃣ Thumbnail & Audiobook")
+
+        # Stage 5: hardware-adaptive static-image video
+        self.stage5_widget = self._create_stage5_tab()
+        self.tabs.addTab(self.stage5_widget, "5️⃣ Create Video")
+        from ui.youtube_tab import YouTubeTab
+
+        self.stage6_widget = YouTubeTab(lambda: self.document, self.settings, self)
+        self.stage6_widget.busy_changed.connect(self._set_youtube_busy)
+        self.stage6_widget.diagnostic.connect(self._log)
+        self.tabs.addTab(self.stage6_widget, "6️⃣ YouTube Upload")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         
         # Pipeline workspace and diagnostics share a draggable vertical split.
@@ -506,7 +725,83 @@ class MainWindow(QMainWindow):
         self.stage4_output = QTextEdit()
         self.stage4_output.setReadOnly(True)
         layout.addWidget(self.stage4_output)
+
+        self.stage4_continue_btn = QPushButton("Continue to Step 5 →")
+        self.stage4_continue_btn.setEnabled(False)
+        self.stage4_continue_btn.clicked.connect(self._continue_to_stage5)
+        layout.addWidget(self.stage4_continue_btn)
         
+        return widget
+
+    def _create_stage5_tab(self) -> QWidget:
+        """Create an MP4 from the authoritative Step 4 thumbnail and audio."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        inputs_group = QGroupBox("Step 4 Inputs")
+        inputs_form = QFormLayout(inputs_group)
+        self.stage5_thumbnail_label = QLabel("—")
+        self.stage5_audio_label = QLabel("—")
+        self.stage5_output_label = QLabel("—")
+        for label in (
+            self.stage5_thumbnail_label,
+            self.stage5_audio_label,
+            self.stage5_output_label,
+        ):
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inputs_form.addRow("Thumbnail", self.stage5_thumbnail_label)
+        inputs_form.addRow("Audio", self.stage5_audio_label)
+        inputs_form.addRow("Output", self.stage5_output_label)
+        layout.addWidget(inputs_group)
+
+        capabilities_group = QGroupBox("GPU & FFmpeg Detection")
+        capabilities_layout = QVBoxLayout(capabilities_group)
+        self.stage5_capabilities = QTextEdit()
+        self.stage5_capabilities.setReadOnly(True)
+        self.stage5_capabilities.setMaximumHeight(220)
+        self.stage5_capabilities.setPlainText("Open Step 5 to detect video capabilities.")
+        capabilities_layout.addWidget(self.stage5_capabilities)
+        layout.addWidget(capabilities_group)
+
+        render_group = QGroupBox("Video Rendering")
+        render_layout = QVBoxLayout(render_group)
+        render_info = QFormLayout()
+        self.stage5_resolution_label = QLabel("1920×1080 · 1 fps")
+        self.stage5_duration_label = QLabel("—")
+        render_info.addRow("Resolution", self.stage5_resolution_label)
+        render_info.addRow("Estimated duration", self.stage5_duration_label)
+        render_layout.addLayout(render_info)
+
+        actions = QHBoxLayout()
+        self.stage5_create_btn = QPushButton("🎬 Create Video")
+        self.stage5_create_btn.setEnabled(False)
+        self.stage5_create_btn.clicked.connect(self._on_create_video)
+        actions.addWidget(self.stage5_create_btn)
+        self.stage5_cancel_btn = QPushButton("Cancel")
+        self.stage5_cancel_btn.setEnabled(False)
+        self.stage5_cancel_btn.clicked.connect(self._on_cancel_video)
+        actions.addWidget(self.stage5_cancel_btn)
+        self.stage5_continue_btn = QPushButton("Continue to Step 6 →")
+        self.stage5_continue_btn.setEnabled(False)
+        self.stage5_continue_btn.clicked.connect(self._continue_to_stage6)
+        actions.addWidget(self.stage5_continue_btn)
+        actions.addStretch()
+        render_layout.addLayout(actions)
+
+        self.stage5_progress = QProgressBar()
+        self.stage5_progress.setRange(0, 1000)
+        self.stage5_progress.setValue(0)
+        self.stage5_progress.setFormat("0.0%")
+        render_layout.addWidget(self.stage5_progress)
+        self.stage5_status = QLabel("Ready")
+        self.stage5_status.setWordWrap(True)
+        render_layout.addWidget(self.stage5_status)
+        layout.addWidget(render_group)
+
+        self.stage5_result = QTextEdit()
+        self.stage5_result.setReadOnly(True)
+        layout.addWidget(self.stage5_result)
         return widget
 
     def _on_load(self):
@@ -542,7 +837,12 @@ class MainWindow(QMainWindow):
                 )
                 result.diagnostics.extend(inserted)
             self.document.source_files = result.files
-            self.document.load_original_input(result.text)
+            first_path = Path(paths[0]).expanduser().resolve()
+            self.document.load_original_input(
+                result.text,
+                source_path=str(first_path),
+                input_directory=str(first_path.parent),
+            )
             default_title = Path(paths[0]).stem or "Novel Title"
             self._set_job_editors(default_title, "")
             self.document.diagnostics.extend(result.diagnostics)
@@ -562,6 +862,9 @@ class MainWindow(QMainWindow):
             self._set_editor_text(self.stage3_output, "")
             self._set_editor_text(self.stage4_output, "")
             self._refresh_stage4_ui()
+            self._video_media = None
+            self._video_audio_probe = None
+            self._refresh_stage5_ui()
             self._update_status()
         except Exception as error:
             self._error(f"Load failed: {error}")
@@ -579,6 +882,8 @@ class MainWindow(QMainWindow):
                 self.document.original_input_text, patterns, options, source_name="merged"
             )
             normalized_text = self.document.set_normalized_output(chapters)
+            self._video_media = None
+            self._video_audio_probe = None
             self.document.diagnostics.extend(diagnostics)
             self.document.stage("normalize").touch(
                 f"{len(self.document.source_files)} sources",
@@ -591,6 +896,8 @@ class MainWindow(QMainWindow):
                 self._set_job_editors(self.document.job_title or "Novel Title", chapters[0].header_line)
             self.stage2_continue_btn.setEnabled(False)
             self.stage2_source_label.setText("Source: Step 1 ready — open Step 2 to review")
+            self._refresh_stage4_ui()
+            self._refresh_stage5_ui()
             self._update_status()
         except Exception as error:
             # Do not leave a previous successful normalized output eligible
@@ -607,6 +914,10 @@ class MainWindow(QMainWindow):
             self._set_editor_text(self.stage1_output, "")
             self.stage1_output.setReadOnly(True)
             self.stage2_continue_btn.setEnabled(False)
+            self._video_media = None
+            self._video_audio_probe = None
+            self._refresh_stage4_ui()
+            self._refresh_stage5_ui()
             self._error(f"Normalize failed: {error}")
             import traceback
             traceback.print_exc()
@@ -705,12 +1016,14 @@ class MainWindow(QMainWindow):
             self.document.diagnostics.extend(diagnostics)
             bundle = write_step3_artifacts(
                 self.document,
-                self.settings.resolved_output_dir(),
+                self.settings.resolved_output_dir(self.document.input_directory),
                 title=title,
                 chapter=chapter_label,
                 chunk_limit=limit,
             )
             self.document.set_step3_artifacts(bundle)
+            self._video_media = None
+            self._video_audio_probe = None
             self.document.stage("clean_chunk").touch(
                 f"{len(self.document.chapters)} chapters", f"{len(chunks)} chunks",
                 {
@@ -726,6 +1039,7 @@ class MainWindow(QMainWindow):
             )
             self.stage3_continue_btn.setEnabled(True)
             self._refresh_stage4_ui()
+            self._refresh_stage5_ui()
             self._update_status()
         except PipelineStateError as error:
             self._error(str(error))
@@ -741,7 +1055,10 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export chunks as JSON",
-            str(self.settings.resolved_output_dir() / self._default_export_filename()),
+            str(
+                self.settings.resolved_output_dir(self.document.input_directory)
+                / self._default_export_filename()
+            ),
             "JSON Files (*.json);;All Files (*)",
         )
         if not path:
@@ -824,7 +1141,10 @@ class MainWindow(QMainWindow):
         )
         if changed:
             self.stage3_continue_btn.setEnabled(False)
+            self._video_media = None
+            self._video_audio_probe = None
             self._refresh_stage4_ui()
+            self._refresh_stage5_ui()
 
     def _refresh_stage4_ui(self) -> None:
         bundle = self.document.step3_artifacts
@@ -836,6 +1156,7 @@ class MainWindow(QMainWindow):
             self.stage4_thumbnail_btn.setEnabled(False)
             self.stage4_tts_btn.setEnabled(False)
             self.stage4_failed_chunks_btn.setEnabled(False)
+            self.stage4_continue_btn.setEnabled(False)
             self.stage4_thumbnail_path.setText("")
             return
         self.stage4_source_label.setText(f"TXT: {bundle.txt_path}\nJSON: {bundle.json_path}")
@@ -849,6 +1170,12 @@ class MainWindow(QMainWindow):
         self.stage4_tts_btn.setEnabled(not running)
         self.stage4_cancel_tts_btn.setEnabled(tts_running)
         self.stage4_failed_chunks_btn.setEnabled(bool(self.document.tts_failures))
+        try:
+            self.document.require_step4_outputs()
+            step5_ready = True
+        except PipelineStateError:
+            step5_ready = False
+        self.stage4_continue_btn.setEnabled(step5_ready and not running)
         if self.document.thumbnail_path and Path(self.document.thumbnail_path).is_file():
             self._show_thumbnail(Path(self.document.thumbnail_path))
         else:
@@ -909,6 +1236,10 @@ class MainWindow(QMainWindow):
             self.document.set_thumbnail_output(str(output))
             self._show_thumbnail(output)
             self._log(f"✓ Đã tạo thumbnail: {output}")
+            self._video_media = None
+            self._video_audio_probe = None
+            self._refresh_stage4_ui()
+            self._refresh_stage5_ui()
         except Exception as error:
             self._error(f"Thumbnail failed: {error}")
 
@@ -1048,6 +1379,8 @@ class MainWindow(QMainWindow):
             audiobook_path=result.audiobook_path,
             failures=[item.__dict__ for item in result.failures],
         )
+        self._video_media = None
+        self._video_audio_probe = None
         if result.audiobook_path:
             self.document.stage(StageKey.FILTER_EXPORT).touch(
                 f"{len(result.successful_orders)} audio chunks",
@@ -1097,6 +1430,327 @@ class MainWindow(QMainWindow):
         self._tts_thread = None
         self._tts_worker = None
         self._tts_processor = None
+
+    # -------------------------------------------------------------- Step 5
+    def _enter_stage5(self) -> bool:
+        try:
+            self._video_media = self.document.require_step4_outputs()
+        except PipelineStateError as error:
+            self._error(str(error))
+            return False
+        self._refresh_stage5_ui()
+        if self._video_capabilities is None and self._video_detection_thread is None:
+            self._start_video_detection()
+        elif self._video_capabilities is not None:
+            self._update_video_audio_probe()
+            self._refresh_stage5_ui()
+        return True
+
+    def _start_video_detection(self) -> None:
+        self._video_detection_error = ""
+        self.stage5_capabilities.setPlainText(
+            "Detecting GPU devices, FFmpeg backends, and testing H.264 encoders…"
+        )
+        self.stage5_status.setText("Detecting video capabilities…")
+        self.stage5_create_btn.setEnabled(False)
+        thread = QThread(self)
+        worker = _VideoDetectionWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._on_video_detection_completed)
+        worker.failed.connect(self._on_video_detection_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_video_detection_finished)
+        self._video_detection_thread = thread
+        self._video_detection_worker = worker
+        thread.start()
+
+    def _on_video_detection_completed(self, capabilities) -> None:
+        self._video_capabilities = capabilities
+        self._video_detection_error = ""
+        selected = capabilities.selected
+        if selected is not None:
+            self._log(
+                f"✓ Video encoder verified: {selected.name} ({selected.backend})"
+                + (f" on {selected.device}" if selected.device else "")
+            )
+        for candidate in capabilities.candidates:
+            if not candidate.verified:
+                detail = (candidate.error or "probe failed").splitlines()[0]
+                self._log(f"Video probe skipped/failed: {candidate.name}: {detail}")
+        self._update_video_audio_probe()
+        self.stage5_status.setText("Video capabilities ready.")
+        self._refresh_stage5_ui()
+
+    def _on_video_detection_failed(self, message: str) -> None:
+        self._video_capabilities = None
+        self._video_detection_error = message
+        self.stage5_status.setText(f"❌ {message}")
+        self._log(f"❌ Video capability detection failed: {message}")
+        self._refresh_stage5_ui()
+
+    def _on_video_detection_finished(self) -> None:
+        self._video_detection_thread = None
+        self._video_detection_worker = None
+
+    def _update_video_audio_probe(self) -> None:
+        if self._video_media is None or self._video_capabilities is None:
+            self._video_audio_probe = None
+            return
+        try:
+            from media.video import probe_audio
+
+            self._video_audio_probe = probe_audio(
+                Path(self._video_media.audiobook_path),
+                self._video_capabilities.ffprobe_path,
+            )
+        except Exception as error:
+            self._video_audio_probe = None
+            self.stage5_status.setText(f"❌ Audiobook validation failed: {error}")
+            self._log(f"❌ Audiobook validation failed: {error}")
+
+    def _capability_summary(self) -> str:
+        capabilities = self._video_capabilities
+        if capabilities is None:
+            if self._video_detection_error:
+                return f"Detection failed: {self._video_detection_error}"
+            return "Detecting GPU devices and testing encoders…"
+        selected = capabilities.selected
+        devices = capabilities.devices
+        gpu = ", ".join(device.model for device in devices) or "No GPU identified"
+        drivers = ", ".join(
+            dict.fromkeys(device.driver for device in devices if device.driver)
+        ) or "Unknown"
+        lines = [
+            f"GPU: {gpu}",
+            f"Driver: {drivers}",
+            f"FFmpeg: {capabilities.ffmpeg_version}",
+            f"Hardware backends: {', '.join(capabilities.hwaccels) or 'None reported'}",
+            "Listed H.264 encoders: "
+            + (", ".join(capabilities.listed_h264_encoders) or "None reported"),
+            f"Hardware backend: {selected.backend if selected else 'None'}",
+            f"Selected encoder: {selected.name if selected else 'None'}",
+            f"Device: {(selected.device or 'default') if selected else '—'}",
+            "Status: " + (
+                "Hardware encoding available"
+                if selected and selected.hardware
+                else ("CPU fallback available" if selected else "No verified encoder")
+            ),
+            "",
+            "Real test encodes:",
+        ]
+        for candidate in capabilities.candidates:
+            marker = "✓" if candidate.verified else "✕"
+            detail = "passed" if candidate.verified else (candidate.error or "failed").splitlines()[0]
+            lines.append(f"{marker} {candidate.name} ({candidate.backend}): {detail}")
+        if devices:
+            lines.extend(["", "Detected GPU devices:"])
+            for device in devices:
+                lines.append(
+                    f"• {device.vendor} · {device.model} · driver {device.driver or 'unknown'}"
+                    + (f" · {device.device}" if device.device else "")
+                )
+        return "\n".join(lines)
+
+    def _refresh_stage5_ui(self) -> None:
+        if self._video_media is not None and self._video_render_session is None:
+            try:
+                self._video_media = self.document.require_step4_outputs()
+            except PipelineStateError:
+                self._video_media = None
+                self._video_audio_probe = None
+        media = self._video_media
+        if media is None:
+            self.stage5_thumbnail_label.setText("—")
+            self.stage5_audio_label.setText("—")
+            self.stage5_output_label.setText("—")
+            self.stage5_duration_label.setText("—")
+        else:
+            self.stage5_thumbnail_label.setText(media.thumbnail_path)
+            self.stage5_audio_label.setText(media.audiobook_path)
+            self.stage5_output_label.setText(media.video_path)
+            if self._video_audio_probe is not None:
+                from media.video import format_duration
+
+                self.stage5_duration_label.setText(format_duration(self._video_audio_probe.duration))
+            else:
+                self.stage5_duration_label.setText("Waiting for FFprobe…")
+        self.stage5_capabilities.setPlainText(self._capability_summary())
+        running = self._video_render_session is not None
+        ready = (
+            media is not None
+            and self._video_capabilities is not None
+            and self._video_capabilities.selected is not None
+            and self._video_audio_probe is not None
+        )
+        self.stage5_create_btn.setEnabled(bool(ready and not running))
+        self.stage5_cancel_btn.setEnabled(running)
+        try:
+            self.document.require_step5_outputs()
+            upload_ready = True
+        except PipelineStateError:
+            upload_ready = False
+        self.stage5_continue_btn.setEnabled(upload_ready and not running)
+        if self.document.video_path:
+            metadata = self.document.video_metadata
+            self.stage5_result.setPlainText(
+                "Video created successfully\n"
+                f"Duration: {metadata.get('duration_display', '—')}\n"
+                f"File size: {metadata.get('file_size_display', '—')}\n"
+                f"Encoder used: {metadata.get('encoder', '—')}\n"
+                f"Render speed: {metadata.get('render_speed_display', '—')}\n"
+                f"Saved to: {self.document.video_path}"
+            )
+
+    def _on_create_video(self) -> None:
+        try:
+            from media.video import mp3_copy_is_safe, probe_audio
+
+            media = self.document.require_step4_outputs()
+            capabilities = self._video_capabilities
+            if capabilities is None or capabilities.selected is None:
+                raise PipelineStateError("Video encoder detection has not completed successfully.")
+            audio_probe = probe_audio(Path(media.audiobook_path), capabilities.ffprobe_path)
+            audio_copy = mp3_copy_is_safe(
+                Path(media.audiobook_path),
+                capabilities.ffmpeg_path,
+                capabilities.ffprobe_path,
+                temp_dir=Path(media.output_dir),
+            )
+        except Exception as error:
+            self._error(f"Cannot start video rendering: {error}")
+            return
+
+        self._video_media = media
+        self._video_audio_probe = audio_probe
+        self.stage5_progress.setValue(0)
+        self.stage5_progress.setFormat("0.0%")
+        self.stage5_result.setPlainText("")
+        self.stage5_status.setText(
+            "Starting FFmpeg · audio: " + ("MP3 stream copy" if audio_copy else "AAC 192k")
+        )
+        session = _VideoRenderSession(
+            capabilities,
+            media,
+            audio_probe.duration,
+            audio_copy=audio_copy,
+            parent=self,
+        )
+        session.progress.connect(self._on_video_progress)
+        session.status.connect(self._on_video_status)
+        session.completed.connect(self._on_video_completed)
+        session.failed.connect(self._on_video_failed)
+        session.cancelled.connect(self._on_video_cancelled)
+        self._video_render_session = session
+        self._set_video_busy(True)
+        self._refresh_stage5_ui()
+        session.start()
+
+    def _set_video_busy(self, busy: bool) -> None:
+        self.load_btn.setEnabled(not busy)
+        self.settings_btn.setEnabled(not busy)
+        for index in range(min(4, self.tabs.count())):
+            self.tabs.setTabEnabled(index, not busy)
+        if self.tabs.count() > 4:
+            self.tabs.setTabEnabled(4, True)
+        if self.tabs.count() > 5:
+            self.tabs.setTabEnabled(5, not busy)
+
+    def _set_youtube_busy(self, busy: bool) -> None:
+        self.load_btn.setEnabled(not busy)
+        self.settings_btn.setEnabled(not busy)
+        # Disabling the current tab can cause Qt to select each intermediate
+        # tab. Block those transition handlers while securing the active job.
+        self.tabs.blockSignals(True)
+        try:
+            if busy:
+                self.tabs.setCurrentIndex(5)
+            for index in range(5):
+                self.tabs.setTabEnabled(index, not busy)
+            self.tabs.setTabEnabled(5, True)
+        finally:
+            self.tabs.blockSignals(False)
+
+    def closeEvent(self, event) -> None:
+        if self.stage6_widget.busy:
+            self.stage6_widget.cancel()
+            self._log("Cancelling YouTube operation. Close the application after it stops.")
+            event.ignore()
+            return
+        if self._video_render_session is not None:
+            self._on_cancel_video()
+            event.ignore()
+            return
+        if self._video_detection_thread is not None and self._video_detection_thread.isRunning():
+            self._log("Please wait for the active encoder check to finish before closing.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _on_video_progress(self, update: dict) -> None:
+        from media.video import format_duration
+
+        percentage = float(update.get("percentage") or 0.0)
+        speed = float(update.get("speed") or 0.0)
+        elapsed = float(update.get("elapsed") or 0.0)
+        eta = float(update.get("eta") or 0.0)
+        self.stage5_progress.setValue(max(0, min(1000, int(round(percentage * 10)))))
+        self.stage5_progress.setFormat(f"{percentage:.1f}%")
+        self.stage5_status.setText(
+            f"Elapsed: {format_duration(elapsed)} · Speed: {speed:.2f}x · "
+            f"Estimated remaining: {format_duration(eta)}"
+        )
+
+    def _on_video_status(self, message: str) -> None:
+        self.stage5_status.setText(message)
+        self._log(message)
+
+    def _on_video_completed(self, result) -> None:
+        from media.video import format_duration
+
+        metadata = result.to_dict()
+        metadata["duration_display"] = format_duration(result.duration)
+        metadata["file_size_display"] = f"{result.file_size / (1024 * 1024):.2f} MiB"
+        metadata["render_speed_display"] = (
+            f"{result.render_speed:.2f}x" if result.render_speed > 0 else "not reported"
+        )
+        self.document.set_video_output(result.output_path, metadata)
+        self.document.stage(StageKey.VIDEO).touch(
+            f"{format_duration(result.duration)} audiobook",
+            "Video created",
+            {"encoder": result.encoder, "file_size": result.file_size},
+        )
+        self.stage5_progress.setValue(1000)
+        self.stage5_progress.setFormat("100.0%")
+        self.stage5_status.setText("Video created successfully")
+        for failure in result.attempt_errors:
+            self._log(f"Video encoder fallback: {failure}")
+        self._log(f"✓ Video created successfully: {result.output_path}")
+        self._video_render_session = None
+        self._set_video_busy(False)
+        self._refresh_stage5_ui()
+
+    def _on_video_failed(self, message: str) -> None:
+        self.stage5_status.setText("❌ Video rendering failed")
+        self.stage5_result.setPlainText(message)
+        self._log(f"❌ Video rendering failed: {message}")
+        self._video_render_session = None
+        self._set_video_busy(False)
+        self._refresh_stage5_ui()
+
+    def _on_cancel_video(self) -> None:
+        if self._video_render_session is not None:
+            self.stage5_status.setText("Cancelling FFmpeg…")
+            self._video_render_session.cancel()
+
+    def _on_video_cancelled(self) -> None:
+        self.stage5_status.setText("Video rendering cancelled; Step 3/4 files were preserved.")
+        self._log("Video rendering cancelled.")
+        self._video_render_session = None
+        self._set_video_busy(False)
+        self._refresh_stage5_ui()
     
     def _on_save_settings(self):
         try:
@@ -1169,8 +1823,11 @@ class MainWindow(QMainWindow):
         if self._updating_widgets or self.document.normalized_text is None:
             return
         if self.document.set_normalized_edit(self.stage1_output.toPlainText()):
+            self._video_media = None
+            self._video_audio_probe = None
             self.stage2_continue_btn.setEnabled(False)
             self.stage2_source_label.setText("Source: Step 1 changed — rescan required")
+            self._refresh_stage5_ui()
             self._update_status()
 
     def _continue_to_stage2(self) -> None:
@@ -1193,6 +1850,31 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(3)
 
+    def _continue_to_stage5(self) -> None:
+        if self._enter_stage5():
+            self.tabs.blockSignals(True)
+            self.tabs.setCurrentIndex(4)
+            self.tabs.blockSignals(False)
+
+    def _enter_stage6(self) -> bool:
+        try:
+            self.stage6_widget.enter()
+            return True
+        except Exception as error:
+            from media.youtube import YouTubeUploadError
+
+            if isinstance(error, (PipelineStateError, YouTubeUploadError)):
+                self._error(str(error))
+            else:
+                self._error("Cannot open Step 6. Verify the current job outputs and upload state.")
+            return False
+
+    def _continue_to_stage6(self) -> None:
+        if self._enter_stage6():
+            self.tabs.blockSignals(True)
+            self.tabs.setCurrentIndex(5)
+            self.tabs.blockSignals(False)
+
     def _on_tab_changed(self, index: int) -> None:
         if index == 1:
             self._enter_stage2()
@@ -1214,6 +1896,16 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(2)
                 self.tabs.blockSignals(False)
                 self._error(str(error))
+        elif index == 4:
+            if not self._enter_stage5():
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(3)
+                self.tabs.blockSignals(False)
+        elif index == 5:
+            if not self._enter_stage6():
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(4)
+                self.tabs.blockSignals(False)
 
     def _enter_stage2(self) -> bool:
         try:

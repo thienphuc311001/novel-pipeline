@@ -43,7 +43,7 @@ Define a small in-memory pipeline document:
 - `chunks: list of {chapter, index, order, char_count, text}`
 - `translations: map of Chinese phrase -> Vietnamese`
 - `diagnostics: list of {code, severity, chapter, line, message, detail, snippet}`
-- `stage_status` for each of the four stages
+- `stage_status` for each of the five stages
 
 Each stage receives this document and returns a new document. Stages must be runnable individually and as a chain. Intermediate results stay in memory: never require the user to save and reload temporary files to continue the pipeline. Keep an explicit "run whole pipeline" action.
 
@@ -172,7 +172,9 @@ Keep it small and practical:
 - `tts/` - optional TTS and pronunciation preview
 - `config/` - local configuration file for preferences and API key
 
-Do not over-engineer. No plugin system, no abstraction layers beyond what the four stages need.
+Do not over-engineer. No plugin system, no abstraction layers beyond what the pipeline stages need.
+
+Step 6 consumes only validated Step 5 MP4/Step 4 thumbnail state. Desktop OAuth uses the system browser and OS credential store. Persist resumable upload checkpoints and separate thumbnail/playlist outcomes in the current job's `youtube_upload.json`; never expose tokens/session URLs, retry a full video after a follow-up failure, or automatically create a duplicate from uncertain state. Keep API operations off the Qt UI thread with progress and cancellation.
 
 ## DELIVERABLE
 

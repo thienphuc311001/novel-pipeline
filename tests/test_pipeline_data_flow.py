@@ -181,6 +181,24 @@ class PipelineDataFlowTests(unittest.TestCase):
         self.assertIn("Đám lao dịch", window.stage4_first_chapter.toPlainText())
         self.assertFalse(hasattr(window, "stage4_txt_upload_btn"))
 
+    def test_step3_defaults_to_the_step1_input_directory(self):
+        document = self.make_document()
+        input_dir = Path(self.temp.name) / "selected-input-folder"
+        input_dir.mkdir()
+        document.input_directory = str(input_dir)
+        settings = Settings(output_dir="")
+        window = MainWindow(settings, master_dictionary=self.master_dictionary)
+        window.document = document
+        window._enter_stage2()
+        document.translations = {"修炼者": "tu luyện giả", "修炼": "tu luyện"}
+        window._on_translate()
+
+        window._on_clean_chunk()
+
+        bundle = document.require_step3_artifacts()
+        self.assertEqual(Path(bundle.output_dir).parent, input_dir)
+        window.close()
+
     def test_step4_export_uses_step3_output(self):
         document = self.make_document()
         window = self.make_window(document)

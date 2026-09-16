@@ -49,3 +49,11 @@ Thumbs.db
 /exports/
 *.zip
 novel_export.json
+
+# Local Google desktop client configuration and per-job upload records
+client_secret*.json
+client_secrets*.json
+youtube_upload.json
+youtube_upload.json.*
+.youtube_upload.lock
+.youtube-upload-*.tmp

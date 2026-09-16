@@ -1,8 +1,8 @@
 """Local configuration for the unified novel pipeline application.
 
 Everything is stored in a small JSON file under the user config directory.
-No database, no cloud dependency.  The application works fully offline; the
-only optional network feature is AI translation (manually triggered).
+No mandatory cloud dependency. Normalization and review work offline;
+AI translation, Edge-TTS, and YouTube upload use network services when invoked.
 """
 
 from __future__ import annotations
@@ -182,6 +182,9 @@ class Settings:
     thumbnail_bottom_height: int = 145
     thumbnail_jpeg_quality: int = 95
 
+    # OAuth desktop client configuration only; tokens live in the OS keyring.
+    youtube_client_secrets_path: str = ""
+
     # --- ui ---------------------------------------------------------------
     font_size: int = 10
     max_log_lines: int = 2000
@@ -242,9 +245,17 @@ class Settings:
         return Settings.from_dict(json.loads(json.dumps(self.to_dict(), ensure_ascii=False)))
 
     # ------------------------------------------------------------ helpers
-    def resolved_output_dir(self) -> Path:
+    def resolved_output_dir(self, input_dir: str | Path | None = None) -> Path:
+        """Return the output root, preferring an explicit user override.
+
+        When no override is configured, artifacts belong beside the current
+        Step 1 input.  The historical home-directory fallback remains useful
+        for callers that do not yet have a loaded document.
+        """
         if self.output_dir:
             return Path(self.output_dir).expanduser()
+        if input_dir:
+            return Path(input_dir).expanduser()
         return Path.home() / "novel-pipeline-output"
 
     def resolved_input_dir(self) -> str:

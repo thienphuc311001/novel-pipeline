@@ -34,6 +34,16 @@ class LastInputFolderTests(unittest.TestCase):
             input_dir.rmdir()
             self.assertEqual(loaded.resolved_input_dir(), "")
 
+    def test_output_folder_defaults_to_input_but_override_wins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_dir = Path(directory) / "input"
+            override = Path(directory) / "override"
+            settings = Settings()
+            self.assertEqual(settings.resolved_output_dir(input_dir), input_dir)
+
+            settings.output_dir = str(override)
+            self.assertEqual(settings.resolved_output_dir(input_dir), override)
+
     def test_file_picker_starts_at_and_updates_last_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             initial_dir = Path(directory) / "initial"
@@ -58,6 +68,8 @@ class LastInputFolderTests(unittest.TestCase):
             self.assertEqual(settings.last_input_dir, str(selected_dir))
             save.assert_called_once_with()
             self.assertEqual(window.document.original_input_text, "Chương 1\nNội dung.")
+            self.assertEqual(window.document.source_path, str(selected_file.resolve()))
+            self.assertEqual(window.document.input_directory, str(selected_dir.resolve()))
 
 
 if __name__ == "__main__":
