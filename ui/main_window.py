@@ -689,6 +689,7 @@ class MainWindow(QMainWindow):
         clean_btn.clicked.connect(self._on_create_group_files)
         btn_layout.addWidget(clean_btn)
         restore_btn = QPushButton("Restore Matching Groups")
+        self.stage3_restore_groups_btn = restore_btn
         restore_btn.clicked.connect(lambda: self._on_create_group_files(restore=True))
         btn_layout.addWidget(restore_btn)
 
@@ -1148,27 +1149,104 @@ class MainWindow(QMainWindow):
             self._refresh_group_panels()
 
     def _refresh_group_preview(self):
-        from media.groups import preview_groups
+        from media.groups import analyze_grouping, preview_groups
         try:
             text = self.document.require_step2_confirmed_output()
-            headings, groups, diagnostics = preview_groups(text, self.settings, self._selected_group_size())
+            size = self._selected_group_size()
+            analysis = analyze_grouping(text, self.settings, size)
+            headings, diagnostics = analysis.headings, analysis.diagnostics
+            has_title = bool(self.stage3_title_edit.text().strip())
+            if analysis.requires_numeric_boundaries:
+                self.stage3_detection_label.setText(
+                    f"Expected range: Chương {headings[0].number}-{headings[-1].number}\n"
+                    f"Expected chapters: {analysis.expected_count}\n"
+                    f"Detected chapter headings: {len(headings)}\n"
+                    f"First chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}"
+                )
+                if analysis.numeric_unavailable_reason:
+                    self.stage3_output.setPlainText(
+                        "Some chapter numbers are missing.\n\n"
+                        "Automatic numeric-boundary grouping is unavailable: " + analysis.numeric_unavailable_reason +
+                        "\n\nCorrect the required chapter headings in Step 1/2 and review the document manually."
+                    )
+                    self.stage3_create_groups_btn.setEnabled(False)
+                    self.stage3_restore_groups_btn.setEnabled(False)
+                    return
+                groups = analysis.numeric_groups
+                self.stage3_output.setPlainText(
+                    "Some chapter numbers are missing.\n\n"
+                    f"Expected range: Chương {headings[0].number}-{headings[-1].number}\n"
+                    f"Expected chapters: {analysis.expected_count}\n"
+                    f"Detected chapter headings: {len(headings)}\n\n"
+                    "The normal chapter-count grouping may produce incorrect ranges.\n\n"
+                    "I can instead group by numeric chapter boundaries:\n\n" +
+                    "\n".join(item["range_label"] for item in groups) +
+                    "\n\nThis method ignores missing chapter headings inside each range and splits using the available boundary chapter headings."
+                )
+                self.stage3_create_groups_btn.setEnabled(has_title)
+                self.stage3_restore_groups_btn.setEnabled(has_title)
+                return
+
+            headings, groups, diagnostics = preview_groups(text, self.settings, size)
             self.stage3_detection_label.setText(f"Detected chapters: {len(headings)}\nFirst chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}")
             self.stage3_output.setPlainText(
-                f"Total chapters: {len(headings)}\nChapters per group: {self._selected_group_size()}\nOutput groups: {len(groups)}\n\n" +
+                f"Total chapters: {len(headings)}\nChapters per group: {size}\nOutput groups: {len(groups)}\n\n" +
                 "\n".join(f"{g['order']}. {g['label']} ({len(g['chapters'])} chapters)" for g in groups) +
                 ("\n\nNumbering diagnostics:\n" + "\n".join(diagnostics) if diagnostics else ""))
-            self.stage3_create_groups_btn.setEnabled(bool(self.stage3_title_edit.text().strip()))
+            self.stage3_create_groups_btn.setEnabled(has_title)
+            self.stage3_restore_groups_btn.setEnabled(has_title)
         except PipelineStateError as error:
             self.stage3_detection_label.setText("Detected chapters: 0 / unavailable")
             self.stage3_output.setPlainText(str(error))
             self.stage3_create_groups_btn.setEnabled(False)
+            self.stage3_restore_groups_btn.setEnabled(False)
+
+    def _confirm_numeric_grouping(self, analysis) -> bool:
+        headings = analysis.headings
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Use Numeric Chapter Boundaries")
+        dialog.setText("Some chapter numbers are missing.")
+        dialog.setInformativeText(
+            f"Expected range: Chương {headings[0].number}-{headings[-1].number}\n"
+            f"Expected chapters: {analysis.expected_count}\n"
+            f"Detected chapter headings: {len(headings)}\n\n"
+            "The normal chapter-count grouping may produce incorrect ranges.\n\n"
+            "I can instead group by numeric chapter boundaries:\n\n" +
+            "\n".join(item["range_label"] for item in analysis.numeric_groups) +
+            "\n\nThis method ignores missing chapter headings inside each range and splits using the available boundary chapter headings."
+        )
+        use_numeric = dialog.addButton("Use Numeric Boundaries", QMessageBox.ButtonRole.AcceptRole)
+        cancel = dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        return dialog.clickedButton() is use_numeric
 
     def _on_create_group_files(self, _checked=False, *, restore=False):
-        from media.groups import write_groups, restore_groups
+        from media.groups import (GROUPING_METHOD_NUMERIC, analyze_grouping,
+                                  write_groups, restore_groups)
         try:
             title = self.stage3_title_edit.text().strip()
-            method = restore_groups if restore else write_groups
-            groups = method(self.document, self.settings, title, self._selected_group_size())
+            size = self._selected_group_size()
+            if restore:
+                groups = restore_groups(self.document, self.settings, title, size)
+            else:
+                text = self.document.require_step2_confirmed_output()
+                analysis = analyze_grouping(text, self.settings, size)
+                if analysis.requires_numeric_boundaries:
+                    if analysis.numeric_unavailable_reason:
+                        raise PipelineStateError(
+                            "Automatic numeric-boundary grouping is unavailable: " + analysis.numeric_unavailable_reason
+                        )
+                    if not self._confirm_numeric_grouping(analysis):
+                        return
+                    groups = write_groups(
+                        self.document, self.settings, title, size,
+                        method=GROUPING_METHOD_NUMERIC,
+                        confirmation_fingerprint=analysis.numeric_identity_fingerprint,
+                    )
+                else:
+                    groups = write_groups(self.document, self.settings, title, size)
             self._remember_current_title()
             self.stage3_continue_btn.setEnabled(True)
             self._refresh_group_preview()
@@ -1905,11 +1983,12 @@ class MainWindow(QMainWindow):
         audio_config = lambda values: (asdict(CleaningOptions.from_settings(values)), values.max_chunk_chars, values.min_chunk_chars, values.tts_voice)
         old_audio = audio_config(self.settings)
         old_thumbnail = (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality)
-        old_grouping = grouping_config(self.settings, self._selected_group_size())
+        grouping_method = self.document.grouping_config.get("grouping_method", "detected_chapters")
+        old_grouping = grouping_config(self.settings, self._selected_group_size(), grouping_method)
         old_root = self.settings.resolved_output_dir(self.document.input_directory)
         for name in self.settings.__dataclass_fields__:
             setattr(self.settings, name, getattr(updated, name))
-        if (old_grouping != grouping_config(self.settings, self._selected_group_size()) or
+        if (old_grouping != grouping_config(self.settings, self._selected_group_size(), grouping_method) or
                 old_root != self.settings.resolved_output_dir(self.document.input_directory)):
             self.document._clear_step3_artifacts()
             self.stage3_continue_btn.setEnabled(False)

@@ -15,6 +15,12 @@ from chapters.numerals import parse_number_token
 from media.artifacts import atomic_write_json, atomic_write_text, sha256_file, sha256_text, slugify_job_name
 from pipeline.document import Chapter, PipelineStateError, Step4MediaBundle, Step5UploadBundle
 
+GROUPING_METHOD_DETECTED = "detected_chapters"
+GROUPING_METHOD_NUMERIC = "numeric_boundaries"
+# Increment whenever heading detection or numeral parsing changes in a way that
+# can move a boundary. Numeric confirmations are intentionally fail-closed.
+HEADING_SCANNER_VERSION = "heading-scan-v1"
+
 
 @dataclass
 class HeadingSpan:
@@ -44,6 +50,21 @@ class ChapterGroup:
     start: int
     end: int
     state: dict = field(default_factory=dict)
+
+
+@dataclass
+class GroupingAnalysis:
+    """Read-only grouping facts for the current, untouched Step 2 text."""
+
+    headings: list[HeadingSpan]
+    diagnostics: list[str]
+    expected_count: int
+    requires_numeric_boundaries: bool
+    numeric_groups: list[dict] = field(default_factory=list)
+    required_group_starts: list[dict] = field(default_factory=list)
+    numeric_unavailable_reason: str = ""
+    numeric_identity_descriptor: dict = field(default_factory=dict)
+    numeric_identity_fingerprint: str = ""
 
 
 def scan_headings(text, settings):
@@ -94,12 +115,17 @@ def heading_diagnostics(headings):
     return warnings
 
 
-def preview_groups(text, settings, size=20):
-    if not isinstance(size, int) or size < 1:
-        raise PipelineStateError("Chapters per group must be a positive integer.")
-    headings = scan_headings(text, settings)
-    if not headings:
-        raise PipelineStateError("No chapter headings detected. Correct the headings in Step 1/2 or enable the matching chapter patterns in Settings.")
+def _active_patterns(settings):
+    return [{"name": p.name, "regex": p.regex.pattern, "flags": p.regex.flags}
+            for p in build_patterns(settings).all()]
+
+
+def _validate_grouping_method(method):
+    if method not in {GROUPING_METHOD_DETECTED, GROUPING_METHOD_NUMERIC}:
+        raise PipelineStateError(f"Unknown chapter grouping method: {method}")
+
+
+def _detected_groups(headings, size):
     groups = []
     for index in range(0, len(headings), size):
         entries = headings[index:index + size]
@@ -109,25 +135,130 @@ def preview_groups(text, settings, size=20):
         groups.append({"order": len(groups) + 1, "label": f"Chương {range_label}",
                        "range_label": range_label, "start": start, "end": end,
                        "chapters": [asdict(h) for h in entries]})
-    return headings, groups, heading_diagnostics(headings)
+    return groups
 
 
-def grouping_config(settings, size):
-    return {"chapters_per_group": size,
-            "patterns": [{"name": p.name, "regex": p.regex.pattern, "flags": p.regex.flags}
-                         for p in build_patterns(settings).all()]}
+def _numeric_identity(text, settings, size, headings, groups, required_starts):
+    descriptor = {
+        "version": 1,
+        "source_sha256": sha256_text(text),
+        "heading_scanner_version": HEADING_SCANNER_VERSION,
+        "patterns": _active_patterns(settings),
+        "first_number": headings[0].number,
+        "last_number": headings[-1].number,
+        "group_size": size,
+        "grouping_method": GROUPING_METHOD_NUMERIC,
+        "calculated_ranges": [item["range_label"] for item in groups],
+        "required_group_starts": required_starts,
+    }
+    serialized = json.dumps(descriptor, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return descriptor, sha256_text(serialized)
 
 
-def write_groups(document, settings, title, size=20):
+def analyze_grouping(text, settings, size=20):
+    """Analyze ordinary and numeric-boundary grouping without mutating state."""
+    if not isinstance(size, int) or size < 1:
+        raise PipelineStateError("Chapters per group must be a positive integer.")
+    headings = scan_headings(text, settings)
+    if not headings:
+        raise PipelineStateError("No chapter headings detected. Correct the headings in Step 1/2 or enable the matching chapter patterns in Settings.")
+    diagnostics = heading_diagnostics(headings)
+    expected_count = headings[-1].number - headings[0].number + 1
+    has_gap = any(message.startswith("Numbering gap:") for message in diagnostics)
+    requires_numeric = has_gap and expected_count > 0 and len(headings) < expected_count
+    analysis = GroupingAnalysis(headings, diagnostics, expected_count, requires_numeric)
+    if not requires_numeric:
+        return analysis
+
+    if any(right.number <= left.number for left, right in zip(headings, headings[1:])):
+        analysis.numeric_unavailable_reason = (
+            "Chapter numbering contains a duplicate or reset, so a split boundary is ambiguous."
+        )
+        return analysis
+
+    by_number = {heading.number: heading for heading in headings}
+    starts = list(range(headings[0].number, headings[-1].number + 1, size))
+    missing = [number for number in starts if number not in by_number]
+    if missing:
+        analysis.numeric_unavailable_reason = (
+            "Missing required group-start heading(s): " + ", ".join(f"Chương {number}" for number in missing) + "."
+        )
+        return analysis
+
+    required_starts = [{"number": number, "offset": by_number[number].start} for number in starts]
+    groups = []
+    for order, number in enumerate(starts, 1):
+        end_number = min(number + size - 1, headings[-1].number)
+        next_start = by_number[starts[order]].start if order < len(starts) else len(text)
+        entries = [heading for heading in headings if number <= heading.number <= end_number]
+        range_label = str(number) if number == end_number else f"{number}-{end_number}"
+        groups.append({"order": order, "label": f"Chương {range_label}", "range_label": range_label,
+                       "start": 0 if order == 1 else by_number[number].start, "end": next_start,
+                       "chapters": [asdict(heading) for heading in entries]})
+    descriptor, fingerprint = _numeric_identity(text, settings, size, headings, groups, required_starts)
+    analysis.numeric_groups = groups
+    analysis.required_group_starts = required_starts
+    analysis.numeric_identity_descriptor = descriptor
+    analysis.numeric_identity_fingerprint = fingerprint
+    return analysis
+
+
+def _groups_for_method(analysis, method, size):
+    _validate_grouping_method(method)
+    if method == GROUPING_METHOD_DETECTED:
+        if analysis.requires_numeric_boundaries:
+            raise PipelineStateError(
+                "Some chapter numbers are missing and heading-count grouping could create incorrect ranges. "
+                "Review numeric chapter boundaries instead."
+            )
+        return _detected_groups(analysis.headings, size)
+    if not analysis.requires_numeric_boundaries:
+        raise PipelineStateError("Numeric-boundary grouping is only available when missing chapter numbers reduce the detected count.")
+    if analysis.numeric_unavailable_reason:
+        raise PipelineStateError("Automatic numeric-boundary grouping is unavailable: " + analysis.numeric_unavailable_reason)
+    return analysis.numeric_groups
+
+
+def preview_groups(text, settings, size=20, *, method=GROUPING_METHOD_DETECTED):
+    analysis = analyze_grouping(text, settings, size)
+    if method == GROUPING_METHOD_DETECTED and not analysis.requires_numeric_boundaries:
+        groups = _detected_groups(analysis.headings, size)
+    else:
+        groups = _groups_for_method(analysis, method, size)
+    return analysis.headings, groups, analysis.diagnostics
+
+
+def grouping_config(settings, size, method=GROUPING_METHOD_DETECTED):
+    _validate_grouping_method(method)
+    config = {"chapters_per_group": size, "patterns": _active_patterns(settings)}
+    if method == GROUPING_METHOD_NUMERIC:
+        config["grouping_method"] = method
+    return config
+
+
+def _group_id(source_hash, title, size, item, method, numeric_fingerprint):
+    value = f"{source_hash}\0{title}\0{size}\0{item['order']}\0{item['start']}\0{item['end']}"
+    if method == GROUPING_METHOD_NUMERIC:
+        value += f"\0{method}\0{numeric_fingerprint}"
+    return sha256_text(value)[:24]
+
+
+def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_DETECTED, confirmation_fingerprint=""):
     text = document.require_step2_confirmed_output()
     title = title.strip()
     if not title:
         raise PipelineStateError("Enter a novel title before creating group files.")
-    _, preview, _ = preview_groups(text, settings, size)
+    analysis = analyze_grouping(text, settings, size)
+    if method == GROUPING_METHOD_DETECTED and not analysis.requires_numeric_boundaries:
+        preview = _detected_groups(analysis.headings, size)
+    else:
+        preview = _groups_for_method(analysis, method, size)
+    if method == GROUPING_METHOD_NUMERIC and confirmation_fingerprint != analysis.numeric_identity_fingerprint:
+        raise PipelineStateError("Numeric-boundary grouping requires a current user confirmation.")
     title_slug = slugify_job_name(title, "").rstrip("_")
     novel_dir = settings.resolved_output_dir(document.input_directory).resolve() / title_slug
     source_hash = sha256_text(text)
-    config = grouping_config(settings, size)
+    config = grouping_config(settings, size, method)
     groups, used = [], set()
     for item in preview:
         slug = slugify_job_name(title_slug, item["range_label"])
@@ -136,7 +267,7 @@ def write_groups(document, settings, title, size=20):
         used.add(slug)
         folder = novel_dir / slug
         group_text = text[item["start"]:item["end"]]
-        group_id = sha256_text(f"{source_hash}\0{title}\0{size}\0{item['order']}\0{item['start']}\0{item['end']}")[:24]
+        group_id = _group_id(source_hash, title, size, item, method, analysis.numeric_identity_fingerprint)
         payload = {"schema_version": 2, "group_id": group_id, "title": title, **item,
                    "source_sha256": source_hash, "text_sha256": sha256_text(group_text), "text": group_text}
         atomic_write_text(folder / "final.txt", group_text)
@@ -147,7 +278,14 @@ def write_groups(document, settings, title, size=20):
         group.state = load_job_state(group)
         groups.append(group)
     manifest = {"schema_version": 2, "title": title, "source_sha256": source_hash,
-                "config": config, "groups": [dict(asdict(g), state={}) for g in groups]}
+                "grouping_method": method, "config": config,
+                "groups": [dict(asdict(g), state={}) for g in groups]}
+    if method == GROUPING_METHOD_NUMERIC:
+        manifest["numeric_confirmation"] = {
+            "confirmed_identity": confirmation_fingerprint,
+            "descriptor": analysis.numeric_identity_descriptor,
+            "fingerprint": analysis.numeric_identity_fingerprint,
+        }
     atomic_write_json(novel_dir / "chapter_groups.json", manifest)
     document._clear_step3_artifacts()
     document.cleaned_text = None
@@ -167,9 +305,25 @@ def restore_groups(document, settings, title, size):
     path = novel / "chapter_groups.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        _, expected, _ = preview_groups(text, settings, size)
+        method = data.get("grouping_method", GROUPING_METHOD_DETECTED)
+        _validate_grouping_method(method)
+        analysis = analyze_grouping(text, settings, size)
+        if method == GROUPING_METHOD_DETECTED and not analysis.requires_numeric_boundaries:
+            expected = _detected_groups(analysis.headings, size)
+        else:
+            expected = _groups_for_method(analysis, method, size)
+        numeric_fingerprint = ""
+        if method == GROUPING_METHOD_NUMERIC:
+            confirmation = data.get("numeric_confirmation")
+            if not isinstance(confirmation, dict):
+                raise ValueError("Numeric-boundary confirmation is missing from the manifest.")
+            numeric_fingerprint = analysis.numeric_identity_fingerprint
+            if (confirmation.get("confirmed_identity") != numeric_fingerprint or
+                    confirmation.get("fingerprint") != numeric_fingerprint or
+                    confirmation.get("descriptor") != analysis.numeric_identity_descriptor):
+                raise ValueError("Numeric-boundary confirmation does not match the current source/configuration.")
         if (data["schema_version"] != 2 or data["title"] != title or data["source_sha256"] != sha256_text(text)
-                or data["config"] != grouping_config(settings, size) or len(data["groups"]) != len(expected)):
+                or data["config"] != grouping_config(settings, size, method) or len(data["groups"]) != len(expected)):
             raise ValueError("Manifest does not match the current source/configuration.")
         groups = [ChapterGroup(**row) for row in data["groups"]]
         used = set()
@@ -180,7 +334,7 @@ def restore_groups(document, settings, title, size):
             if slug in used:
                 slug += f"_group_{item['order']:03d}"
             used.add(slug)
-            expected_id = sha256_text(f"{sha256_text(text)}\0{title}\0{size}\0{item['order']}\0{item['start']}\0{item['end']}")[:24]
+            expected_id = _group_id(sha256_text(text), title, size, item, method, numeric_fingerprint)
             if (Path(group.output_dir).resolve() != novel / slug or group.slug != slug or
                     group.title != title or group.group_id != expected_id or
                     Path(group.txt_path).resolve() != novel / slug / "final.txt" or

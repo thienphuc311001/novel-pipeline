@@ -19,7 +19,7 @@ from media.video import VideoCapabilities, EncoderCandidate, AudioProbe
 from pipeline.document import PipelineStateError
 from ui.main_window import MainWindow
 from ui.grouped_pipeline import GroupBatchPanel, TtsBatchPanel, UploadBatchPanel, VideoBatchPanel
-from tests.test_chapter_groups import document_for
+from tests.test_chapter_groups import document_for, numeric_source
 from tests.test_youtube import Response, ScriptedSession, MemorySecrets
 from media.youtube import UploadMetadata, YouTubeUploader, YouTubeUploadError
 
@@ -60,6 +60,36 @@ class GroupBatchTests(unittest.TestCase):
         self.assertEqual(window.stage4_stack.currentWidget(), window.group4)
         self.assertFalse(window.group4.checked_ids())
         self.assertIn('Chương 1', window.group4.first_chapter.toPlainText())
+        window.close()
+
+    def test_step3_numeric_boundary_confirmation_and_unavailable_boundary(self):
+        # 620 is absent but 621 is a reliable group start, so cancellation
+        # must not create files and approval must use the numeric labels.
+        numeric_doc = document_for(numeric_source({620}), self.root)
+        window = MainWindow(self.settings)
+        window.document = numeric_doc
+        window._set_job_editors('Bắc Tống', '')
+        window.stage3_group_size.setCurrentIndex(1)
+        window._refresh_group_preview()
+        self.assertIn('Some chapter numbers are missing.', window.stage3_output.toPlainText())
+        self.assertIn('601-620', window.stage3_output.toPlainText())
+        with patch.object(window, '_confirm_numeric_grouping', return_value=False), patch.object(Settings, 'save', return_value=self.root / 'config.json'):
+            window._on_create_group_files()
+        self.assertFalse(numeric_doc.chapter_groups)
+        with patch.object(window, '_confirm_numeric_grouping', return_value=True), patch.object(Settings, 'save', return_value=self.root / 'config.json'):
+            window._on_create_group_files()
+        self.assertEqual([group.range_label for group in numeric_doc.chapter_groups],
+                         ['601-620', '621-640', '641-660', '661-680', '681-700'])
+        window.close()
+
+        unavailable_doc = document_for(numeric_source({621}), self.root)
+        window = MainWindow(self.settings)
+        window.document = unavailable_doc
+        window._set_job_editors('Bắc Tống', '')
+        window.stage3_group_size.setCurrentIndex(1)
+        window._refresh_group_preview()
+        self.assertIn('Missing required group-start heading', window.stage3_output.toPlainText())
+        self.assertFalse(window.stage3_create_groups_btn.isEnabled())
         window.close()
 
     def test_defaults_and_select_all_subset_snapshot(self):

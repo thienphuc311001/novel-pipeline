@@ -7,8 +7,9 @@ from unittest.mock import patch
 
 from config.settings import Settings
 from media.artifacts import sha256_text
-from media.groups import (preview_groups, scan_headings, write_groups, restore_groups, prepare_tts,
-                         edit_failed_chunk, record_media, save_job_state, record_video)
+from media.groups import (GROUPING_METHOD_NUMERIC, analyze_grouping, preview_groups, scan_headings,
+                         write_groups, restore_groups, prepare_tts, edit_failed_chunk, record_media,
+                         save_job_state, record_video)
 from media.video import VideoRenderResult
 from pipeline.document import PipelineDocument, PipelineStateError
 
@@ -21,6 +22,17 @@ def document_for(text, folder):
     doc.input_directory = str(folder)
     doc.job_title = "Bắc Tống"
     return doc
+
+
+def numeric_source(omitted=()):
+    """Keep every chapter's text while deliberately omitting some headings."""
+    missing = set(omitted)
+    parts = ["Preamble with  spaces.\r\n\r\n"]
+    for number in range(601, 701):
+        if number not in missing:
+            parts.append(f"Chương {number}\r\n")
+        parts.append(f"Body {number}.  \r\n\r\n")
+    return "".join(parts)
 
 
 class ChapterGroupTests(unittest.TestCase):
@@ -84,14 +96,96 @@ class ChapterGroupTests(unittest.TestCase):
     def test_collisions_and_diagnostics_preserve_order(self):
         text = 'Chương 5\nA.\nChương 5\nB.\nChương 2\nC.\nChương 9\nD.'
         doc = document_for(text, self.root)
-        groups = write_groups(doc, self.settings, doc.job_title, 1)
-        self.assertEqual(len({g.output_dir for g in groups}), 4)
-        self.assertTrue(groups[1].slug.endswith('_group_002'))
-        self.assertEqual([g.chapters[0]['number'] for g in groups], [5, 5, 2, 9])
-        diagnostics = preview_groups(text, self.settings, 1)[2]
+        with self.assertRaisesRegex(PipelineStateError, "missing"):
+            write_groups(doc, self.settings, doc.job_title, 1)
+        headings = scan_headings(text, self.settings)
+        diagnostics = analyze_grouping(text, self.settings, 1).diagnostics
+        self.assertEqual([heading.number for heading in headings], [5, 5, 2, 9])
         self.assertTrue(any('Repeated' in d for d in diagnostics))
         self.assertTrue(any('reset' in d for d in diagnostics))
         self.assertTrue(any('gap' in d for d in diagnostics))
+
+    def test_numeric_boundaries_keep_ranges_and_exact_canonical_text(self):
+        # 82 detected headings: 602-618 and 620 are absent, but all group
+        # starts (601, 621, 641, 661, 681) remain reliable.
+        text = numeric_source(set(range(602, 619)) | {620})
+        analysis = analyze_grouping(text, self.settings, 20)
+        self.assertTrue(analysis.requires_numeric_boundaries)
+        self.assertFalse(analysis.numeric_unavailable_reason)
+        self.assertEqual(len(analysis.headings), 82)
+        self.assertEqual(analysis.expected_count, 100)
+        self.assertEqual([item['range_label'] for item in analysis.numeric_groups],
+                         ['601-620', '621-640', '641-660', '661-680', '681-700'])
+        self.assertEqual([item['number'] for item in analysis.required_group_starts], [601, 621, 641, 661, 681])
+
+        with self.assertRaisesRegex(PipelineStateError, "missing"):
+            preview_groups(text, self.settings, 20)
+        _, preview, _ = preview_groups(text, self.settings, 20, method=GROUPING_METHOD_NUMERIC)
+        self.assertEqual([item['range_label'] for item in preview], ['601-620', '621-640', '641-660', '661-680', '681-700'])
+        for size, expected in ((25, ['601-625', '626-650', '651-675', '676-700']),
+                               (200, ['601-700'])):
+            with self.subTest(size=size):
+                _, groups, _ = preview_groups(text, self.settings, size, method=GROUPING_METHOD_NUMERIC)
+                self.assertEqual([item['range_label'] for item in groups], expected)
+
+        doc = document_for(text, self.root)
+        with self.assertRaisesRegex(PipelineStateError, "confirmation"):
+            write_groups(doc, self.settings, doc.job_title, 20, method=GROUPING_METHOD_NUMERIC)
+        groups = write_groups(doc, self.settings, doc.job_title, 20, method=GROUPING_METHOD_NUMERIC,
+                              confirmation_fingerprint=analysis.numeric_identity_fingerprint)
+        self.assertEqual(b''.join(Path(group.txt_path).read_bytes() for group in groups), text.encode('utf-8'))
+        self.assertIn('Body 620.', Path(groups[0].txt_path).read_text(encoding='utf-8'))
+        self.assertNotIn('Body 620.', Path(groups[1].txt_path).read_text(encoding='utf-8'))
+        self.assertNotIn(620, [chapter['number'] for chapter in groups[0].chapters])
+        self.assertEqual(groups[1].start, next(h.start for h in analysis.headings if h.number == 621))
+
+        manifest = json.loads(Path(doc.group_manifest_path).read_text(encoding='utf-8'))
+        self.assertEqual(manifest['grouping_method'], GROUPING_METHOD_NUMERIC)
+        self.assertEqual(manifest['numeric_confirmation']['fingerprint'], analysis.numeric_identity_fingerprint)
+        self.assertEqual(manifest['numeric_confirmation']['descriptor'], analysis.numeric_identity_descriptor)
+        restored = document_for(text, self.root)
+        self.assertEqual([group.group_id for group in restore_groups(restored, self.settings, doc.job_title, 20)],
+                         [group.group_id for group in groups])
+
+    def test_numeric_grouping_rejects_missing_or_ambiguous_starts(self):
+        missing_start = numeric_source({621})
+        duplicate_start = numeric_source(set(range(602, 621))).replace(
+            'Chương 621\r\n', 'Chương 621\r\nDuplicate body.\r\nChương 621\r\n', 1)
+        reset = 'Chương 601\nA.\nChương 650\nB.\nChương 620\nC.\nChương 700\nD.'
+        for text, expected in ((missing_start, 'Missing required group-start'),
+                               (duplicate_start, 'duplicate or reset'),
+                               (reset, 'duplicate or reset')):
+            with self.subTest(expected=expected):
+                analysis = analyze_grouping(text, self.settings, 20)
+                self.assertTrue(analysis.requires_numeric_boundaries)
+                self.assertIn(expected, analysis.numeric_unavailable_reason)
+                with self.assertRaisesRegex(PipelineStateError, "unavailable"):
+                    preview_groups(text, self.settings, 20, method=GROUPING_METHOD_NUMERIC)
+
+    def test_numeric_confirmation_identity_rejects_stale_source_pattern_and_manifest(self):
+        text = numeric_source({620})
+        analysis = analyze_grouping(text, self.settings, 20)
+        doc = document_for(text, self.root)
+        write_groups(doc, self.settings, doc.job_title, 20, method=GROUPING_METHOD_NUMERIC,
+                     confirmation_fingerprint=analysis.numeric_identity_fingerprint)
+
+        with self.assertRaises(PipelineStateError):
+            restore_groups(document_for(text.replace('Body 620.', 'Changed body 620.'), self.root),
+                           self.settings, doc.job_title, 20)
+        changed_patterns = Settings(detect_english=False)
+        with self.assertRaises(PipelineStateError):
+            restore_groups(document_for(text, self.root), changed_patterns, doc.job_title, 20)
+        with patch('media.groups.HEADING_SCANNER_VERSION', 'heading-scan-v2'):
+            with self.assertRaises(PipelineStateError):
+                restore_groups(document_for(text, self.root), self.settings, doc.job_title, 20)
+
+        manifest_path = Path(doc.group_manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        manifest['numeric_confirmation']['descriptor']['calculated_ranges'][0] = '601-619'
+        manifest['numeric_confirmation']['descriptor']['required_group_starts'][1]['offset'] += 1
+        manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+        with self.assertRaises(PipelineStateError):
+            restore_groups(document_for(text, self.root), self.settings, doc.job_title, 20)
 
     def test_restore_requires_manifest_source_config_and_files(self):
         text = 'Chương 1\nA.\nChương 2\nB.'

@@ -52,8 +52,9 @@ Raw TXT / ZIP
 - Detects configured headings losslessly, including Chương, Chuong, Chapter, Hồi, and Quyển.
 - Shows count, exact first/last headings, numbering gaps/repetitions/resets, and all group ranges.
 - Groups consecutive entries by 10, 20 (default), 25, 50, or a custom count; never sorts/renumbers.
+- When missing numbers make heading-count groups unsafe, offers confirmed numeric ranges and splits only at verified group-start headings.
 - Saves `final.txt` and `final.json` per group plus a validated `chapter_groups.json` manifest.
-- Concatenating group TXT files exactly reproduces confirmed Step 2 text, including the preamble.
+- Concatenating group TXT files exactly reproduces confirmed Step 2 text, including the preamble and original line endings.
 - Does **not** clean text or create TTS chunks. Title history remains available.
 
 ### Stage 4: Thumbnail & Audiobook

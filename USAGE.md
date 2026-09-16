@@ -111,12 +111,20 @@ detected count and exact first/last headings. Choose **10**, **20** (default),
 automatically. Numbering gaps, repeats, and resets are reported but not changed.
 `Quyển` headings count as flat entries, not a volume hierarchy.
 
+If detected headings are fewer than the numeric range because chapter numbers
+are missing, Step 3 does not group by heading count. It previews numeric ranges
+and asks for confirmation before using them. Missing headings inside a range
+(including an end number) are allowed; every calculated group-start heading
+must exist exactly once. A missing, duplicate, or reset boundary disables
+automatic numeric grouping and requires manual review.
+
 Click **Create Group Files**. Each group receives exact UTF-8 `final.txt` and
 `final.json` under `<output-root>/<novel-title>/<novel-title>_<range>/`.
 The first group retains the preamble. These files are not cleaned or TTS-chunked.
 The novel folder contains `chapter_groups.json`, the source of truth for all
 later stages. **Restore Matching Groups** validates that manifest against the
-current confirmed text, title, grouping configuration, and canonical files.
+current confirmed text, title, grouping configuration, heading patterns and
+numeric-boundary confirmation identity when applicable, and canonical files.
 It never discovers/regroups files by scanning folders.
 
 ## Stage 4: Thumbnail & Audiobook
