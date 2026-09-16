@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSplitter,
+    QSpinBox,
+    QStackedWidget,
 )
 
 from config.settings import DEFAULT_TTS_VOICE, Settings
@@ -437,21 +439,43 @@ class MainWindow(QMainWindow):
         
         # Stage 3: Clean & Chunk
         self.stage3_widget = self._create_stage3_tab()
-        self.tabs.addTab(self.stage3_widget, "3️⃣ Clean & Chunk")
+        self.tabs.addTab(self.stage3_widget, "3️⃣ Detect Chapters & Group")
         
         # Stage 4: Thumbnail & Audiobook
         self.stage4_widget = self._create_stage4_tab()
-        self.tabs.addTab(self.stage4_widget, "4️⃣ Thumbnail & Audiobook")
+        from ui.grouped_pipeline import TtsBatchPanel, VideoBatchPanel, UploadBatchPanel
+        self.group4 = TtsBatchPanel(lambda: self.document, self.settings, self)
+        self.stage4_stack = QStackedWidget()
+        self.stage4_stack.addWidget(self.group4)
+        self.stage4_stack.addWidget(self.stage4_widget)
+        self.tabs.addTab(self.stage4_stack, "4️⃣ Thumbnail & Audiobook")
 
         # Stage 5: hardware-adaptive static-image video
         self.stage5_widget = self._create_stage5_tab()
-        self.tabs.addTab(self.stage5_widget, "5️⃣ Create Video")
+        self.group5 = VideoBatchPanel(lambda: self.document, self.settings, self)
+        self.stage5_stack = QStackedWidget()
+        self.stage5_stack.addWidget(self.group5)
+        self.stage5_stack.addWidget(self.stage5_widget)
+        self.tabs.addTab(self.stage5_stack, "5️⃣ Create Video")
         from ui.youtube_tab import YouTubeTab
 
         self.stage6_widget = YouTubeTab(lambda: self.document, self.settings, self)
         self.stage6_widget.busy_changed.connect(self._set_youtube_busy)
         self.stage6_widget.diagnostic.connect(self._log)
-        self.tabs.addTab(self.stage6_widget, "6️⃣ YouTube Upload")
+        self.group6 = UploadBatchPanel(lambda: self.document, self.settings, self)
+        self.stage6_stack = QStackedWidget()
+        self.stage6_stack.addWidget(self.group6)
+        self.stage6_stack.addWidget(self.stage6_widget)
+        self.tabs.addTab(self.stage6_stack, "6️⃣ YouTube Upload")
+        for index, panel in ((3, self.group4), (4, self.group5), (5, self.group6)):
+            panel.busy_changed.connect(lambda busy, stage=index: self._set_group_batch_busy(stage, busy))
+            panel.diagnostic.connect(self._log)
+        for panel, action, label in ((self.group4, self._continue_to_stage5, "Continue to Step 5 →"),
+                                      (self.group5, self._continue_to_stage6, "Continue to Step 6 →")):
+            button = QPushButton(label)
+            panel.continue_btn = button
+            button.clicked.connect(action)
+            panel.layout_main.addWidget(button)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         
         # Pipeline workspace and diagnostics share a draggable vertical split.
@@ -610,7 +634,7 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        job_group = QGroupBox("Title / Chapter Configuration")
+        job_group = QGroupBox("Novel Title / Chapter Groups")
         job_form = QFormLayout(job_group)
         title_container = QWidget()
         title_layout = QHBoxLayout(title_container)
@@ -632,14 +656,41 @@ class MainWindow(QMainWindow):
         self.stage3_chapter_edit = QLineEdit()
         self.stage3_chapter_edit.setPlaceholderText("Chapter Number")
         self.stage3_chapter_edit.textChanged.connect(self._on_job_identity_changed)
-        job_form.addRow("Chapter", self.stage3_chapter_edit)
+        # Legacy single-job label remains available to older callers, but is
+        # not an input to grouped jobs. Group ranges are detected, never typed.
+        self.stage3_chapter_edit.hide()
+        grouping_row = QWidget()
+        grouping_layout = QHBoxLayout(grouping_row)
+        grouping_layout.setContentsMargins(0, 0, 0, 0)
+        self.stage3_group_size = QComboBox()
+        for size in (10, 20, 25, 50):
+            self.stage3_group_size.addItem(str(size), size)
+        self.stage3_group_size.addItem("Custom", None)
+        self.stage3_group_size.setCurrentIndex(1)
+        self.stage3_custom_size = QSpinBox()
+        self.stage3_custom_size.setRange(1, 1000000)
+        self.stage3_custom_size.setValue(20)
+        self.stage3_custom_size.setVisible(False)
+        self.stage3_group_size.currentIndexChanged.connect(self._on_grouping_changed)
+        self.stage3_custom_size.valueChanged.connect(self._on_grouping_changed)
+        grouping_layout.addWidget(self.stage3_group_size)
+        grouping_layout.addWidget(self.stage3_custom_size)
+        job_form.addRow("Chapters per group", grouping_row)
+        self.stage3_detection_label = QLabel("Detected chapters: —")
+        self.stage3_detection_label.setWordWrap(True)
+        self.stage3_detection_label.setTextFormat(Qt.TextFormat.PlainText)
+        job_form.addRow(self.stage3_detection_label)
         layout.addWidget(job_group)
         
         btn_layout = QHBoxLayout()
         
-        clean_btn = QPushButton("🧹 Clean & Chunk")
-        clean_btn.clicked.connect(self._on_clean_chunk)
+        clean_btn = QPushButton("Create Group Files")
+        self.stage3_create_groups_btn = clean_btn
+        clean_btn.clicked.connect(self._on_create_group_files)
         btn_layout.addWidget(clean_btn)
+        restore_btn = QPushButton("Restore Matching Groups")
+        restore_btn.clicked.connect(lambda: self._on_create_group_files(restore=True))
+        btn_layout.addWidget(restore_btn)
 
         self.stage3_continue_btn = QPushButton("Continue to Step 4 →")
         self.stage3_continue_btn.setEnabled(False)
@@ -1085,6 +1136,68 @@ class MainWindow(QMainWindow):
             self._error(f"Export failed: {error}")
 
     # ------------------------------------------------------- Step 3/4 job
+    def _selected_group_size(self) -> int:
+        return self.stage3_group_size.currentData() or self.stage3_custom_size.value()
+
+    def _on_grouping_changed(self, *_):
+        self.stage3_custom_size.setVisible(self.stage3_group_size.currentData() is None)
+        self.document._clear_step3_artifacts()
+        self.stage3_continue_btn.setEnabled(False)
+        self._refresh_group_preview()
+        if hasattr(self, "group4"):
+            self._refresh_group_panels()
+
+    def _refresh_group_preview(self):
+        from media.groups import preview_groups
+        try:
+            text = self.document.require_step2_confirmed_output()
+            headings, groups, diagnostics = preview_groups(text, self.settings, self._selected_group_size())
+            self.stage3_detection_label.setText(f"Detected chapters: {len(headings)}\nFirst chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}")
+            self.stage3_output.setPlainText(
+                f"Total chapters: {len(headings)}\nChapters per group: {self._selected_group_size()}\nOutput groups: {len(groups)}\n\n" +
+                "\n".join(f"{g['order']}. {g['label']} ({len(g['chapters'])} chapters)" for g in groups) +
+                ("\n\nNumbering diagnostics:\n" + "\n".join(diagnostics) if diagnostics else ""))
+            self.stage3_create_groups_btn.setEnabled(bool(self.stage3_title_edit.text().strip()))
+        except PipelineStateError as error:
+            self.stage3_detection_label.setText("Detected chapters: 0 / unavailable")
+            self.stage3_output.setPlainText(str(error))
+            self.stage3_create_groups_btn.setEnabled(False)
+
+    def _on_create_group_files(self, _checked=False, *, restore=False):
+        from media.groups import write_groups, restore_groups
+        try:
+            title = self.stage3_title_edit.text().strip()
+            method = restore_groups if restore else write_groups
+            groups = method(self.document, self.settings, title, self._selected_group_size())
+            self._remember_current_title()
+            self.stage3_continue_btn.setEnabled(True)
+            self._refresh_group_preview()
+            self.stage3_output.append("\nGroup manifest: " + self.document.group_manifest_path + "\n" + "\n".join(g.txt_path for g in groups))
+            self._refresh_group_panels()
+            self.document.stage(StageKey.CLEAN_CHUNK).touch("Step 2 confirmed output", f"{len(groups)} exact chapter groups")
+            self._log(f"✓ Created/restored {len(groups)} chapter groups; canonical TXT is unchanged Step 2 text.")
+        except Exception as error:
+            self._error(str(error))
+
+    def _refresh_group_panels(self):
+        legacy = not self.document.chapter_groups and self.document.step3_artifacts is not None
+        for stack, panel in ((self.stage4_stack, self.group4), (self.stage5_stack, self.group5), (self.stage6_stack, self.group6)):
+            stack.setCurrentIndex(1 if legacy else 0)
+            if not panel.busy:
+                panel.refresh()
+
+    def _set_group_batch_busy(self, index: int, busy: bool):
+        self.load_btn.setEnabled(not busy)
+        self.settings_btn.setEnabled(not busy)
+        self.tabs.blockSignals(True)
+        try:
+            if busy:
+                self.tabs.setCurrentIndex(index)
+            for tab in range(self.tabs.count()):
+                self.tabs.setTabEnabled(tab, not busy or tab == index)
+        finally:
+            self.tabs.blockSignals(False)
+
     def _set_job_editors(self, title: str, chapter: str) -> None:
         self._updating_job_widgets = True
         try:
@@ -1145,8 +1258,12 @@ class MainWindow(QMainWindow):
             self._video_audio_probe = None
             self._refresh_stage4_ui()
             self._refresh_stage5_ui()
+            if hasattr(self, "stage3_group_size"):
+                self._refresh_group_preview()
 
     def _refresh_stage4_ui(self) -> None:
+        if hasattr(self, "group4"):
+            self._refresh_group_panels()
         bundle = self.document.step3_artifacts
         if bundle is None:
             self.stage4_source_label.setText("Source: Run Step 3 first")
@@ -1433,6 +1550,14 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- Step 5
     def _enter_stage5(self) -> bool:
+        if self.document.chapter_groups:
+            try:
+                self._refresh_group_panels()
+                self.group5.enter()
+                return True
+            except Exception as error:
+                self._error(str(error))
+                return False
         try:
             self._video_media = self.document.require_step4_outputs()
         except PipelineStateError as error:
@@ -1674,6 +1799,14 @@ class MainWindow(QMainWindow):
             self.tabs.blockSignals(False)
 
     def closeEvent(self, event) -> None:
+        for panel in (self.group4, self.group5, self.group6):
+            if panel.busy:
+                panel.cancel()
+                if panel is self.group6 and panel.editor.busy:
+                    panel.editor.cancel()
+                self._log("Stopping the active group operation; close again after it stops. Recovery files are retained.")
+                event.ignore()
+                return
         if self.stage6_widget.busy:
             self.stage6_widget.cancel()
             self._log("Cancelling YouTube operation. Close the application after it stops.")
@@ -1766,11 +1899,39 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         updated = dialog.updated_settings()
+        from media.groups import grouping_config
+        from cleaning.textclean import CleaningOptions
+        from dataclasses import asdict
+        audio_config = lambda values: (asdict(CleaningOptions.from_settings(values)), values.max_chunk_chars, values.min_chunk_chars, values.tts_voice)
+        old_audio = audio_config(self.settings)
+        old_thumbnail = (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality)
+        old_grouping = grouping_config(self.settings, self._selected_group_size())
+        old_root = self.settings.resolved_output_dir(self.document.input_directory)
         for name in self.settings.__dataclass_fields__:
             setattr(self.settings, name, getattr(updated, name))
+        if (old_grouping != grouping_config(self.settings, self._selected_group_size()) or
+                old_root != self.settings.resolved_output_dir(self.document.input_directory)):
+            self.document._clear_step3_artifacts()
+            self.stage3_continue_btn.setEnabled(False)
+            self._refresh_group_preview()
+            self._refresh_group_panels()
         try:
+            from media.groups import save_job_state
+            for group in self.document.chapter_groups:
+                changed = False
+                if old_audio != audio_config(self.settings):
+                    group.state["tts_status"] = "TTS Incomplete"
+                    group.state.pop("video", None)
+                    changed = True
+                if old_thumbnail != (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality):
+                    group.state.pop("thumbnail", None)
+                    group.state.pop("video", None)
+                    changed = True
+                if changed:
+                    save_job_state(group)
             path = self.settings.save()
             self._apply_runtime_settings()
+            self._refresh_group_panels()
             self._log(f"✓ Settings saved to {path}")
         except Exception as error:
             self._error(f"Save failed: {error}")
@@ -1844,7 +2005,10 @@ class MainWindow(QMainWindow):
 
     def _continue_to_stage4(self) -> None:
         try:
-            self.document.require_step3_artifacts()
+            if self.document.chapter_groups:
+                self.document.require_chapter_groups()
+            else:
+                self.document.require_step3_artifacts()
         except PipelineStateError as error:
             self._error(str(error))
             return
@@ -1858,7 +2022,11 @@ class MainWindow(QMainWindow):
 
     def _enter_stage6(self) -> bool:
         try:
-            self.stage6_widget.enter()
+            self._refresh_group_panels()
+            if self.document.chapter_groups:
+                self.group6.enter()
+            else:
+                self.stage6_widget.enter()
             return True
         except Exception as error:
             from media.youtube import YouTubeUploadError
@@ -1881,6 +2049,7 @@ class MainWindow(QMainWindow):
         elif index == 2:
             try:
                 self.document.require_step2_confirmed_output()
+                self._refresh_group_preview()
             except PipelineStateError as error:
                 self.tabs.blockSignals(True)
                 self.tabs.setCurrentIndex(1)
@@ -1889,7 +2058,11 @@ class MainWindow(QMainWindow):
                 self._error(str(error))
         elif index == 3:
             try:
-                self.document.require_step3_artifacts()
+                if self.document.chapter_groups:
+                    self.document.require_chapter_groups()
+                    self.group4.enter()
+                else:
+                    self.document.require_step3_artifacts()
                 self._refresh_stage4_ui()
             except PipelineStateError as error:
                 self.tabs.blockSignals(True)

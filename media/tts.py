@@ -13,6 +13,7 @@ import random
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -196,14 +197,26 @@ class TtsProcessor:
 
     async def _save_once(self, text: str, output: Path) -> None:
         partial = output.with_suffix(output.suffix + ".part")
+        task = None
         try:
             partial.unlink(missing_ok=True)
             client = self.client_factory(text, self.voice)
-            await asyncio.wait_for(client.save(str(partial)), timeout=self.timeout_seconds)
+            task = asyncio.create_task(client.save(str(partial)))
+            deadline = time.monotonic() + self.timeout_seconds
+            while not task.done():
+                if self.cancel_event.is_set():
+                    raise RuntimeError("Đã hủy tạo audiobook.")
+                if time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError("Edge-TTS request timed out.")
+                await asyncio.wait({task}, timeout=min(0.2, max(0.0, deadline - time.monotonic())))
+            await task
             if not partial.is_file() or partial.stat().st_size <= 0:
                 raise RuntimeError("Edge-TTS tạo tệp MP3 rỗng.")
             os.replace(partial, output)
         finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             try:
                 partial.unlink(missing_ok=True)
             except OSError:
@@ -224,7 +237,11 @@ class TtsProcessor:
                     raise TtsConfigurationError(str(error)) from error
                 last = error
                 if attempt < attempts:
-                    await asyncio.sleep(min(16.0, 0.75 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.45))
+                    delay = min(16.0, 0.75 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.45)
+                    while delay > 0 and not self.cancel_event.is_set():
+                        pause = min(0.2, delay)
+                        await asyncio.sleep(pause)
+                        delay -= pause
         return False, last, attempts
 
     def _ffmpeg_concat(self, inputs: Iterable[Path], output: Path) -> None:
@@ -237,7 +254,9 @@ class TtsProcessor:
         try:
             Path(list_name).write_text("".join(_safe_concat_line(path) for path in paths), encoding="utf-8")
             temporary.unlink(missing_ok=True)
-            completed = subprocess.run(
+            if self.cancel_event.is_set():
+                raise RuntimeError("Đã hủy gộp audiobook.")
+            process = subprocess.Popen(
                 [
                     str(self.ffmpeg_path), "-y", "-f", "concat", "-safe", "0",
                     "-i", list_name, "-c", "copy", str(temporary),
@@ -245,12 +264,26 @@ class TtsProcessor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                check=False,
             )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr.strip() or "FFmpeg không thể gộp MP3.")
+            while True:
+                try:
+                    _, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if self.cancel_event.is_set():
+                        process.terminate()
+                        try:
+                            process.communicate(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate()
+                        raise RuntimeError("Đã hủy gộp audiobook.")
+            if process.returncode != 0:
+                raise RuntimeError(stderr.strip() or "FFmpeg không thể gộp MP3.")
             if not temporary.is_file() or temporary.stat().st_size <= 0:
                 raise RuntimeError("FFmpeg tạo audiobook rỗng.")
+            if self.cancel_event.is_set():
+                raise RuntimeError("Đã hủy gộp audiobook.")
             os.replace(temporary, output)
         finally:
             Path(list_name).unlink(missing_ok=True)

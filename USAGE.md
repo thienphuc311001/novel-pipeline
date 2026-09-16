@@ -103,48 +103,43 @@ Click **"🔄 Apply Translations"** to replace Chinese with Vietnamese throughou
 
 **Algorithm:** Longest phrases first, so `修炼者` (tu luyện giả) replaces before `修炼` (tu luyện).
 
-## Stage 3: Clean & Chunk
+## Stage 3: Detect Chapters & Group
 
-### Text Cleaning
+Complete Step 2 first. Enter/select a saved novel title. Step 3 displays the
+detected count and exact first/last headings. Choose **10**, **20** (default),
+**25**, **50**, or **Custom** chapters per group; the full preview updates
+automatically. Numbering gaps, repeats, and resets are reported but not changed.
+`Quyển` headings count as flat entries, not a volume hierarchy.
 
-Removes TTS-unfriendly elements:
-- Control characters
-- HTML tags and entities
-- Quotes and brackets (configurable)
-- Symbol-to-word conversion: `&` → "và", `%` → "phần trăm"
-
-### Chunking
-
-Click **"🧹 Clean & Chunk"** to split chapters into TTS-ready chunks.
-
-**Default limit:** 1200 characters per chunk
-
-**Break preference:**
-1. Paragraph boundaries (`\n\n`)
-2. Sentence endings (`.!?。！？`)
-3. Clause boundaries (`,;:，；：`)
-4. Word boundaries (spaces)
-5. Hard slice (only when unavoidable, flagged with warning)
-
-**Guarantees:**
-- Never splits across chapter boundaries
-- Warns when hard slicing is required
-
-**Example output:**
-```
-Created 45 chunks:
-• Ch 1 part 1/3: 2850 chars
-• Ch 1 part 2/3: 2920 chars
-• Ch 1 part 3/3: 1200 chars
-```
+Click **Create Group Files**. Each group receives exact UTF-8 `final.txt` and
+`final.json` under `<output-root>/<novel-title>/<novel-title>_<range>/`.
+The first group retains the preamble. These files are not cleaned or TTS-chunked.
+The novel folder contains `chapter_groups.json`, the source of truth for all
+later stages. **Restore Matching Groups** validates that manifest against the
+current confirmed text, title, grouping configuration, and canonical files.
+It never discovers/regroups files by scanning folders.
 
 ## Stage 4: Thumbnail & Audiobook
 
-Step 4 uses only the TXT/JSON bundle created by Step 3. It displays the first
-chapter, creates a 1280×720 YouTube thumbnail from one selected image, and
-generates/resumes a Vietnamese Edge-TTS audiobook. Output is saved directly in
-the Step 3 title/chapter job folder. FFmpeg must be installed to combine MP3
-chunks into the final audiobook.
+All groups appear unchecked. Select groups (or **Select All**) and choose one
+shared cover to create a separate 1280×720 `thumbnail.jpg` labeled with each
+range. Highlight a group to inspect its canonical paths, exact first chapter,
+thumbnail, and failure details.
+
+**Start TTS** processes groups sequentially. Inside each group, Step 4 cleans a
+working copy and creates chapter-safe 1200-character chunks in `tts_chunks.json`.
+`final.txt`/`final.json` remain unchanged. Numbered audio and the resume manifest
+live in `audio_chunks/`; the final file is `<group-name>_audiobook.mp3`.
+Current-group and overall progress stay visible. **Cancel** stops queued groups
+and retains completed chunks.
+
+An incomplete group does not automatically publish a partial MP3; the batch
+continues. Use **View Failed Chunks**, **Retry Failed Chunks**, **Resume TTS**, or
+**Edit Text and Retry** on the highlighted group. Editing affects only one
+failed chunk, is non-empty and bounded by the chunk limit, and persists in
+`tts_overrides.json`. Unchanged valid audio is reused. **Merge with Missing
+Chunks** requires explicit confirmation and valid existing audio; excluded
+numbers are recorded and the result is labeled partial.
 
 Unless **Output folder override** is set in Settings, the Step 3 job folder is
 created beside the first TXT/ZIP selected in Step 1. Steps 4 and 5 continue to
@@ -158,7 +153,8 @@ encoders, then performs a real short encode before selecting an encoder. A
 failed hardware encoder falls back to another verified option and finally to
 `libx264`.
 
-Click **Create Video** to produce a 1920×1080 H.264 MP4. The image is preserved
+Select groups and click **Create Videos** to produce one 1920×1080 H.264 MP4
+per group sequentially. Valid current videos are verified and skipped. The image is preserved
 without stretching, FFmpeg progress and speed remain visible, and **Cancel**
 stops only the partial render. The completed file is saved automatically as
 `<title>_<chapter>.mp4` in the current job folder.
@@ -171,7 +167,7 @@ stops only the partial render. The completed file is saved automatically as
 1. Load TXT files
 2. Normalize chapters
 3. Complete Chinese review
-4. Clean & chunk to create TXT/JSON
+4. Detect/group chapters to create canonical TXT/JSON
 5. Generate thumbnail and/or audiobook
 6. Create MP4 video
 ```
@@ -184,7 +180,7 @@ stops only the partial render. The completed file is saved automatically as
 3. Scan Chinese
 4. Translate (manual or AI)
 5. Apply translations
-6. Clean & chunk to create TXT/JSON
+6. Detect/group chapters to create canonical TXT/JSON
 7. Generate thumbnail and/or audiobook
 8. Create MP4 video
 ```
@@ -195,7 +191,7 @@ stops only the partial render. The completed file is saved automatically as
 1. Load pre-translated text
 2. Normalize chapters
 3. Confirm Step 2 has no Chinese residue
-4. Clean & chunk (with TTS settings)
+4. Create chapter groups, then clean/chunk each selected group in Step 4
 5. Generate/resume the Edge-TTS audiobook
 6. Create the final MP4
 ```
@@ -280,27 +276,49 @@ Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings →
 
 Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
 
-Click **Upload to YouTube**. Progress shows bytes transferred, percentage, and upload speed. Temporary upload failures use bounded backoff and query the server's received position before retransmission. **Cancel** stops at the next safe request boundary, retaining resumable recovery data. The current HTTP request has a bounded timeout. Upstream controls are disabled while an operation runs to preserve its inputs.
+All group checkboxes start unchecked. Select groups and click **Start Uploads**.
+Uploads run sequentially with current-group and overall progress. Description,
+tags, category, visibility, made-for-kids, playlist, and schedule are shared;
+highlight each not-started group to edit its individual title. Selections and
+settings are snapshotted when starting. Temporary failures retain resumable
+recovery data; group-specific failures do not stop other groups. Authentication
+failure pauses the batch: reconnect the original channel and click **Resume
+Paused Batch**. **Cancel** stops queued groups and the active request at its
+next safe boundary. Upstream/concurrent batch controls are disabled while running.
 
 `youtube_upload.json` persists video ID/URL, metadata, byte position, and independent video/thumbnail/playlist outcomes. Resumable URLs and OAuth tokens remain in the OS credential store. **Resume Upload** queries that existing session rather than creating a new video. Resume uses the metadata originally sent; edit metadata for a new upload only. If a session expires or completion cannot be confirmed, the app stops. Check YouTube Studio to establish the previous outcome before explicitly using **Upload Again**. It never automatically creates another upload from an uncertain state.
 
-After video upload, thumbnail and optional playlist operations run separately. A failure preserves the video ID. Use **Retry Thumbnail** or **Retry Playlist**; these controls do not upload the video again. An uncertain playlist insert is checked for existing membership before another insertion. An explicit retry rechecks after bounded delays and inserts only if the video remains absent; it does not automatically repeat an uncertain playlist write. If YouTube cannot confirm membership, check the playlist and retry later.
+Started/paused rows explicitly show **using saved metadata**. Shared edits apply
+only to sessions not yet started; a resumed insertion keeps its original metadata.
+After video upload, thumbnail and playlist operations remain independent. Select
+an incomplete uploaded group and start again to retry only unfinished follow-ups,
+not its video. Uncertain playlist insertion is checked for existing membership.
 
-A completed job shows **This job has already been uploaded**, its ID, URL, actual visibility, thumbnail status, and playlist status. **Open YouTube Video** opens the URL; **Copy URL** copies it. **Upload Again** requires a separate explicit confirmation. Keep `youtube_upload.json` and the secure credential store for recovery; corrupt/missing session records cannot silently start another copy.
+A normal batch skips completed uploads. **Open YouTube Video** and **Copy URL**
+operate on the highlighted group. **Upload Again (selected group)** requires
+explicit confirmation and affects only that group. **Edit Uploaded Video
+Metadata** is a separate API action: it preserves unrelated mutable fields and
+updates the local record only after API success, without changing thumbnail or
+playlist membership. Keep `youtube_upload.json` and secure credentials for
+recovery; an uncertain session never automatically starts another video.
 
-Upload preparation exposes this layout without renaming the app's existing artifacts:
+Each grouped job has this layout:
 
 ```text
 <title>_<chapter>/
     final.txt
     final.json
     thumbnail.jpg
-    audiobook.mp3
+    tts_chunks.json
+    <title>_<chapter>_audiobook.mp3
+    audio_chunks/
+    job_state.json
     <title>_<chapter>.mp4
     youtube_upload.json
 ```
 
-The four convenience filenames use hard links when supported, so large MP3s do not require another copy. Other filesystems use cancellable atomic copies. Existing job-derived names and the audio-chunk resume directory remain available.
+Legacy single-job files remain untouched; they are not automatically migrated
+or deleted. Grouped jobs are restored only from a matching chapter manifest.
 
 ## Keyboard Shortcuts
 

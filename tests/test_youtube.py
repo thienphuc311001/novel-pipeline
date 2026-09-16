@@ -62,6 +62,19 @@ COMPLETE = Response(data={"id": "abc123", "status": {"privacyStatus": "private"}
 
 
 class YouTubeUploadTests(unittest.TestCase):
+    def test_resume_accepts_already_accepted_past_schedule(self):
+        metadata = UploadMetadata('Frozen scheduled title', publish_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat())
+        uploader = self.uploader(ScriptedSession(COMPLETE, Response()))
+        key = 'resume-key'
+        self.secrets.set(key, SESSION_URI)
+        state = {'schema_version': 1, 'status': 'uploading', 'channel_id': 'channel', 'metadata': metadata.__dict__,
+                 'video_fingerprint': uploader._fingerprint(self.video), 'session_key': key, 'total_bytes': self.video.stat().st_size,
+                 'bytes_sent': 0, 'video_id': None, 'playlist_id': None, 'title': metadata.title, 'privacy': 'private'}
+        (self.job / 'youtube_upload.json').write_text(json.dumps(state))
+        result = uploader.upload(self.video, self.thumbnail, self.job, metadata, 'channel')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['metadata'], metadata.__dict__)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

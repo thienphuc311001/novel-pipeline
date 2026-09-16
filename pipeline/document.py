@@ -285,7 +285,7 @@ class StageKey:
     NAMES = {
         NORMALIZE: "Chuẩn hoá chương",
         CHINESE: "Duyệt & dịch Trung",
-        CLEAN_CHUNK: "Làm sạch & chia đoạn",
+        CLEAN_CHUNK: "Phát hiện & nhóm chương",
         FILTER_EXPORT: "Thumbnail & audiobook",
         VIDEO: "Tạo video",
         YOUTUBE: "Tải lên YouTube",
@@ -375,6 +375,9 @@ class PipelineDocument:
         self.job_title: str = ""
         self.job_chapter: str = ""
         self.step3_artifacts: Optional[Step3ArtifactBundle] = None
+        self.chapter_groups: List[Any] = []
+        self.grouping_config: Dict[str, Any] = {}
+        self.group_manifest_path: str = ""
         self.thumbnail_path: str = ""
         self.thumbnail_fingerprint: Dict[str, Any] = {}
         self.audio_chunks_dir: str = ""
@@ -431,6 +434,9 @@ class PipelineDocument:
         clone.job_title = self.job_title
         clone.job_chapter = self.job_chapter
         clone.step3_artifacts = copy.copy(self.step3_artifacts)
+        clone.chapter_groups = copy.deepcopy(self.chapter_groups)
+        clone.grouping_config = copy.deepcopy(self.grouping_config)
+        clone.group_manifest_path = self.group_manifest_path
         clone.thumbnail_path = self.thumbnail_path
         clone.thumbnail_fingerprint = dict(self.thumbnail_fingerprint)
         clone.audio_chunks_dir = self.audio_chunks_dir
@@ -809,6 +815,9 @@ class PipelineDocument:
         }
 
     def _clear_step3_artifacts(self) -> None:
+        self.chapter_groups = []
+        self.grouping_config = {}
+        self.group_manifest_path = ""
         self.step3_artifacts = None
         self.thumbnail_path = ""
         self.thumbnail_fingerprint = {}
@@ -824,7 +833,7 @@ class PipelineDocument:
         bundle = self.step3_artifacts
         if bundle is None:
             raise PipelineStateError(
-                "Run Step 3 Clean & Chunk to create the TXT/JSON job bundle first."
+                "Run Step 3 to create the TXT/JSON chapter group files first."
             )
         if self.cleaned_text is None or bundle.source_revision != self.step2_revision:
             raise PipelineStateError("Step 3 bundle is stale; run Step 3 again.")
@@ -842,8 +851,36 @@ class PipelineDocument:
             raise PipelineStateError(f"Step 3 bundle is unavailable or modified: {error}") from error
         return bundle
 
-    def require_step4_outputs(self) -> Step4MediaBundle:
+    def require_group_artifacts(self, group_id: str):
+        from media.groups import validate_group
+
+        group = next((g for g in self.chapter_groups if g.group_id == group_id), None)
+        if group is None:
+            raise PipelineStateError("Unknown or invalidated chapter group. Create group files in Step 3.")
+        validate_group(group, self.require_step2_confirmed_output())
+        return group
+
+    def require_chapter_groups(self):
+        if not self.chapter_groups:
+            raise PipelineStateError("Create chapter group TXT/JSON files in Step 3 first.")
+        source = self.require_step2_confirmed_output()
+        cursor = 0
+        for order, group in enumerate(self.chapter_groups, 1):
+            if group.order != order or group.start != cursor or group.end <= group.start:
+                raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 3.")
+            self.require_group_artifacts(group.group_id)
+            cursor = group.end
+        if cursor != len(source):
+            raise PipelineStateError("Chapter groups do not cover the complete Step 2 output; recreate them in Step 3.")
+        return self.chapter_groups
+
+    def require_step4_outputs(self, group_id: Optional[str] = None) -> Step4MediaBundle:
         """Return only the current, validated thumbnail and audiobook pair."""
+        if group_id is not None:
+            from media.groups import require_media
+            return require_media(self, group_id)
+        if self.chapter_groups:
+            raise PipelineStateError("Select an explicit chapter group for Step 4 outputs.")
         bundle = self.require_step3_artifacts()
         if not self.thumbnail_path:
             raise PipelineStateError("Generate the Step 4 thumbnail before opening Step 5.")
@@ -879,8 +916,13 @@ class PipelineDocument:
             audiobook_fingerprint=dict(self.audiobook_fingerprint),
         )
 
-    def require_step5_outputs(self) -> Step5UploadBundle:
+    def require_step5_outputs(self, group_id: Optional[str] = None) -> Step5UploadBundle:
         """Fail closed unless Step 6 would upload the current generated video."""
+        if group_id is not None:
+            from media.groups import require_video
+            return require_video(self, group_id)
+        if self.chapter_groups:
+            raise PipelineStateError("Select an explicit chapter group for Step 5 outputs.")
         media = self.require_step4_outputs()
         if not self.video_path:
             raise PipelineStateError("Create the Step 5 video before opening Step 6.")

@@ -250,7 +250,7 @@ class YouTubeTab(QWidget):
                 self.category_combo.addItem(item["title"], item["id"])
             self.category_combo.setCurrentIndex(max(0, self.category_combo.findData(category)))
         # A resumed session must preserve the metadata sent at initiation.
-        if self.state and self.state.get("session_key"):
+        if self.state and self.state.get("session_key") and not getattr(self, "group_mode", False):
             self._restore_metadata()
 
     def _restore_metadata(self):
@@ -488,6 +488,15 @@ class YouTubeTab(QWidget):
         self.retry_playlist_btn.setEnabled(ready and same_channel and video_id and bool(self.state.get("playlist_id")) and not self.state.get("playlist_added"))
         self.open_btn.setEnabled(video_id)
         self.copy_btn.setEnabled(video_id)
+        if getattr(self, "group_mode", False):
+            for button in (self.upload_btn, self.cancel_btn, self.again_btn,
+                           self.retry_thumbnail_btn, self.retry_playlist_btn):
+                button.hide()
+            owner = self.parent()
+            if getattr(owner, "running", False):
+                self.metadata_widget.setEnabled(False)
+                self.connect_btn.setEnabled(False)
+                self.disconnect_btn.setEnabled(False)
 
     def _video_url(self):
         # Build a known YouTube URL; never open arbitrary text from a job file.

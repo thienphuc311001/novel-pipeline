@@ -17,13 +17,12 @@ Raw TXT / ZIP
   → Detect & Remove Duplicate Chapters
   → Review Remaining Chinese
   → Translate Chinese (optional AI)
-  → Clean Text for TTS
-  → Detect Chapters
-  → Chunk Text
-  → Create Step 3 TXT / JSON job bundle
-  → Generate YouTube thumbnail / resumable audiobook
-  → Create a hardware-accelerated static-image MP4
-  → Upload to YouTube with desktop OAuth and resumable recovery
+  → Detect chapters / preview consecutive chapter groups
+  → Create exact TXT / JSON files per group
+  → Clean and TTS-chunk each selected group independently
+  → Generate group thumbnails / sequential resumable audiobooks
+  → Sequential hardware-accelerated MP4 batch
+  → Sequential YouTube uploads with per-group recovery
 ```
 
 ### Stage 1: Chapter Normalization
@@ -48,26 +47,23 @@ Raw TXT / ZIP
 - **Optional AI translation** - Google Gemini (requires API key, fully optional)
 - **Longest-first replacement** - Prevents substring corruption (修炼者 before 修炼)
 
-### Stage 3: Clean, Chunk & Create Job Files
+### Stage 3: Detect Chapters & Group
 
-- **TTS cleaning** - Removes control chars, HTML, configurable quotes/brackets
-- **Symbol-to-word conversion** - `&` → "và", `%` → "phần trăm"
-- **Custom replacement rules** - User-defined patterns
-- **Chapter-safe chunking** - Never splits across chapter boundaries
-- **Sentence-aware splitting** - Break preference: paragraph → sentence → clause → space
-- **Hard-split warnings** - Flags chunks where natural breaks weren't possible
-
-- **Per-job title and chapter** - Defaults from the loaded input and first chapter, both editable
-- **UTF-8 TXT** - Cleaned novel text with normalized headers and no technical metadata
-- **Ordered JSON chunks** - Includes source hashes and TTS-ready chunks with spoken chapter headers
-- **Safe reuse** - Existing job folders are reused while stale artifacts are rejected by fingerprints
+- Detects configured headings losslessly, including Chương, Chuong, Chapter, Hồi, and Quyển.
+- Shows count, exact first/last headings, numbering gaps/repetitions/resets, and all group ranges.
+- Groups consecutive entries by 10, 20 (default), 25, 50, or a custom count; never sorts/renumbers.
+- Saves `final.txt` and `final.json` per group plus a validated `chapter_groups.json` manifest.
+- Concatenating group TXT files exactly reproduces confirmed Step 2 text, including the preamble.
+- Does **not** clean text or create TTS chunks. Title history remains available.
 
 ### Stage 4: Thumbnail & Audiobook
 
-- **First chapter preview** - Displays the exact first chapter from the validated Step 3 bundle
-- **YouTube thumbnail** - Center-crops an image into a 1280×720 JPEG with a black title/chapter band
-- **Edge-TTS audiobook** - Resumable ordered MP3 chunks, retries, fallback splitting, and FFmpeg merge
-- **Job folder output** - Contains the TXT, JSON, thumbnail, final MP3, and audio-chunk resume data
+- Unchecked group checklists, shared cover image, per-group `thumbnail.jpg`, and exact first-chapter preview.
+- Cleans only a TTS working copy, then writes separate ordered `tts_chunks.json` plans (1200-character default).
+- Sequential groups with existing bounded concurrency, retries, fallback splitting, and resume inside each group.
+- Incomplete groups retain detailed failures and successful audio; later groups continue.
+- Failed-chunk editing persists separate overrides. Partial merge requires explicit approval.
+- Visible current-group/overall progress; Cancel preserves completed files and stops queued groups.
 
 ### Stage 5: Create Video
 
@@ -76,6 +72,7 @@ Raw TXT / ZIP
 - **Reliable fallback** - Retries with the next verified encoder and always keeps `libx264` as the CPU fallback
 - **YouTube-ready MP4** - Creates a 1920×1080 H.264 video with live progress and clean cancellation
 - **Input-relative jobs** - By default the job folder is created beside the first Step 1 input; Settings can override the output root
+- **Sequential groups** - Select a subset; validated current MP4s are skipped, failures remain isolated.
 
 ### Stage 6: YouTube Upload
 
@@ -85,7 +82,9 @@ Raw TXT / ZIP
 - Shows transferred bytes, percentage, and speed, with bounded retries and saved-session recovery.
 - Stores `youtube_upload.json` in the job folder; another video upload requires explicit action.
 - Retries thumbnail and playlist failures independently using the saved video ID.
-- Exposes `final.txt`, `final.json`, `thumbnail.jpg`, and `audiobook.mp3` alongside existing filenames (hard links where supported).
+- Uploads selected groups sequentially; completed uploads are skipped and authentication failures pause for reconnect.
+- Shared metadata and individual titles; started sessions use frozen metadata, with a separate post-upload metadata editor.
+- Every group retains its own `youtube_upload.json`; uncertain uploads never automatically create another video.
 
 See [YouTube setup and recovery](USAGE.md#step-6-youtube-upload) before first use.
 
@@ -119,10 +118,10 @@ python app.py
 1. **Load Files** - Select TXT or ZIP files
 2. **Normalize Chapters** - Detect and clean chapter structure
 3. **Scan Chinese** (optional) - Find remaining Chinese text
-4. **Clean & Chunk** - Split into TTS-ready chunks
-5. **Generate media** - Create the thumbnail and audiobook
-6. **Create video** - Combine the current Step 4 outputs into MP4
-7. **YouTube Upload** - Connect your channel, review metadata, and upload the current MP4
+4. **Detect Chapters & Group** - Choose a chapter count and create exact group files
+5. **Generate media** - Select groups, choose a shared cover, and start TTS
+6. **Create Videos** - Render selected groups, automatically skipping valid completed MP4s
+7. **Start Uploads** - Connect your channel, review shared metadata/per-group titles, and upload selected groups
 
 ### Configuration
 

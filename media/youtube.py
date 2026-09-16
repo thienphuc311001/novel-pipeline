@@ -61,7 +61,7 @@ class UploadMetadata:
     playlist_id: str | None = None
     publish_at: str | None = None
 
-    def validate(self) -> None:
+    def validate(self, *, require_future: bool = True) -> None:
         if not isinstance(self.title, str) or not self.title.strip() or len(self.title) > 100:
             raise ValueError("Title is required and must contain at most 100 characters.")
         if not isinstance(self.description, str) or len(self.description.encode("utf-8")) > 5000:
@@ -88,7 +88,7 @@ class UploadMetadata:
                 when = datetime.fromisoformat(self.publish_at.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 raise ValueError("The publishing schedule must be an ISO date with a time zone.") from None
-            if when.tzinfo is None or when <= datetime.now(timezone.utc):
+            if when.tzinfo is None or (require_future and when <= datetime.now(timezone.utc)):
                 raise ValueError("Choose a future publishing time with a time zone.")
 
     def payload(self) -> dict:
@@ -331,13 +331,16 @@ class YouTubeUploader:
     def upload(self, video_path, thumbnail_path, job_dir, metadata: UploadMetadata,
                channel_id: str, allow_duplicate: bool = False) -> dict:
         job, video = Path(job_dir), Path(video_path)
-        metadata.validate()
         if video.resolve().parent != job.resolve() or Path(thumbnail_path).resolve().parent != job.resolve():
             raise YouTubeUploadError("Upload inputs must belong to the current job folder.")
         if not channel_id:
             raise YouTubeUploadError("Connect a YouTube channel before uploading.")
         with _job_lock(job):
             old = load_upload_state(job)
+            # A resumable session has already accepted its publishing schedule.
+            # Revalidate structure, not whether its frozen timestamp is still
+            # in the future. Fresh insertions must still pass that check.
+            metadata.validate(require_future=not (old.get("session_key") and not allow_duplicate))
             if old.get("video_id") and not allow_duplicate:
                 raise DuplicateUploadError("This job has already been uploaded. Use Retry Thumbnail/Playlist or explicitly choose Upload Again.")
             if old and old.get("channel_id") != channel_id and not allow_duplicate:
@@ -531,3 +534,45 @@ class YouTubeUploader:
 
     def retry_playlist(self, job_dir, channel_id) -> dict:
         return self._retry(job_dir, channel_id)
+
+    def update_video_metadata(self, job_dir, channel_id, metadata: UploadMetadata) -> dict:
+        """Read/modify/write only mutable snippet/status fields.
+
+        videos.update replaces all mutable fields in each requested part.
+        Fetch first, preserve unrelated writable fields, and publish the local
+        record only after the API confirms the update. Playlist/thumbnail are
+        deliberately separate operations; insertion metadata stays frozen.
+        """
+        metadata.validate()
+        job = Path(job_dir)
+        with _job_lock(job):
+            state = load_upload_state(job)
+            if not state.get("video_id") or state.get("channel_id") != channel_id:
+                raise YouTubeUploadError("Reconnect the video's channel before editing its metadata.")
+            url = "https://www.googleapis.com/youtube/v3/videos"
+            response = self._request_retry("GET", url, params={"part": "snippet,status", "id": state["video_id"]})
+            if response.status_code != 200:
+                raise _safe_api_error(response)
+            items = response.json().get("items", [])
+            if len(items) != 1 or items[0].get("snippet", {}).get("channelId") != channel_id:
+                raise YouTubeUploadError("The uploaded video is unavailable or belongs to another channel.")
+            current = items[0]
+            snippet = {k: v for k, v in current.get("snippet", {}).items()
+                       if k in {"title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage"}}
+            status = {k: v for k, v in current.get("status", {}).items()
+                      if k in {"embeddable", "license", "privacyStatus", "publicStatsViewable", "publishAt", "selfDeclaredMadeForKids", "containsSyntheticMedia"}}
+            requested = metadata.payload()
+            snippet.update(requested["snippet"])
+            status.update(requested["status"])
+            if metadata.publish_at is None:
+                status.pop("publishAt", None)
+            response = self._request_retry("PUT", url, params={"part": "snippet,status"},
+                                           json={"id": state["video_id"], "snippet": snippet, "status": status})
+            if response.status_code != 200 or response.json().get("id") != state["video_id"]:
+                raise _safe_api_error(response)
+            used = asdict(metadata)
+            used["playlist_id"] = state.get("playlist_id")
+            state.setdefault("metadata_updates", []).append({"updated_at": datetime.now(timezone.utc).isoformat(), "metadata": used})
+            state.update(title=metadata.title, privacy=metadata.privacy, updated_metadata=used)
+            _save_state(job, state)
+            return state
