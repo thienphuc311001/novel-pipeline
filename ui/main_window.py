@@ -470,6 +470,7 @@ class MainWindow(QMainWindow):
         for index, panel in ((3, self.group4), (4, self.group5), (5, self.group6)):
             panel.busy_changed.connect(lambda busy, stage=index: self._set_group_batch_busy(stage, busy))
             panel.diagnostic.connect(self._log)
+        self.group4.groups_changed.connect(self._refresh_group_panels)
         for panel, action, label in ((self.group4, self._continue_to_stage5, "Continue to Step 5 →"),
                                       (self.group5, self._continue_to_stage6, "Continue to Step 6 →")):
             button = QPushButton(label)
@@ -1258,7 +1259,7 @@ class MainWindow(QMainWindow):
             self._error(str(error))
 
     def _refresh_group_panels(self):
-        legacy = not self.document.chapter_groups and self.document.step3_artifacts is not None
+        legacy = not self.document.group_manifest_path and self.document.step3_artifacts is not None
         for stack, panel in ((self.stage4_stack, self.group4), (self.stage5_stack, self.group5), (self.stage6_stack, self.group6)):
             stack.setCurrentIndex(1 if legacy else 0)
             if not panel.busy:
@@ -1628,7 +1629,7 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- Step 5
     def _enter_stage5(self) -> bool:
-        if self.document.chapter_groups:
+        if self.document.group_manifest_path:
             try:
                 self._refresh_group_panels()
                 self.group5.enter()
@@ -2084,8 +2085,8 @@ class MainWindow(QMainWindow):
 
     def _continue_to_stage4(self) -> None:
         try:
-            if self.document.chapter_groups:
-                self.document.require_chapter_groups()
+            if self.document.group_manifest_path:
+                self.document.require_chapter_groups(validate_files=False, allow_empty=True)
             else:
                 self.document.require_step3_artifacts()
         except PipelineStateError as error:
@@ -2102,7 +2103,7 @@ class MainWindow(QMainWindow):
     def _enter_stage6(self) -> bool:
         try:
             self._refresh_group_panels()
-            if self.document.chapter_groups:
+            if self.document.group_manifest_path:
                 self.group6.enter()
             else:
                 self.stage6_widget.enter()
@@ -2137,8 +2138,7 @@ class MainWindow(QMainWindow):
                 self._error(str(error))
         elif index == 3:
             try:
-                if self.document.chapter_groups:
-                    self.document.require_chapter_groups()
+                if self.document.group_manifest_path:
                     self.group4.enter()
                 else:
                     self.document.require_step3_artifacts()

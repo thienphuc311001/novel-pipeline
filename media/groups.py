@@ -305,6 +305,8 @@ def restore_groups(document, settings, title, size):
     path = novel / "chapter_groups.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Manifest must describe chapter groups.")
         method = data.get("grouping_method", GROUPING_METHOD_DETECTED)
         _validate_grouping_method(method)
         analysis = analyze_grouping(text, settings, size)
@@ -326,6 +328,12 @@ def restore_groups(document, settings, title, size):
                 or data["config"] != grouping_config(settings, size, method) or len(data["groups"]) != len(expected)):
             raise ValueError("Manifest does not match the current source/configuration.")
         groups = [ChapterGroup(**row) for row in data["groups"]]
+        deleted_ids = data.get("deleted_group_ids", [])
+        if (not isinstance(deleted_ids, list) or any(not isinstance(value, str) for value in deleted_ids) or
+                len(set(deleted_ids)) != len(deleted_ids) or
+                not set(deleted_ids).issubset({group.group_id for group in groups})):
+            raise ValueError("Manifest deleted-group membership is invalid.")
+        deleted_ids = set(deleted_ids)
         used = set()
         for group, item in zip(groups, expected):
             if any(getattr(group, key) != item[key] for key in ("order", "start", "end", "chapters", "label", "range_label")):
@@ -340,15 +348,51 @@ def restore_groups(document, settings, title, size):
                     Path(group.txt_path).resolve() != novel / slug / "final.txt" or
                     Path(group.json_path).resolve() != novel / slug / "final.json"):
                 raise ValueError("Group path is outside the novel folder.")
-            validate_group(group, text)
-            group.state = load_job_state(group)
+            if (group.source_sha256 != sha256_text(text) or
+                    group.text_sha256 != sha256_text(text[item["start"]:item["end"]])):
+                raise ValueError("Manifest group text does not match the current source.")
+            if group.group_id not in deleted_ids:
+                validate_group(group, text)
+                group.state = load_job_state(group)
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise PipelineStateError(f"Cannot restore chapter groups: {error}") from error
     document._clear_step3_artifacts()
     document.cleaned_text, document.chunks, document.filtered_output = None, [], None
-    document.chapter_groups, document.grouping_config, document.group_manifest_path = groups, data["config"], str(path)
+    document.chapter_groups = [group for group in groups if group.group_id not in deleted_ids]
+    document.deleted_chapter_groups = [group for group in groups if group.group_id in deleted_ids]
+    document.grouping_config, document.group_manifest_path = data["config"], str(path)
     document.job_title = title
-    return groups
+    return document.chapter_groups
+
+
+def delete_group(document, group_id):
+    """Remove one job from later stages, retaining its files for recovery."""
+    document.require_chapter_groups(validate_files=False)
+    group = next((group for group in document.chapter_groups if group.group_id == group_id), None)
+    if group is None:
+        raise PipelineStateError("Select a current chapter group to delete.")
+    path = Path(document.group_manifest_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Manifest must describe chapter groups.")
+        groups = sorted(document.chapter_groups + document.deleted_chapter_groups, key=lambda item: item.order)
+        deleted_ids = [item.group_id for item in document.deleted_chapter_groups]
+        if (data.get("schema_version") != 2 or data.get("title") != document.job_title or
+                data.get("source_sha256") != group.source_sha256 or
+                data.get("config") != document.grouping_config or
+                data.get("groups") != [dict(asdict(item), state={}) for item in groups] or
+                data.get("deleted_group_ids", []) != deleted_ids):
+            raise ValueError("Manifest changed; restore matching groups in Step 3 before deleting.")
+        removed = {*deleted_ids, group_id}
+        data["deleted_group_ids"] = [item.group_id for item in groups if item.group_id in removed]
+        atomic_write_json(path, data)
+    except (OSError, ValueError, TypeError) as error:
+        raise PipelineStateError(f"Cannot delete chapter group: {error}") from error
+    document.chapter_groups = [item for item in document.chapter_groups if item.group_id != group_id]
+    document.deleted_chapter_groups.append(group)
+    document.deleted_chapter_groups.sort(key=lambda item: item.order)
+    return group
 
 
 def validate_group(group, source):
@@ -357,9 +401,13 @@ def validate_group(group, source):
         if any(Path(p).resolve().parent != folder for p in (group.txt_path, group.json_path)):
             raise ValueError("Canonical paths are outside the group folder.")
         expected = source[group.start:group.end]
-        if (sha256_text(source) != group.source_sha256 or sha256_text(expected) != group.text_sha256 or
-                sha256_file(Path(group.txt_path)) != group.text_sha256 or sha256_file(Path(group.json_path)) != group.json_sha256):
-            raise ValueError("Group is stale, missing, or externally modified.")
+        if sha256_text(source) != group.source_sha256 or sha256_text(expected) != group.text_sha256:
+            raise ValueError("Group source is stale; recreate group files in Step 3.")
+        for path, fingerprint in ((Path(group.txt_path), group.text_sha256), (Path(group.json_path), group.json_sha256)):
+            if not path.is_file():
+                raise ValueError(f"Missing {path.name}; recreate group files in Step 3 or delete this group in Step 4.")
+            if sha256_file(path) != fingerprint:
+                raise ValueError(f"{path.name} was externally modified; recreate group files in Step 3 or delete this group in Step 4.")
         data = json.loads(Path(group.json_path).read_text(encoding="utf-8"))
         if data["text"] != expected or data["chapters"] != group.chapters or data["group_id"] != group.group_id or "chunks" in data:
             raise ValueError("Group JSON does not describe the canonical text.")

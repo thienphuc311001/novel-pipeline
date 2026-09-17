@@ -208,22 +208,104 @@ class GroupBatchTests(unittest.TestCase):
         self.assertTrue(manifest['partial_audiobook'])
         self.assertEqual(manifest['excluded_chunks'], group.state['excluded_chunks'])
 
-    def test_shared_cover_generates_only_selected_group_thumbnails(self):
+    def test_each_highlighted_group_uses_its_own_thumbnail_regardless_of_checks(self):
         from PIL import Image
         panel = TtsBatchPanel(lambda: self.doc, self.settings)
         panel.enter()
-        panel.groups.item(0).setCheckState(Qt.CheckState.Checked)
-        panel.groups.item(2).setCheckState(Qt.CheckState.Checked)
-        cover = self.root / 'cover.png'
-        Image.new('RGB', (400, 600), 'red').save(cover)
-        with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', return_value=(str(cover), '')):
-            panel.select_cover()
-        for group in (self.groups[0], self.groups[2]):
+        panel.check_all(True)
+        for index, color in ((0, 'red'), (2, 'blue')):
+            cover = self.root / f'{color}.png'
+            Image.new('RGB', (400, 600), color).save(cover)
+            panel.groups.setCurrentRow(index)
+            with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', return_value=(str(cover), '')):
+                panel.select_cover()
+            self.assertEqual(self.groups[index].state['thumbnail_source'], str(cover))
+        for group, expected in ((self.groups[0], (254, 0, 0)), (self.groups[2], (0, 0, 254))):
             with Image.open(Path(group.output_dir) / 'thumbnail.jpg') as thumbnail:
                 self.assertEqual(thumbnail.size, (1280, 720))
                 self.assertEqual(thumbnail.format, 'JPEG')
+                self.assertEqual(thumbnail.getpixel((10, 10)), expected)
             self.assertIn('thumbnail', group.state)
         self.assertFalse(Path(self.groups[1].output_dir, 'thumbnail.jpg').exists())
+        panel.groups.setCurrentRow(1)
+        self.assertTrue(panel.thumbnail.pixmap().isNull())
+        self.assertIn('No thumbnail selected', panel.thumbnail.text())
+        panel.check_all(False)
+        with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', return_value=(str(cover), '')):
+            panel.select_cover()
+        self.assertIn('thumbnail', self.groups[1].state)
+        # The selected images and previews survive a matching restore.
+        from media.groups import restore_groups
+        restored = document_for(self.doc.step2_confirmed_output, self.root)
+        restore_groups(restored, self.settings, self.doc.job_title, 1)
+        self.assertEqual(restored.chapter_groups[0].state['thumbnail_source'], str(self.root / 'red.png'))
+        self.assertEqual(restored.chapter_groups[2].state['thumbnail_source'], str(self.root / 'blue.png'))
+
+    def test_damaged_group_does_not_block_entry_or_other_batch_jobs(self):
+        class Panel(GroupBatchPanel):
+            def process_group(inner, group):
+                inner.visited.append(group.group_id)
+                inner.group_done('Completed')
+        panel = Panel(lambda: self.doc, self.settings)
+        panel.visited = []
+        Path(self.groups[1].txt_path).write_bytes(b'changed')
+        panel.enter()
+        panel.check_all(True)
+        panel.start_batch()
+        self.wait_finished(panel)
+        self.assertEqual(panel.visited, [self.groups[0].group_id, self.groups[2].group_id])
+        self.assertIn('externally modified', panel.summary[1])
+        self.assertEqual(len(panel.summary), 3)
+
+    def test_step4_can_delete_any_group_and_refresh_later_stages(self):
+        window = MainWindow(self.settings)
+        window.document = self.doc
+        Path(self.groups[2].txt_path).write_bytes(b'changed')
+        window._refresh_group_panels()
+        with patch.object(window, '_error', side_effect=AssertionError('A damaged job must not block Step 4')):
+            window._continue_to_stage4()
+        self.assertEqual(window.tabs.currentIndex(), 3)
+        panel = window.group4
+        panel.groups.setCurrentRow(2)
+        self.assertTrue(panel.first_chapter.toPlainText() == '')
+        self.assertTrue(panel.thumbnail.pixmap().isNull())
+        self.assertFalse(panel.checked_ids())
+        panel.delete_btn.click()
+        for stage in (window.group4, window.group5, window.group6):
+            self.assertEqual(stage.groups.count(), 2)
+            self.assertNotIn(self.groups[2].group_id, [stage.groups.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)])
+        self.assertTrue(Path(self.groups[2].txt_path).exists())
+        self.assertEqual(self.doc.require_chapter_groups(), self.doc.chapter_groups)
+        window.group6.editor.media = object()
+        window.group6.editor.state = {'video_id': 'old-group'}
+        while panel.groups.count():
+            panel.delete_btn.click()
+        self.assertEqual(window.group5.groups.count(), 0)
+        self.assertEqual(window.group6.groups.count(), 0)
+        self.assertIsNone(window.group6.editor.media)
+        self.assertFalse(window.group6.editor.state)
+        self.assertEqual(window.group6.editor.thumbnail_label.text(), '—')
+        self.assertFalse(panel.cover_btn.isEnabled())
+        self.assertFalse(panel.delete_btn.isEnabled())
+        self.assertTrue(panel.first_chapter.toPlainText() == '')
+        self.assertEqual(window.stage4_stack.currentWidget(), panel)
+        with patch.object(window, '_error', side_effect=AssertionError('Empty group management remains accessible')):
+            window._continue_to_stage4()
+        window.close()
+
+    def test_step4_busy_blocks_image_selection_and_group_deletion(self):
+        panel = TtsBatchPanel(lambda: self.doc, self.settings)
+        panel.enter()
+        panel.running = True
+        panel.set_busy(True)
+        self.assertFalse(panel.cover_btn.isEnabled())
+        self.assertFalse(panel.delete_btn.isEnabled())
+        with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', side_effect=AssertionError('No dialog while busy')):
+            panel.select_cover()
+            panel.delete_selected_group()
+        self.assertEqual(len(self.doc.chapter_groups), 3)
+        panel.running = False
+        panel.set_busy(False)
 
     def test_progress_visible_and_busy_blocks_other_stages(self):
         window = MainWindow(self.settings)

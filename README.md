@@ -59,7 +59,8 @@ Raw TXT / ZIP
 
 ### Stage 4: Thumbnail & Audiobook
 
-- Unchecked group checklists, shared cover image, per-group `thumbnail.jpg`, and exact first-chapter preview.
+- Unchecked TTS checklists; select an individual image for the highlighted group's `thumbnail.jpg` and exact first-chapter preview.
+- Delete any highlighted group from Steps 4–6, including missing/modified jobs; the manifest remembers deletions and existing files remain available.
 - Cleans only a TTS working copy, then writes separate ordered `tts_chunks.json` plans (1200-character default).
 - Sequential groups with existing bounded concurrency, retries, fallback splitting, and resume inside each group.
 - Incomplete groups retain detailed failures and successful audio; later groups continue.

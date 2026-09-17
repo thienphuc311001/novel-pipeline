@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLi
                             QLabel, QPushButton, QProgressBar, QTextEdit, QFileDialog,
                             QDialog, QDialogButtonBox, QMessageBox, QLineEdit)
 
-from media.groups import (prepare_tts, record_media, save_job_state, edit_failed_chunk,
+from media.groups import (prepare_tts, record_media, save_job_state, edit_failed_chunk, delete_group,
                          record_video, record_tts_provenance)
 from pipeline.document import PipelineStateError
 
@@ -121,7 +121,7 @@ class GroupBatchPanel(QWidget):
         return self.running or self.thread is not None
 
     def enter(self):
-        self.document_provider().require_chapter_groups()
+        self.document_provider().require_chapter_groups(validate_files=False, allow_empty=True)
         self.refresh()
 
     def status_for(self, group):
@@ -178,8 +178,10 @@ class GroupBatchPanel(QWidget):
             self.status.setText("Select at least one chapter group.")
             return
         try:
-            for group_id in ids:
-                self.document_provider().require_group_artifacts(group_id)
+            document = self.document_provider()
+            document.require_chapter_groups(validate_files=False)
+            if not set(ids).issubset({group.group_id for group in document.chapter_groups}):
+                raise PipelineStateError("Unknown or deleted chapter group. Select current groups before starting.")
         except Exception as error:
             self.status.setText(str(error))
             return
@@ -304,19 +306,29 @@ class GroupBatchPanel(QWidget):
 
 
 class TtsBatchPanel(GroupBatchPanel):
+    groups_changed = pyqtSignal()
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.start_btn.setText("Start TTS")
-        self.cover_path = ""
-        self.cover_btn = QPushButton("Select shared cover / Generate selected thumbnails")
+        self.cover_btn = QPushButton("Select Image for Highlighted Group")
         self.cover_btn.clicked.connect(self.select_cover)
-        self.content_layout.addWidget(self.cover_btn)
+        self.delete_btn = QPushButton("Delete Highlighted Group")
+        self.delete_btn.setToolTip("Remove this group from Steps 4–6. Existing files are retained; recreate groups in Step 3 to recover it.")
+        self.delete_btn.clicked.connect(self.delete_selected_group)
+        group_actions = QHBoxLayout()
+        group_actions.addWidget(self.cover_btn)
+        group_actions.addWidget(self.delete_btn)
+        self.content_layout.addLayout(group_actions)
         self.first_chapter = QTextEdit()
         self.first_chapter.setReadOnly(True)
         self.first_chapter.setMaximumHeight(115)
         self.content_layout.addWidget(self.first_chapter)
         self.thumbnail = QLabel()
         self.thumbnail.setMinimumWidth(210)
+        self.thumbnail.setMinimumHeight(100)
+        self.thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumbnail.setWordWrap(True)
         self.first_chapter.setMinimumHeight(90)
         self.content_layout.removeWidget(self.first_chapter)
         preview_row = QHBoxLayout()
@@ -340,12 +352,22 @@ class TtsBatchPanel(GroupBatchPanel):
 
     def set_busy(self, busy):
         super().set_busy(busy)
-        for button in (self.cover_btn, self.failed_btn, self.retry_btn, self.edit_btn, self.resume_btn, self.partial_btn):
+        for button in (self.failed_btn, self.retry_btn, self.edit_btn, self.resume_btn, self.partial_btn):
             button.setEnabled(not busy)
+        self.cover_btn.setEnabled(not busy and bool(self.selected_id()))
+        self.delete_btn.setEnabled(not busy and bool(self.selected_id()))
 
     def show_selected(self, *_):
         super().show_selected()
-        if not hasattr(self, "first_chapter") or not self.selected_id():
+        if not hasattr(self, "first_chapter"):
+            return
+        self.first_chapter.clear()
+        self.thumbnail.clear()
+        self.thumbnail.setText("No thumbnail selected for this group")
+        self.cover_btn.setEnabled(not self.busy and bool(self.selected_id()))
+        self.delete_btn.setEnabled(not self.busy and bool(self.selected_id()))
+        if not self.selected_id():
+            self.thumbnail.setText("Select a chapter group")
             return
         try:
             doc = self.document_provider()
@@ -353,35 +375,56 @@ class TtsBatchPanel(GroupBatchPanel):
             text = Path(group.txt_path).read_bytes().decode("utf-8")
             row = group.chapters[0]
             self.first_chapter.setPlainText(text[row["start"] - group.start:row["end"] - group.start])
-            pixmap = QPixmap(group.state.get("thumbnail", {}).get("path", ""))
-            self.thumbnail.setPixmap(pixmap.scaled(210, 100, Qt.AspectRatioMode.KeepAspectRatio) if not pixmap.isNull() else pixmap)
+            thumbnail_path = group.state.get("thumbnail", {}).get("path", "")
+            pixmap = QPixmap(thumbnail_path) if thumbnail_path else QPixmap()
+            if not pixmap.isNull():
+                self.thumbnail.setPixmap(pixmap.scaled(210, 100, Qt.AspectRatioMode.KeepAspectRatio))
+            self.details.append(f"Thumbnail: {thumbnail_path or 'Not selected'}")
             failures = group.state.get("failures", [])
             self.details.append(f"TTS: {group.state.get('tts_status', 'Not started')}\nFailed chunks: {len(failures)}\n{group.state.get('last_error', '')}\n" + "\n".join(f"Chunk {f['chunk_number']}: {f['original_text']}\n{f['error_type']}: {f['error_message']}" for f in failures))
         except Exception as error:
+            self.thumbnail.setText("Thumbnail unavailable for this group")
             self.status.setText(str(error))
 
     def select_cover(self):
         if self.busy:
             return
-        ids = self.checked_ids()
-        if not ids:
-            self.status.setText("Select groups before choosing a shared cover.")
+        group_id = self.selected_id()
+        if not group_id:
+            self.status.setText("Highlight a group before choosing its thumbnail image.")
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Shared cover", self.document_provider().input_directory, "Images (*.jpg *.jpeg *.png *.webp *.bmp)")
-        if not path:
-            return
-        self.cover_path = path
         try:
+            group = self.document_provider().require_group_artifacts(group_id)
+            path, _ = QFileDialog.getOpenFileName(self, f"Thumbnail image — {group.label}",
+                                                group.state.get("thumbnail_source", self.document_provider().input_directory),
+                                                "Images (*.jpg *.jpeg *.png *.webp *.bmp)")
+            if not path:
+                return
+            group = self.document_provider().require_group_artifacts(group_id)
             from media.thumbnail import generate_thumbnail
-            for group_id in ids:
-                group = self.document_provider().require_group_artifacts(group_id)
-                result = generate_thumbnail(Path(path), Path(group.output_dir), title=group.title, chapter=group.label,
-                                            banner_height=self.settings.thumbnail_bottom_height, quality=self.settings.thumbnail_jpeg_quality)
-                target = Path(group.output_dir) / "thumbnail.jpg"
-                Path(result).replace(target)
-                record_media(group, "thumbnail", target)
-            self.status.setText(f"Đã tạo {len(ids)} thumbnail.")
+            result = generate_thumbnail(Path(path), Path(group.output_dir), title=group.title, chapter=group.label,
+                                        banner_height=self.settings.thumbnail_bottom_height, quality=self.settings.thumbnail_jpeg_quality)
+            target = Path(group.output_dir) / "thumbnail.jpg"
+            Path(result).replace(target)
+            group.state["thumbnail_source"] = path
+            record_media(group, "thumbnail", target)
+            self.status.setText(f"Đã tạo thumbnail: {group.label}.")
             self.refresh()
+        except Exception as error:
+            self.status.setText(str(error))
+
+    def delete_selected_group(self):
+        if self.busy:
+            return
+        group_id = self.selected_id()
+        if not group_id:
+            self.status.setText("Highlight a group to delete.")
+            return
+        try:
+            group = delete_group(self.document_provider(), group_id)
+            self.refresh()
+            self.groups_changed.emit()
+            self.status.setText(f"Deleted {group.label} from Steps 4–6. Existing files retained.")
         except Exception as error:
             self.status.setText(str(error))
 
@@ -735,7 +778,14 @@ class UploadBatchPanel(GroupBatchPanel):
 
     def show_selected(self, *_):
         super().show_selected()
-        if not hasattr(self, "editor") or not self.selected_id():
+        if not hasattr(self, "editor"):
+            return
+        if not self.selected_id():
+            self.editor.media = None
+            self.editor.state = {}
+            self.editor.video_label.setText("—")
+            self.editor.thumbnail_label.setText("—")
+            self.editor._update_controls()
             return
         from media.youtube import load_upload_state
         try:

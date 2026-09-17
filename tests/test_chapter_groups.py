@@ -10,6 +10,7 @@ from media.artifacts import sha256_text
 from media.groups import (GROUPING_METHOD_NUMERIC, analyze_grouping, preview_groups, scan_headings,
                          write_groups, restore_groups, prepare_tts, edit_failed_chunk, record_media,
                          save_job_state, record_video)
+from media.groups import delete_group
 from media.video import VideoRenderResult
 from pipeline.document import PipelineDocument, PipelineStateError
 
@@ -212,6 +213,112 @@ class ChapterGroupTests(unittest.TestCase):
         self.settings.output_dir = str(self.root / 'override')
         group = write_groups(doc, self.settings, doc.job_title, 20)[0]
         self.assertEqual(Path(group.output_dir).parent.parent, self.root / 'override')
+
+    def test_delete_damaged_groups_preserves_source_order_files_and_restore(self):
+        text = ''.join(f'Chương {number}\nBody {number}.\n' for number in range(1, 5))
+        doc = document_for(text, self.root)
+        groups = write_groups(doc, self.settings, doc.job_title, 1)
+        marker = Path(groups[2].output_dir, 'youtube_upload.json')
+        marker.write_text('{"video_id":"saved"}')
+        Path(groups[2].txt_path).write_bytes(b'externally modified')
+        Path(groups[1].json_path).unlink()
+        delete_group(doc, groups[2].group_id)
+        delete_group(doc, groups[1].group_id)
+        self.assertEqual(doc.require_chapter_groups(), [groups[0], groups[3]])
+        self.assertEqual([group.order for group in doc.chapter_groups], [1, 4])
+        self.assertEqual(doc.step2_confirmed_output, text)
+        self.assertTrue(marker.exists())
+        self.assertEqual(Path(groups[2].txt_path).read_bytes(), b'externally modified')
+        with self.assertRaises(PipelineStateError):
+            doc.require_group_artifacts(groups[2].group_id)
+        with self.assertRaises(PipelineStateError):
+            doc.require_step4_outputs(groups[2].group_id)
+        with self.assertRaises(PipelineStateError):
+            doc.require_step5_outputs(groups[2].group_id)
+
+        restored = document_for(text, self.root)
+        active = restore_groups(restored, self.settings, doc.job_title, 1)
+        self.assertEqual([group.group_id for group in active], [groups[0].group_id, groups[3].group_id])
+        self.assertEqual(restored.require_chapter_groups(), active)
+        # Further removal works after restoring deletions made out of order.
+        delete_group(restored, groups[0].group_id)
+        delete_group(restored, groups[3].group_id)
+        self.assertEqual(restored.require_chapter_groups(allow_empty=True), [])
+        empty = document_for(text, self.root)
+        self.assertEqual(restore_groups(empty, self.settings, doc.job_title, 1), [])
+        self.assertEqual(empty.require_chapter_groups(allow_empty=True), [])
+        self.assertEqual(len(write_groups(empty, self.settings, doc.job_title, 1)), 4)
+        self.assertFalse(empty.deleted_chapter_groups)
+
+    def test_deleted_numeric_group_restores_without_its_missing_files(self):
+        text = numeric_source({620})
+        doc = document_for(text, self.root)
+        analysis = analyze_grouping(text, self.settings, 20)
+        groups = write_groups(doc, self.settings, doc.job_title, 20, method=GROUPING_METHOD_NUMERIC,
+                              confirmation_fingerprint=analysis.numeric_identity_fingerprint)
+        last = groups[-1]
+        Path(last.txt_path).unlink()
+        Path(last.json_path).unlink()
+        delete_group(doc, last.group_id)
+        restored = document_for(text, self.root)
+        self.assertEqual([group.range_label for group in restore_groups(restored, self.settings, doc.job_title, 20)],
+                         ['601-620', '621-640', '641-660', '661-680'])
+        self.assertEqual(restored.require_chapter_groups(), restored.chapter_groups)
+
+    def test_delete_is_atomic_and_rejects_changed_or_invalid_manifest(self):
+        doc = document_for('Chương 1\nA.\nChương 2\nB.', self.root)
+        groups = write_groups(doc, self.settings, doc.job_title, 1)
+        manifest_path = Path(doc.group_manifest_path)
+        before = manifest_path.read_bytes()
+        with patch('media.groups.atomic_write_json', side_effect=OSError('Disk full')):
+            with self.assertRaisesRegex(PipelineStateError, 'Disk full'):
+                delete_group(doc, groups[0].group_id)
+        self.assertEqual(doc.chapter_groups, groups)
+        self.assertFalse(doc.deleted_chapter_groups)
+        self.assertEqual(manifest_path.read_bytes(), before)
+        data = json.loads(before)
+        data['groups'][0]['start'] += 1
+        manifest_path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaisesRegex(PipelineStateError, 'Manifest changed'):
+            delete_group(doc, groups[0].group_id)
+        self.assertEqual(doc.chapter_groups, groups)
+        for deleted in (['unknown'], [groups[0].group_id] * 2, 'invalid', [{}]):
+            data = json.loads(before)
+            data['deleted_group_ids'] = deleted
+            manifest_path.write_text(json.dumps(data), encoding='utf-8')
+            with self.assertRaisesRegex(PipelineStateError, 'deleted-group membership'):
+                restore_groups(document_for(doc.step2_confirmed_output, self.root), self.settings, doc.job_title, 1)
+        data = json.loads(before)
+        data['deleted_group_ids'] = [groups[0].group_id]
+        data['groups'][0]['text_sha256'] = 'changed'
+        manifest_path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaisesRegex(PipelineStateError, 'Manifest group text'):
+            restore_groups(document_for(doc.step2_confirmed_output, self.root), self.settings, doc.job_title, 1)
+        manifest_path.write_text('[]', encoding='utf-8')
+        with self.assertRaisesRegex(PipelineStateError, 'Manifest must describe'):
+            delete_group(doc, groups[0].group_id)
+
+    def test_deleted_group_metadata_is_cloned_and_invalidated(self):
+        doc = document_for('Chương 1\nA.\nChương 2\nB.', self.root)
+        groups = write_groups(doc, self.settings, doc.job_title, 1)
+        delete_group(doc, groups[0].group_id)
+        clone = doc.clone()
+        clone.deleted_chapter_groups[0].state['changed'] = True
+        self.assertNotIn('changed', doc.deleted_chapter_groups[0].state)
+        doc.set_job_identity('New title', '')
+        self.assertFalse(doc.deleted_chapter_groups)
+
+    def test_deletion_does_not_allow_implicit_gaps_or_reordered_jobs(self):
+        doc = document_for('Chương 1\nA.\nChương 2\nB.\nChương 3\nC.', self.root)
+        groups = write_groups(doc, self.settings, doc.job_title, 1)
+        delete_group(doc, groups[1].group_id)
+        doc.chapter_groups.reverse()
+        with self.assertRaisesRegex(PipelineStateError, 'source order'):
+            doc.require_chapter_groups(validate_files=False)
+        doc.chapter_groups.reverse()
+        doc.deleted_chapter_groups = []
+        with self.assertRaisesRegex(PipelineStateError, 'source order'):
+            doc.require_chapter_groups(validate_files=False)
 
     def test_upstream_invalidation_keeps_disk_and_upload_records(self):
         doc = document_for('Chương 1\nA.', self.root)

@@ -376,6 +376,7 @@ class PipelineDocument:
         self.job_chapter: str = ""
         self.step3_artifacts: Optional[Step3ArtifactBundle] = None
         self.chapter_groups: List[Any] = []
+        self.deleted_chapter_groups: List[Any] = []
         self.grouping_config: Dict[str, Any] = {}
         self.group_manifest_path: str = ""
         self.thumbnail_path: str = ""
@@ -435,6 +436,7 @@ class PipelineDocument:
         clone.job_chapter = self.job_chapter
         clone.step3_artifacts = copy.copy(self.step3_artifacts)
         clone.chapter_groups = copy.deepcopy(self.chapter_groups)
+        clone.deleted_chapter_groups = copy.deepcopy(self.deleted_chapter_groups)
         clone.grouping_config = copy.deepcopy(self.grouping_config)
         clone.group_manifest_path = self.group_manifest_path
         clone.thumbnail_path = self.thumbnail_path
@@ -816,6 +818,7 @@ class PipelineDocument:
 
     def _clear_step3_artifacts(self) -> None:
         self.chapter_groups = []
+        self.deleted_chapter_groups = []
         self.grouping_config = {}
         self.group_manifest_path = ""
         self.step3_artifacts = None
@@ -860,15 +863,27 @@ class PipelineDocument:
         validate_group(group, self.require_step2_confirmed_output())
         return group
 
-    def require_chapter_groups(self):
-        if not self.chapter_groups:
+    def require_chapter_groups(self, *, validate_files=True, allow_empty=False):
+        """Validate full source membership while allowing explicitly deleted jobs."""
+        if not self.chapter_groups and not (allow_empty and self.deleted_chapter_groups):
             raise PipelineStateError("Create chapter group TXT/JSON files in Step 3 first.")
+        if any(left.order >= right.order for left, right in zip(self.chapter_groups, self.chapter_groups[1:])):
+            raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 3.")
         source = self.require_step2_confirmed_output()
+        source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        deleted_ids = {group.group_id for group in self.deleted_chapter_groups}
+        groups = sorted(self.chapter_groups + self.deleted_chapter_groups, key=lambda group: group.order)
+        if len({group.group_id for group in groups}) != len(groups):
+            raise PipelineStateError("Chapter groups contain duplicate membership; recreate them in Step 3.")
         cursor = 0
-        for order, group in enumerate(self.chapter_groups, 1):
+        for order, group in enumerate(groups, 1):
             if group.order != order or group.start != cursor or group.end <= group.start:
                 raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 3.")
-            self.require_group_artifacts(group.group_id)
+            if (group.source_sha256 != source_hash or
+                    group.text_sha256 != hashlib.sha256(source[group.start:group.end].encode("utf-8")).hexdigest()):
+                raise PipelineStateError(f"{group.label}: group source is stale; recreate group files in Step 3.")
+            if validate_files and group.group_id not in deleted_ids:
+                self.require_group_artifacts(group.group_id)
             cursor = group.end
         if cursor != len(source):
             raise PipelineStateError("Chapter groups do not cover the complete Step 2 output; recreate them in Step 3.")
