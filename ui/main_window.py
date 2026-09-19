@@ -39,6 +39,7 @@ from pipeline.document import (
     derive_chapters_from_text,
     render_chapters_text,
 )
+from ui.copy_controls import add_copy_button, copy_text
 
 
 class _TtsWorker(QObject):
@@ -100,6 +101,31 @@ class _VideoDetectionWorker(QObject):
             self.failed.emit(str(error))
 
 
+class _VideoPreparationWorker(QObject):
+    completed = pyqtSignal(object, bool)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
+
+    def __init__(self, media, capabilities, cancel_event, audio_copy):
+        super().__init__()
+        self.media, self.capabilities = media, capabilities
+        self.cancel_event, self.audio_copy = cancel_event, audio_copy
+
+    def run(self):
+        try:
+            from media.video_pages import prepare_video_timeline
+            from media.video import mp3_copy_is_safe
+            timeline = prepare_video_timeline(self.media, self.capabilities.ffprobe_path,
+                                             cancel_event=self.cancel_event, progress=self.progress.emit)
+            copy_audio = self.audio_copy
+            if copy_audio is None:
+                copy_audio = mp3_copy_is_safe(Path(self.media.audiobook_path), self.capabilities.ffmpeg_path,
+                                             self.capabilities.ffprobe_path, temp_dir=Path(self.media.output_dir))
+            self.completed.emit(timeline, copy_audio)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
 class _VideoRenderSession(QObject):
     """Drive ordered FFmpeg encoder attempts through an asynchronous QProcess."""
 
@@ -109,12 +135,19 @@ class _VideoRenderSession(QObject):
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, capabilities, media, duration: float, *, audio_copy: bool, parent=None):
+    def __init__(self, capabilities, media, duration: float, *, audio_copy: bool | None, timeline=None, parent=None):
         super().__init__(parent)
         self.capabilities = capabilities
         self.media = media
         self.duration = float(duration)
-        self.audio_copy = bool(audio_copy)
+        self.audio_copy = audio_copy
+        self.timeline = timeline
+        from threading import Event
+        self.cancel_event = Event()
+        self.preparation_thread = None
+        self.preparation_worker = None
+        self.preparation_error = ""
+        self.source_fingerprint = None
         self.candidates = list(capabilities.verified_candidates)
         self.attempt_index = -1
         self.process: QProcess | None = None
@@ -134,11 +167,56 @@ class _VideoRenderSession(QObject):
             self.failed.emit("No verified H.264 encoder is available.")
             return
         self.partial_path.parent.mkdir(parents=True, exist_ok=True)
-        self._start_next_attempt()
+        if self.timeline is None:
+            self.status.emit("Preparing measured TTS pages…")
+            thread = QThread(self)
+            worker = _VideoPreparationWorker(self.media, self.capabilities, self.cancel_event, self.audio_copy)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.progress.connect(lambda done, total, message: self.status.emit(message))
+            worker.completed.connect(self._prepared)
+            worker.failed.connect(self._preparation_failed)
+            worker.completed.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(self._preparation_finished)
+            self.preparation_thread, self.preparation_worker = thread, worker
+            thread.start()
+        else:
+            self._begin_encoding()
+
+    def _prepared(self, timeline, audio_copy):
+        self.timeline, self.audio_copy = timeline, audio_copy
+        self.duration = timeline.audiobook_duration
+
+    def _preparation_failed(self, error):
+        self.preparation_error = error
+
+    def _preparation_finished(self):
+        self.preparation_thread.deleteLater()
+        self.preparation_thread, self.preparation_worker = None, None
+        if self._cancel_requested:
+            self.cancelled.emit()
+        elif self.preparation_error:
+            self.failed.emit(self.preparation_error)
+        else:
+            self._begin_encoding()
+
+    def _begin_encoding(self):
+        try:
+            from media.video_pages import source_fingerprint
+            self.source_fingerprint = self.timeline.source or source_fingerprint(self.media)
+            from media.video_pages import require_unchanged
+            require_unchanged(self.timeline.source_files)
+            self._start_next_attempt()
+        except Exception as error:
+            self.failed.emit(str(error))
 
     def _start_next_attempt(self) -> None:
         from media.video import build_video_command
 
+        if self._cancel_requested:
+            return
         self.attempt_index += 1
         if self.attempt_index >= len(self.candidates):
             details = "\n\n".join(self.attempt_errors) or "All verified encoders failed."
@@ -158,7 +236,7 @@ class _VideoRenderSession(QObject):
         command = build_video_command(
             self.capabilities.ffmpeg_path,
             candidate,
-            Path(self.media.thumbnail_path),
+            Path(self.timeline.concat_path),
             Path(self.media.audiobook_path),
             self.partial_path,
             audio_copy=self.audio_copy,
@@ -224,6 +302,10 @@ class _VideoRenderSession(QObject):
             duration = validate_rendered_video(
                 self.partial_path, self.duration, self.capabilities.ffprobe_path
             )
+            from media.video_pages import validate_timeline_timestamps, source_fingerprint
+            validate_timeline_timestamps(self.partial_path, self.timeline, self.capabilities.ffprobe_path)
+            from media.video_pages import require_unchanged
+            require_unchanged(self.timeline.source_files)
             final_path = Path(self.media.video_path)
             os.replace(self.partial_path, final_path)
             result = VideoRenderResult(
@@ -235,6 +317,7 @@ class _VideoRenderSession(QObject):
                 render_speed=float(self._last_progress.get("speed") or 0.0),
                 audio_mode="copy" if self.audio_copy else "aac-192k",
                 attempt_errors=list(self.attempt_errors),
+                source=dict(self.source_fingerprint),
             )
             self.completed.emit(result)
         except Exception as error:
@@ -258,6 +341,8 @@ class _VideoRenderSession(QObject):
             "no such file or directory",
             "error opening input",
             "invalid data found when processing input",
+            "inputs changed",
+            "input disappeared",
         )
         if any(marker in message.lower() for marker in fatal_markers):
             self.failed.emit(detail)
@@ -274,6 +359,9 @@ class _VideoRenderSession(QObject):
 
     def cancel(self) -> None:
         self._cancel_requested = True
+        self.cancel_event.set()
+        if self.preparation_thread is not None:
+            return
         process = self.process
         if process is None or process.state() == QProcess.ProcessState.NotRunning:
             self.partial_path.unlink(missing_ok=True)
@@ -317,7 +405,7 @@ class _FailedChunksDialog(QDialog):
 
         self.failure_text = QTextEdit()
         self.failure_text.setReadOnly(True)
-        layout.addWidget(self.failure_text, 1)
+        add_copy_button(layout, self.failure_text, button_attr="copy_btn")
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -368,19 +456,18 @@ class _FailedChunksDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    """Main window with the complete six-stage pipeline."""
+    """Main window with the complete five-stage pipeline."""
 
-    def __init__(self, settings: Settings, parent=None, *, master_dictionary=None):
+    def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
         self.document = PipelineDocument()
         self._updating_widgets = False
-        self._updating_review_widgets = False
         self._updating_job_widgets = False
-        self._manual_edit_mode = False
-        self._master_dictionary = master_dictionary
-        self._dictionary_attempted = master_dictionary is not None
-        self._dictionary_error = ""
+        self._tts_prepare_thread = None
+        self._tts_prepare_worker = None
+        self._tts_prepare_cancel = None
+        self._tts_generate_after_prepare = False
         self._tts_thread = None
         self._tts_worker = None
         self._tts_processor = None
@@ -433,30 +520,26 @@ class MainWindow(QMainWindow):
         self.stage1_widget = self._create_stage1_tab()
         self.tabs.addTab(self.stage1_widget, "1️⃣ Input & Normalize")
         
-        # Stage 2: Chinese Review
-        self.stage2_widget = self._create_stage2_tab()
-        self.tabs.addTab(self.stage2_widget, "2️⃣ Chinese Review")
-        
-        # Stage 3: Clean & Chunk
+        # Stage 2: Detect Chapters & Group
         self.stage3_widget = self._create_stage3_tab()
-        self.tabs.addTab(self.stage3_widget, "3️⃣ Detect Chapters & Group")
+        self.tabs.addTab(self.stage3_widget, "2️⃣ Detect Chapters & Group")
         
-        # Stage 4: Thumbnail & Audiobook
+        # Stage 3: Thumbnail & Audiobook
         self.stage4_widget = self._create_stage4_tab()
         from ui.grouped_pipeline import TtsBatchPanel, VideoBatchPanel, UploadBatchPanel
         self.group4 = TtsBatchPanel(lambda: self.document, self.settings, self)
         self.stage4_stack = QStackedWidget()
         self.stage4_stack.addWidget(self.group4)
         self.stage4_stack.addWidget(self.stage4_widget)
-        self.tabs.addTab(self.stage4_stack, "4️⃣ Thumbnail & Audiobook")
+        self.tabs.addTab(self.stage4_stack, "3️⃣ Thumbnail & Audiobook")
 
-        # Stage 5: hardware-adaptive static-image video
+        # Stage 4: hardware-adaptive static-image video
         self.stage5_widget = self._create_stage5_tab()
         self.group5 = VideoBatchPanel(lambda: self.document, self.settings, self)
         self.stage5_stack = QStackedWidget()
         self.stage5_stack.addWidget(self.group5)
         self.stage5_stack.addWidget(self.stage5_widget)
-        self.tabs.addTab(self.stage5_stack, "5️⃣ Create Video")
+        self.tabs.addTab(self.stage5_stack, "4️⃣ Create Video")
         from ui.youtube_tab import YouTubeTab
 
         self.stage6_widget = YouTubeTab(lambda: self.document, self.settings, self)
@@ -466,13 +549,13 @@ class MainWindow(QMainWindow):
         self.stage6_stack = QStackedWidget()
         self.stage6_stack.addWidget(self.group6)
         self.stage6_stack.addWidget(self.stage6_widget)
-        self.tabs.addTab(self.stage6_stack, "6️⃣ YouTube Upload")
-        for index, panel in ((3, self.group4), (4, self.group5), (5, self.group6)):
+        self.tabs.addTab(self.stage6_stack, "5️⃣ YouTube Upload")
+        for index, panel in ((2, self.group4), (3, self.group5), (4, self.group6)):
             panel.busy_changed.connect(lambda busy, stage=index: self._set_group_batch_busy(stage, busy))
             panel.diagnostic.connect(self._log)
         self.group4.groups_changed.connect(self._refresh_group_panels)
-        for panel, action, label in ((self.group4, self._continue_to_stage5, "Continue to Step 5 →"),
-                                      (self.group5, self._continue_to_stage6, "Continue to Step 6 →")):
+        for panel, action, label in ((self.group4, self._continue_to_stage4, "Continue to Step 4 →"),
+                                      (self.group5, self._continue_to_stage5, "Continue to Step 5 →")):
             button = QPushButton(label)
             panel.continue_btn = button
             button.clicked.connect(action)
@@ -493,7 +576,7 @@ class MainWindow(QMainWindow):
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         diagnostics_layout.addWidget(QLabel("Status & Diagnostics:"))
-        diagnostics_layout.addWidget(self.status_text)
+        add_copy_button(diagnostics_layout, self.status_text, button_attr="copy_btn")
         self.main_splitter.addWidget(diagnostics_widget)
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 0)
@@ -525,113 +608,12 @@ class MainWindow(QMainWindow):
         self.stage1_output = QTextEdit()
         self.stage1_output.setReadOnly(True)
         self.stage1_output.textChanged.connect(self._on_stage1_text_changed)
-        layout.addWidget(self.stage1_output)
-        
-        return widget
-
-    def _create_stage2_tab(self) -> QWidget:
-        """Sentence-based Chinese residue review."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.stage2_scan_btn = QPushButton("🔍 Rescan Chinese")
-        self.stage2_scan_btn.clicked.connect(self._on_scan_chinese)
-        btn_layout.addWidget(self.stage2_scan_btn)
-
-        self.stage2_continue_btn = QPushButton("Continue to Step 3 →")
-        self.stage2_continue_btn.setEnabled(False)
-        self.stage2_continue_btn.clicked.connect(self._continue_to_stage3)
-        btn_layout.addWidget(self.stage2_continue_btn)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        self.stage2_source_label = QLabel("Source: No input loaded")
-        layout.addWidget(self.stage2_source_label)
-
-        self.stage2_dictionary_label = QLabel("Master dictionary: not initialized")
-        self.stage2_dictionary_label.setWordWrap(True)
-        layout.addWidget(self.stage2_dictionary_label)
-
-        self.stage2_progress_label = QLabel("Total sentences: 0    Resolved: 0    Remaining: 0")
-        layout.addWidget(self.stage2_progress_label)
-
-        self.stage2_input_preview = QTextEdit()
-        self.stage2_input_preview.setReadOnly(True)
-        self.stage2_input_preview.setPlaceholderText("The exact Step 2 input will appear here.")
-        self.stage2_input_preview.setMaximumHeight(170)
-        layout.addWidget(self.stage2_input_preview)
-
-        review_group = QGroupBox("Current review sentence")
-        review_layout = QVBoxLayout(review_group)
-
-        nav_layout = QHBoxLayout()
-        self.stage2_previous_btn = QPushButton("← Previous")
-        self.stage2_previous_btn.clicked.connect(self._on_review_previous)
-        nav_layout.addWidget(self.stage2_previous_btn)
-        self.stage2_position_label = QLabel("No Chinese residue")
-        self.stage2_position_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        nav_layout.addWidget(self.stage2_position_label, 1)
-        self.stage2_next_btn = QPushButton("Next →")
-        self.stage2_next_btn.clicked.connect(self._on_review_next)
-        nav_layout.addWidget(self.stage2_next_btn)
-        review_layout.addLayout(nav_layout)
-
-        self.stage2_sentence_text = QTextEdit()
-        self.stage2_sentence_text.setReadOnly(True)
-        self.stage2_sentence_text.setMaximumHeight(105)
-        review_layout.addWidget(self.stage2_sentence_text)
-
-        form = QFormLayout()
-        self.stage2_fragment_combo = QComboBox()
-        self.stage2_fragment_combo.currentIndexChanged.connect(self._on_fragment_changed)
-        form.addRow("Chinese:", self.stage2_fragment_combo)
-
-        self.stage2_fragment_status = QLabel("")
-        form.addRow("Status:", self.stage2_fragment_status)
-
-        self.stage2_suggestion_combo = QComboBox()
-        self.stage2_suggestion_combo.currentIndexChanged.connect(self._on_suggestion_changed)
-        form.addRow("Suggestion:", self.stage2_suggestion_combo)
-
-        self.stage2_suggestion_message = QLabel("")
-        self.stage2_suggestion_message.setWordWrap(True)
-        form.addRow("", self.stage2_suggestion_message)
-
-        self.stage2_replacement_edit = QLineEdit()
-        self.stage2_replacement_edit.setReadOnly(True)
-        self.stage2_replacement_edit.textChanged.connect(self._update_review_buttons)
-        form.addRow("Replacement:", self.stage2_replacement_edit)
-        review_layout.addLayout(form)
-
-        action_layout = QHBoxLayout()
-        self.stage2_confirm_btn = QPushButton("Confirm")
-        self.stage2_confirm_btn.clicked.connect(self._on_review_confirm)
-        action_layout.addWidget(self.stage2_confirm_btn)
-        self.stage2_edit_btn = QPushButton("Edit")
-        self.stage2_edit_btn.clicked.connect(self._on_review_edit)
-        action_layout.addWidget(self.stage2_edit_btn)
-        self.stage2_skip_btn = QPushButton("Skip")
-        self.stage2_skip_btn.clicked.connect(self._on_review_skip)
-        action_layout.addWidget(self.stage2_skip_btn)
-        self.stage2_replace_all_btn = QPushButton("Replace All")
-        self.stage2_replace_all_btn.clicked.connect(self._on_review_replace_all)
-        action_layout.addWidget(self.stage2_replace_all_btn)
-        action_layout.addStretch()
-        review_layout.addLayout(action_layout)
-        layout.addWidget(review_group)
-
-        self.stage2_output = QTextEdit()
-        self.stage2_output.setReadOnly(True)
-        self.stage2_output.setMaximumHeight(130)
-        layout.addWidget(self.stage2_output)
+        add_copy_button(layout, self.stage1_output, button_attr="copy_btn")
         
         return widget
 
     def _create_stage3_tab(self) -> QWidget:
-        """Text cleaning and chunking."""
+        """Detect chapter headings and create exact chapter groups."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
@@ -694,9 +676,9 @@ class MainWindow(QMainWindow):
         restore_btn.clicked.connect(lambda: self._on_create_group_files(restore=True))
         btn_layout.addWidget(restore_btn)
 
-        self.stage3_continue_btn = QPushButton("Continue to Step 4 →")
+        self.stage3_continue_btn = QPushButton("Continue to Step 3 →")
         self.stage3_continue_btn.setEnabled(False)
-        self.stage3_continue_btn.clicked.connect(self._continue_to_stage4)
+        self.stage3_continue_btn.clicked.connect(self._continue_to_stage3)
         btn_layout.addWidget(self.stage3_continue_btn)
         
         btn_layout.addStretch()
@@ -704,7 +686,7 @@ class MainWindow(QMainWindow):
         
         self.stage3_output = QTextEdit()
         self.stage3_output.setReadOnly(True)
-        layout.addWidget(self.stage3_output)
+        add_copy_button(layout, self.stage3_output, button_attr="copy_btn")
         
         return widget
 
@@ -713,7 +695,7 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        self.stage4_source_label = QLabel("Source: Run Step 3 first")
+        self.stage4_source_label = QLabel("Source: Run Step 2 first")
         self.stage4_source_label.setWordWrap(True)
         layout.addWidget(self.stage4_source_label)
 
@@ -725,11 +707,11 @@ class MainWindow(QMainWindow):
         config_form.addRow("Chapter", self.stage4_chapter_label)
         layout.addWidget(config_group)
 
-        layout.addWidget(QLabel("First chapter from Step 3 TXT:"))
+        layout.addWidget(QLabel("First chapter from Step 2 TXT:"))
         self.stage4_first_chapter = QTextEdit()
         self.stage4_first_chapter.setReadOnly(True)
         self.stage4_first_chapter.setMaximumHeight(190)
-        layout.addWidget(self.stage4_first_chapter)
+        add_copy_button(layout, self.stage4_first_chapter, button_attr="copy_btn")
 
         thumbnail_group = QGroupBox("YouTube Thumbnail")
         thumbnail_layout = QVBoxLayout(thumbnail_group)
@@ -777,21 +759,21 @@ class MainWindow(QMainWindow):
 
         self.stage4_output = QTextEdit()
         self.stage4_output.setReadOnly(True)
-        layout.addWidget(self.stage4_output)
+        add_copy_button(layout, self.stage4_output, button_attr="copy_btn")
 
-        self.stage4_continue_btn = QPushButton("Continue to Step 5 →")
+        self.stage4_continue_btn = QPushButton("Continue to Step 4 →")
         self.stage4_continue_btn.setEnabled(False)
-        self.stage4_continue_btn.clicked.connect(self._continue_to_stage5)
+        self.stage4_continue_btn.clicked.connect(self._continue_to_stage4)
         layout.addWidget(self.stage4_continue_btn)
         
         return widget
 
     def _create_stage5_tab(self) -> QWidget:
-        """Create an MP4 from the authoritative Step 4 thumbnail and audio."""
+        """Create an MP4 from the authoritative Step 3 thumbnail and audio."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        inputs_group = QGroupBox("Step 4 Inputs")
+        inputs_group = QGroupBox("Step 3 Inputs")
         inputs_form = QFormLayout(inputs_group)
         self.stage5_thumbnail_label = QLabel("—")
         self.stage5_audio_label = QLabel("—")
@@ -813,14 +795,14 @@ class MainWindow(QMainWindow):
         self.stage5_capabilities = QTextEdit()
         self.stage5_capabilities.setReadOnly(True)
         self.stage5_capabilities.setMaximumHeight(220)
-        self.stage5_capabilities.setPlainText("Open Step 5 to detect video capabilities.")
-        capabilities_layout.addWidget(self.stage5_capabilities)
+        self.stage5_capabilities.setPlainText("Open Step 4 to detect video capabilities.")
+        add_copy_button(capabilities_layout, self.stage5_capabilities, button_attr="copy_btn")
         layout.addWidget(capabilities_group)
 
         render_group = QGroupBox("Video Rendering")
         render_layout = QVBoxLayout(render_group)
         render_info = QFormLayout()
-        self.stage5_resolution_label = QLabel("1920×1080 · 1 fps")
+        self.stage5_resolution_label = QLabel("1920×1080 · measured static pages (VFR)")
         self.stage5_duration_label = QLabel("—")
         render_info.addRow("Resolution", self.stage5_resolution_label)
         render_info.addRow("Estimated duration", self.stage5_duration_label)
@@ -835,9 +817,9 @@ class MainWindow(QMainWindow):
         self.stage5_cancel_btn.setEnabled(False)
         self.stage5_cancel_btn.clicked.connect(self._on_cancel_video)
         actions.addWidget(self.stage5_cancel_btn)
-        self.stage5_continue_btn = QPushButton("Continue to Step 6 →")
+        self.stage5_continue_btn = QPushButton("Continue to Step 5 →")
         self.stage5_continue_btn.setEnabled(False)
-        self.stage5_continue_btn.clicked.connect(self._continue_to_stage6)
+        self.stage5_continue_btn.clicked.connect(self._continue_to_stage5)
         actions.addWidget(self.stage5_continue_btn)
         actions.addStretch()
         render_layout.addLayout(actions)
@@ -854,7 +836,7 @@ class MainWindow(QMainWindow):
 
         self.stage5_result = QTextEdit()
         self.stage5_result.setReadOnly(True)
-        layout.addWidget(self.stage5_result)
+        add_copy_button(layout, self.stage5_result, button_attr="copy_btn")
         return widget
 
     def _on_load(self):
@@ -902,15 +884,7 @@ class MainWindow(QMainWindow):
             self._log(f"✓ {result.summary()}")
             self._set_editor_text(self.stage1_output, result.text)
             self.stage1_output.setReadOnly(True)
-            self.stage2_source_label.setText("Source: Original File — Step 1 not run")
-            self.stage2_dictionary_label.setText("Master dictionary: not initialized")
-            self._set_editor_text(self.stage2_input_preview, "")
-            self._set_editor_text(self.stage2_output, "")
-            self._set_editor_text(self.stage2_sentence_text, "")
-            self.stage2_progress_label.setText(
-                "Total sentences: 0    Resolved: 0    Remaining: 0"
-            )
-            self.stage2_continue_btn.setEnabled(False)
+            self._refresh_group_preview()
             self.stage3_continue_btn.setEnabled(False)
             self._set_editor_text(self.stage3_output, "")
             self._set_editor_text(self.stage4_output, "")
@@ -947,26 +921,23 @@ class MainWindow(QMainWindow):
             self.stage1_output.setReadOnly(False)
             if not self.document.job_chapter and chapters:
                 self._set_job_editors(self.document.job_title or "Novel Title", chapters[0].header_line)
-            self.stage2_continue_btn.setEnabled(False)
-            self.stage2_source_label.setText("Source: Step 1 ready — open Step 2 to review")
+            self.stage3_continue_btn.setEnabled(False)
+            self._refresh_group_preview()
             self._refresh_stage4_ui()
             self._refresh_stage5_ui()
             self._update_status()
         except Exception as error:
             # Do not leave a previous successful normalized output eligible
-            # after a failed rerun; Step 2 must fail closed or use the
-            # explicitly labelled pre-normalization fallback.
+            # after a failed rerun; the grouping stage may use the explicitly
+            # labelled pre-normalization fallback.
             self.document.normalized_text = None
-            self.document.chinese_review_text = None
-            self.document.step2_confirmed_output = None
-            self.document.chinese_review_session = None
             self.document.cleaned_text = None
             self.document.filtered_output = None
             self.document.chunks = []
             self.document.stage(StageKey.NORMALIZE).fail(str(error))
             self._set_editor_text(self.stage1_output, "")
             self.stage1_output.setReadOnly(True)
-            self.stage2_continue_btn.setEnabled(False)
+            self.stage3_continue_btn.setEnabled(False)
             self._video_media = None
             self._video_audio_probe = None
             self._refresh_stage4_ui()
@@ -975,132 +946,103 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
     
-    def _on_scan_chinese(self):
-        self._log("Scanning Step 2 working copy for Chinese residue...")
-        try:
-            session = self._ensure_review_session(rescan=True)
-            self._sync_review_document(session)
-            self._refresh_stage2_ui()
-            self._log(f"✓ {session.progress_text()}")
-            self._update_status()
-        except Exception as error:
-            self._error(f"Scan failed: {error}")
-            import traceback
-            traceback.print_exc()
-    
-    def _on_translate(self):
-        """Compatibility helper: apply explicitly supplied mappings as confirmed.
-
-        The user-facing workflow is occurrence based.  This method remains for
-        callers that already populate ``document.translations``; it routes those
-        mappings through the same review session and never bypasses Step 2.
-        """
-        try:
-            from chinese.review import ReviewStatus
-
-            session = self._ensure_review_session()
-            applied = 0
-            while True:
-                target = None
-                for sentence_id in session.review_sentence_ids:
-                    for fragment in session.sentences[sentence_id].fragments:
-                        replacement = self.document.translations.get(fragment.text, "").strip()
-                        if replacement:
-                            target = (fragment.id, replacement)
-                            break
-                    if target:
-                        break
-                if target is None:
-                    break
-                applied += session.apply(
-                    target[0], target[1], ReviewStatus.CONFIRMED, replace_all=True
-                )
-            self._sync_review_document(session)
-            self._refresh_stage2_ui()
-            self._log(f"✓ Applied {applied} confirmed replacement(s).")
-            self._update_status()
-        except PipelineStateError as error:
-            self._error(str(error))
-        except Exception as error:
-            self._error(f"Translation failed: {error}")
-    
     def _on_clean_chunk(self):
-        self._log("Cleaning and chunking...")
+        """Prepare small inputs inline, large inputs on a cancellable worker."""
+        if self._tts_prepare_thread is not None:
+            return False
+        self._log("Cleaning, TTS preprocessing and chunking…")
         try:
-            from chunking import split_chapters
             from chapters import build_patterns
-            from cleaning import CleaningOptions, clean_text
-            from media.artifacts import write_step3_artifacts
-
-            source_text = self.document.require_step2_confirmed_output()
-            patterns = build_patterns(self.settings)
-            chapters = derive_chapters_from_text(source_text, patterns, source_name="pipeline")
+            from media.tts_preparation import prepare_legacy_bundle
+            source = self.document.require_grouping_input()
+            chapters = derive_chapters_from_text(source, build_patterns(self.settings), source_name="pipeline")
             if not chapters:
-                self._error("No chapter boundaries found in the current pipeline output.")
-                return
+                raise PipelineStateError("No chapter boundaries found in the current pipeline output.")
             title = self.stage3_title_edit.text().strip() or self.document.job_title
-            chapter_label = self.stage3_chapter_edit.text().strip() or self.document.job_chapter
+            label = self.stage3_chapter_edit.text().strip() or self.document.job_chapter
             if not title:
                 source_name = self.document.source_files[0].name if self.document.source_files else ""
                 title = Path(source_name).stem or "Novel Title"
-            if not chapter_label:
-                chapter_label = chapters[0].header_line
-            if title != self.stage3_title_edit.text().strip() or chapter_label != self.stage3_chapter_edit.text().strip():
-                self._set_job_editors(title, chapter_label)
-            self.document.set_job_identity(title, chapter_label)
-            cleaning_options = CleaningOptions.from_settings(self.settings)
-            clean_reports = []
-            for chapter in chapters:
-                cleaned, clean_report = clean_text(chapter.text, cleaning_options)
-                chapter.text = cleaned
-                chapter.char_count = len(cleaned)
-                clean_reports.append(clean_report)
-            cleaned_text = render_chapters_text(chapters)
-            self.document.chapters = chapters
-            self.document.set_cleaned_output(cleaned_text)
-            limit = self.settings.clamp_chunk_size()
-            chunks, plan, diagnostics = split_chapters(
-                chapters,
-                limit,
-                include_header=True,
-                min_chunk=max(50, int(self.settings.min_chunk_chars or 200)),
-            )
-            self.document.chunks = chunks
-            self.document.diagnostics.extend(diagnostics)
-            bundle = write_step3_artifacts(
-                self.document,
-                self.settings.resolved_output_dir(self.document.input_directory),
-                title=title,
-                chapter=chapter_label,
-                chunk_limit=limit,
-            )
-            self.document.set_step3_artifacts(bundle)
-            self._video_media = None
-            self._video_audio_probe = None
-            self.document.stage("clean_chunk").touch(
-                f"{len(self.document.chapters)} chapters", f"{len(chunks)} chunks",
-                {
-                    "total_chunks": len(chunks),
-                    "cleaned_before": sum(report.before_chars for report in clean_reports),
-                    "cleaned_after": sum(report.after_chars for report in clean_reports),
-                }
-            )
-            self._log(f"✓ Created {len(chunks)} chunks and Step 3 TXT/JSON bundle")
-            self.stage3_output.setPlainText(
-                f"TXT: {bundle.txt_path}\nJSON: {bundle.json_path}\n\nCreated {len(chunks)} chunks:\n\n" +
-                "\n".join(f"• Ch {c.chapter} part {c.part}/{c.parts}: {c.char_count} chars" for c in chunks[:50])
-            )
-            self.stage3_continue_btn.setEnabled(True)
-            self._refresh_stage4_ui()
-            self._refresh_stage5_ui()
-            self._update_status()
-        except PipelineStateError as error:
-            self._error(str(error))
+            label = label or chapters[0].header_line
+            self._set_job_editors(title, label)
+            self.document.set_job_identity(title, label)
+            snapshot, settings = self.document.clone(), self.settings.clone()
+            if len(source) < 100_000:
+                self._publish_tts_preparation(prepare_legacy_bundle(snapshot, settings))
+                return True
+            from threading import Event
+            from ui.grouped_pipeline import ActionWorker
+            self._tts_prepare_cancel = Event()
+            event = self._tts_prepare_cancel
+            self.stage3_continue_btn.setEnabled(False)
+            self.stage4_tts_btn.setEnabled(False)
+            self.stage4_cancel_tts_btn.setEnabled(True)
+            self.stage4_tts_status.setText("Đang chuẩn bị văn bản TTS…")
+            thread = QThread(self)
+            worker = ActionWorker(lambda _worker: prepare_legacy_bundle(snapshot, settings, cancel_event=event))
+            worker.moveToThread(thread)
+            def completed(value):
+                if (event.is_set() or source != self.document.require_grouping_input() or
+                        (title, label) != (self.document.job_title, self.document.job_chapter) or
+                        settings.to_dict() != self.settings.to_dict()):
+                    self._tts_generate_after_prepare = False
+                    self._log("TTS preparation discarded: cancelled or inputs/settings changed. Run preparation again.")
+                    return
+                self._publish_tts_preparation(value)
+            def failed(message):
+                self._tts_generate_after_prepare = False
+                self._log(message)
+                self.stage4_tts_status.setText(message)
+            thread.started.connect(worker.run)
+            worker.completed.connect(completed)
+            worker.failed.connect(failed)
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(self._on_tts_preparation_finished)
+            thread.finished.connect(thread.deleteLater)
+            self._tts_prepare_thread, self._tts_prepare_worker = thread, worker
+            thread.start()
+            return False
         except Exception as error:
+            self._tts_generate_after_prepare = False
             self._error(f"Clean/chunk failed: {error}")
-            import traceback
-            traceback.print_exc()
-    
+            return False
+
+    def _publish_tts_preparation(self, value):
+        prepared, statistics, warnings = value
+        bundle, chunks = prepared.step3_artifacts, prepared.chunks
+        self.document.chapters = prepared.chapters
+        self.document.set_cleaned_output(prepared.cleaned_text)
+        self.document.chunks = chunks
+        self.document.diagnostics = prepared.diagnostics
+        self.document.set_step3_artifacts(bundle)
+        self._video_media = self._video_audio_probe = None
+        self.document.stage("clean_chunk").touch(
+            f"{len(prepared.chapters)} chapters", f"{len(chunks)} chunks",
+            {"total_chunks": len(chunks), "cleaned_before": statistics.get("input_chars", 0),
+             "cleaned_after": statistics.get("output_chars", 0)})
+        self._log("TTS preprocessing: " + str(statistics))
+        for warning in warnings:
+            self._log(warning)
+        self._log(f"✓ Created {len(chunks)} chunks and TXT/JSON bundle")
+        self.stage3_output.setPlainText(
+            f"TXT: {bundle.txt_path}\nJSON: {bundle.json_path}\n\nCreated {len(chunks)} chunks:\n\n" +
+            "\n".join(f"• Ch {c.chapter} part {c.part}/{c.parts}: {c.char_count} chars" for c in chunks[:50]))
+        self.stage3_continue_btn.setEnabled(True)
+        self.stage4_tts_status.setText("TTS text ready")
+        self._refresh_stage4_ui()
+        self._refresh_stage5_ui()
+        self._update_status()
+
+    def _on_tts_preparation_finished(self):
+        self._tts_prepare_thread = self._tts_prepare_worker = None
+        self._tts_prepare_cancel = None
+        self.stage4_cancel_tts_btn.setEnabled(False)
+        self._refresh_stage4_ui()
+        if self._tts_generate_after_prepare:
+            self._tts_generate_after_prepare = False
+            self._on_generate_audiobook()
+
     def _on_export(self):
         if not self.document.chunks:
             self._error("No chunks. Run clean & chunk first.")
@@ -1137,7 +1079,7 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._error(f"Export failed: {error}")
 
-    # ------------------------------------------------------- Step 3/4 job
+    # ------------------------------------------------------- Step 2/3 job
     def _selected_group_size(self) -> int:
         return self.stage3_group_size.currentData() or self.stage3_custom_size.value()
 
@@ -1149,26 +1091,45 @@ class MainWindow(QMainWindow):
         if hasattr(self, "group4"):
             self._refresh_group_panels()
 
+    def _effective_output_destination(self):
+        """Return the visible root/job destination for the current document."""
+        from media.artifacts import slugify_job_name
+
+        manifest = Path(self.document.group_manifest_path or "")
+        if manifest.is_file():
+            root = manifest.resolve().parent.parent
+        else:
+            root = self.settings.resolved_output_dir(self.document.input_directory).resolve()
+        title = self.stage3_title_edit.text().strip()
+        job = root / slugify_job_name(title, "").rstrip("_") if title else None
+        return root, job
+
     def _refresh_group_preview(self):
         from media.groups import analyze_grouping, preview_groups
         try:
-            text = self.document.require_step2_confirmed_output()
+            text = self.document.require_grouping_input()
             size = self._selected_group_size()
             analysis = analyze_grouping(text, self.settings, size)
             headings, diagnostics = analysis.headings, analysis.diagnostics
             has_title = bool(self.stage3_title_edit.text().strip())
+            output_root, job_dir = self._effective_output_destination()
+            output_text = f"Effective output root: {output_root}"
+            if job_dir is not None:
+                output_text += f"\nJob folder: {job_dir}"
             if analysis.requires_numeric_boundaries:
                 self.stage3_detection_label.setText(
                     f"Expected range: Chương {headings[0].number}-{headings[-1].number}\n"
                     f"Expected chapters: {analysis.expected_count}\n"
                     f"Detected chapter headings: {len(headings)}\n"
-                    f"First chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}"
+                    f"First chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}\n"
+                    f"{output_text}"
                 )
                 if analysis.numeric_unavailable_reason:
                     self.stage3_output.setPlainText(
                         "Some chapter numbers are missing.\n\n"
                         "Automatic numeric-boundary grouping is unavailable: " + analysis.numeric_unavailable_reason +
-                        "\n\nCorrect the required chapter headings in Step 1/2 and review the document manually."
+                        "\n\nCorrect the required chapter headings in Step 1/2 and review the document manually.\n\n" +
+                        output_text
                     )
                     self.stage3_create_groups_btn.setEnabled(False)
                     self.stage3_restore_groups_btn.setEnabled(False)
@@ -1183,17 +1144,22 @@ class MainWindow(QMainWindow):
                     "I can instead group by numeric chapter boundaries:\n\n" +
                     "\n".join(item["range_label"] for item in groups) +
                     "\n\nThis method ignores missing chapter headings inside each range and splits using the available boundary chapter headings."
+                    "\n\n" + output_text
                 )
                 self.stage3_create_groups_btn.setEnabled(has_title)
                 self.stage3_restore_groups_btn.setEnabled(has_title)
                 return
 
             headings, groups, diagnostics = preview_groups(text, self.settings, size)
-            self.stage3_detection_label.setText(f"Detected chapters: {len(headings)}\nFirst chapter: {headings[0].heading}\nLast chapter: {headings[-1].heading}")
+            self.stage3_detection_label.setText(
+                f"Detected chapters: {len(headings)}\nFirst chapter: {headings[0].heading}\n"
+                f"Last chapter: {headings[-1].heading}\n{output_text}"
+            )
             self.stage3_output.setPlainText(
                 f"Total chapters: {len(headings)}\nChapters per group: {size}\nOutput groups: {len(groups)}\n\n" +
                 "\n".join(f"{g['order']}. {g['label']} ({len(g['chapters'])} chapters)" for g in groups) +
-                ("\n\nNumbering diagnostics:\n" + "\n".join(diagnostics) if diagnostics else ""))
+                ("\n\nNumbering diagnostics:\n" + "\n".join(diagnostics) if diagnostics else "") +
+                "\n\n" + output_text)
             self.stage3_create_groups_btn.setEnabled(has_title)
             self.stage3_restore_groups_btn.setEnabled(has_title)
         except PipelineStateError as error:
@@ -1229,10 +1195,12 @@ class MainWindow(QMainWindow):
         try:
             title = self.stage3_title_edit.text().strip()
             size = self._selected_group_size()
+            output_root, job_dir = self._effective_output_destination()
+            self._log(f"Effective output destination: {job_dir or output_root}")
             if restore:
                 groups = restore_groups(self.document, self.settings, title, size)
             else:
-                text = self.document.require_step2_confirmed_output()
+                text = self.document.require_grouping_input()
                 analysis = analyze_grouping(text, self.settings, size)
                 if analysis.requires_numeric_boundaries:
                     if analysis.numeric_unavailable_reason:
@@ -1253,8 +1221,8 @@ class MainWindow(QMainWindow):
             self._refresh_group_preview()
             self.stage3_output.append("\nGroup manifest: " + self.document.group_manifest_path + "\n" + "\n".join(g.txt_path for g in groups))
             self._refresh_group_panels()
-            self.document.stage(StageKey.CLEAN_CHUNK).touch("Step 2 confirmed output", f"{len(groups)} exact chapter groups")
-            self._log(f"✓ Created/restored {len(groups)} chapter groups; canonical TXT is unchanged Step 2 text.")
+            self.document.stage(StageKey.CLEAN_CHUNK).touch("Current normalized/original text", f"{len(groups)} exact chapter groups")
+            self._log(f"✓ Created/restored {len(groups)} chapter groups; canonical TXT preserves the current source text.")
         except Exception as error:
             self._error(str(error))
 
@@ -1345,7 +1313,7 @@ class MainWindow(QMainWindow):
             self._refresh_group_panels()
         bundle = self.document.step3_artifacts
         if bundle is None:
-            self.stage4_source_label.setText("Source: Run Step 3 first")
+            self.stage4_source_label.setText("Source: Run Step 2 first")
             self.stage4_title_label.setText("—")
             self.stage4_chapter_label.setText("—")
             self._set_editor_text(self.stage4_first_chapter, "")
@@ -1361,10 +1329,11 @@ class MainWindow(QMainWindow):
         first = self.document.chapters[0].body(include_header=True) if self.document.chapters else ""
         self._set_editor_text(self.stage4_first_chapter, first)
         tts_running = self._tts_thread is not None and self._tts_thread.isRunning()
-        running = tts_running or (self._merge_thread is not None and self._merge_thread.isRunning())
+        preparing = self._tts_prepare_thread is not None
+        running = preparing or tts_running or (self._merge_thread is not None and self._merge_thread.isRunning())
         self.stage4_thumbnail_btn.setEnabled(True)
         self.stage4_tts_btn.setEnabled(not running)
-        self.stage4_cancel_tts_btn.setEnabled(tts_running)
+        self.stage4_cancel_tts_btn.setEnabled(tts_running or preparing)
         self.stage4_failed_chunks_btn.setEnabled(bool(self.document.tts_failures))
         try:
             self.document.require_step4_outputs()
@@ -1446,6 +1415,17 @@ class MainWindow(QMainWindow):
 
             bundle = self.document.require_step3_artifacts()
             data = load_bundle_json(bundle)
+            from cleaning.tts_text_preprocessor import preprocessing_identity
+            if data.get("tts_preparation") != preprocessing_identity(self.settings):
+                self.document.require_grouping_input()
+                self._tts_generate_after_prepare = True
+                if not self._on_clean_chunk():
+                    return
+                self._tts_generate_after_prepare = False
+                bundle = self.document.require_step3_artifacts()
+                data = load_bundle_json(bundle)
+                if data.get("tts_preparation") != preprocessing_identity(self.settings):
+                    raise PipelineStateError("Run clean/chunk again before TTS; preparation is outdated.")
             chunks = [
                 TtsChunk(
                     order=int(item["order"]),
@@ -1511,6 +1491,10 @@ class MainWindow(QMainWindow):
         self._log(message)
 
     def _on_cancel_tts(self) -> None:
+        if self._tts_prepare_cancel is not None:
+            self._tts_prepare_cancel.set()
+            self._tts_generate_after_prepare = False
+            self.stage4_tts_status.setText("Đang hủy chuẩn bị văn bản TTS…")
         if self._tts_processor is not None:
             self._tts_processor.cancel_event.set()
             self.stage4_tts_status.setText("Đang hủy; các MP3 đã hoàn tất sẽ được giữ lại…")
@@ -1627,7 +1611,7 @@ class MainWindow(QMainWindow):
         self._tts_worker = None
         self._tts_processor = None
 
-    # -------------------------------------------------------------- Step 5
+    # -------------------------------------------------------------- Step 4
     def _enter_stage5(self) -> bool:
         if self.document.group_manifest_path:
             try:
@@ -1817,12 +1801,7 @@ class MainWindow(QMainWindow):
             if capabilities is None or capabilities.selected is None:
                 raise PipelineStateError("Video encoder detection has not completed successfully.")
             audio_probe = probe_audio(Path(media.audiobook_path), capabilities.ffprobe_path)
-            audio_copy = mp3_copy_is_safe(
-                Path(media.audiobook_path),
-                capabilities.ffmpeg_path,
-                capabilities.ffprobe_path,
-                temp_dir=Path(media.output_dir),
-            )
+            audio_copy = None
         except Exception as error:
             self._error(f"Cannot start video rendering: {error}")
             return
@@ -1833,7 +1812,7 @@ class MainWindow(QMainWindow):
         self.stage5_progress.setFormat("0.0%")
         self.stage5_result.setPlainText("")
         self.stage5_status.setText(
-            "Starting FFmpeg · audio: " + ("MP3 stream copy" if audio_copy else "AAC 192k")
+            "Preparing exact TTS pages and measured timeline…"
         )
         session = _VideoRenderSession(
             capabilities,
@@ -1859,8 +1838,6 @@ class MainWindow(QMainWindow):
             self.tabs.setTabEnabled(index, not busy)
         if self.tabs.count() > 4:
             self.tabs.setTabEnabled(4, True)
-        if self.tabs.count() > 5:
-            self.tabs.setTabEnabled(5, not busy)
 
     def _set_youtube_busy(self, busy: bool) -> None:
         self.load_btn.setEnabled(not busy)
@@ -1870,14 +1847,18 @@ class MainWindow(QMainWindow):
         self.tabs.blockSignals(True)
         try:
             if busy:
-                self.tabs.setCurrentIndex(5)
-            for index in range(5):
+                self.tabs.setCurrentIndex(4)
+            for index in range(4):
                 self.tabs.setTabEnabled(index, not busy)
-            self.tabs.setTabEnabled(5, True)
+            self.tabs.setTabEnabled(4, True)
         finally:
             self.tabs.blockSignals(False)
 
     def closeEvent(self, event) -> None:
+        if self._tts_prepare_thread is not None:
+            self._on_cancel_tts()
+            event.ignore()
+            return
         for panel in (self.group4, self.group5, self.group6):
             if panel.busy:
                 panel.cancel()
@@ -1958,7 +1939,7 @@ class MainWindow(QMainWindow):
             self._video_render_session.cancel()
 
     def _on_video_cancelled(self) -> None:
-        self.stage5_status.setText("Video rendering cancelled; Step 3/4 files were preserved.")
+        self.stage5_status.setText("Video rendering cancelled; Step 2/3 files were preserved.")
         self._log("Video rendering cancelled.")
         self._video_render_session = None
         self._set_video_busy(False)
@@ -1981,7 +1962,8 @@ class MainWindow(QMainWindow):
         from media.groups import grouping_config
         from cleaning.textclean import CleaningOptions
         from dataclasses import asdict
-        audio_config = lambda values: (asdict(CleaningOptions.from_settings(values)), values.max_chunk_chars, values.min_chunk_chars, values.tts_voice)
+        from cleaning.tts_text_preprocessor import preprocessing_identity
+        audio_config = lambda values: (asdict(CleaningOptions.for_tts(values)), preprocessing_identity(values), values.max_chunk_chars, values.min_chunk_chars, values.tts_voice)
         old_audio = audio_config(self.settings)
         old_thumbnail = (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality)
         grouping_method = self.document.grouping_config.get("grouping_method", "detected_chapters")
@@ -1989,18 +1971,26 @@ class MainWindow(QMainWindow):
         old_root = self.settings.resolved_output_dir(self.document.input_directory)
         for name in self.settings.__dataclass_fields__:
             setattr(self.settings, name, getattr(updated, name))
+        root_changed = old_root != self.settings.resolved_output_dir(self.document.input_directory)
+        # A live manifest is the resume authority. Changing the global output
+        # preference must not detach the current job from its recorded folder;
+        # the new preference applies to the next job instead.
         if (old_grouping != grouping_config(self.settings, self._selected_group_size(), grouping_method) or
-                old_root != self.settings.resolved_output_dir(self.document.input_directory)):
+                (root_changed and not self.document.group_manifest_path)):
             self.document._clear_step3_artifacts()
             self.stage3_continue_btn.setEnabled(False)
             self._refresh_group_preview()
             self._refresh_group_panels()
         try:
             from media.groups import save_job_state
+            if old_audio != audio_config(self.settings) and not self.document.chapter_groups:
+                self.document._clear_step3_artifacts()
+                self.stage3_continue_btn.setEnabled(False)
             for group in self.document.chapter_groups:
                 changed = False
                 if old_audio != audio_config(self.settings):
                     group.state["tts_status"] = "TTS Incomplete"
+                    group.state.pop("audiobook", None)
                     group.state.pop("video", None)
                     changed = True
                 if old_thumbnail != (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality):
@@ -2039,7 +2029,11 @@ class MainWindow(QMainWindow):
         self.status_text.append(message)
     
     def _error(self, message: str):
-        QMessageBox.critical(self, "Error", message)
+        dialog = QMessageBox(QMessageBox.Icon.Critical, "Error", message, parent=self)
+        copy_button = dialog.addButton("Copy all", QMessageBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(lambda: copy_text(message))
+        dialog.addButton(QMessageBox.StandardButton.Ok)
+        dialog.exec()
         self._log(f"❌ {message}")
     
     def _update_status(self):
@@ -2066,18 +2060,19 @@ class MainWindow(QMainWindow):
         if self.document.set_normalized_edit(self.stage1_output.toPlainText()):
             self._video_media = None
             self._video_audio_probe = None
-            self.stage2_continue_btn.setEnabled(False)
-            self.stage2_source_label.setText("Source: Step 1 changed — rescan required")
+            self.stage3_continue_btn.setEnabled(False)
+            self._refresh_group_preview()
             self._refresh_stage5_ui()
             self._update_status()
 
     def _continue_to_stage2(self) -> None:
-        if self._enter_stage2():
+        self._refresh_group_preview()
+        if self.document.original_input_text:
             self.tabs.setCurrentIndex(1)
 
     def _continue_to_stage3(self) -> None:
         try:
-            self.document.require_step2_confirmed_output()
+            self.document.require_grouping_input()
         except PipelineStateError as error:
             self._error(str(error))
             return
@@ -2092,10 +2087,14 @@ class MainWindow(QMainWindow):
         except PipelineStateError as error:
             self._error(str(error))
             return
+        if not self._enter_stage5():
+            return
+        self.tabs.blockSignals(True)
         self.tabs.setCurrentIndex(3)
+        self.tabs.blockSignals(False)
 
     def _continue_to_stage5(self) -> None:
-        if self._enter_stage5():
+        if self._enter_stage6():
             self.tabs.blockSignals(True)
             self.tabs.setCurrentIndex(4)
             self.tabs.blockSignals(False)
@@ -2114,29 +2113,17 @@ class MainWindow(QMainWindow):
             if isinstance(error, (PipelineStateError, YouTubeUploadError)):
                 self._error(str(error))
             else:
-                self._error("Cannot open Step 6. Verify the current job outputs and upload state.")
+                self._error("Cannot open Step 5. Verify the current job outputs and upload state.")
             return False
 
     def _continue_to_stage6(self) -> None:
-        if self._enter_stage6():
-            self.tabs.blockSignals(True)
-            self.tabs.setCurrentIndex(5)
-            self.tabs.blockSignals(False)
+        """Compatibility alias for callers using the pre-renumbered name."""
+        self._continue_to_stage5()
 
     def _on_tab_changed(self, index: int) -> None:
         if index == 1:
-            self._enter_stage2()
+            self._refresh_group_preview()
         elif index == 2:
-            try:
-                self.document.require_step2_confirmed_output()
-                self._refresh_group_preview()
-            except PipelineStateError as error:
-                self.tabs.blockSignals(True)
-                self.tabs.setCurrentIndex(1)
-                self.tabs.blockSignals(False)
-                self._enter_stage2()
-                self._error(str(error))
-        elif index == 3:
             try:
                 if self.document.group_manifest_path:
                     self.group4.enter()
@@ -2145,329 +2132,16 @@ class MainWindow(QMainWindow):
                 self._refresh_stage4_ui()
             except PipelineStateError as error:
                 self.tabs.blockSignals(True)
-                self.tabs.setCurrentIndex(2)
+                self.tabs.setCurrentIndex(1)
                 self.tabs.blockSignals(False)
                 self._error(str(error))
-        elif index == 4:
+        elif index == 3:
             if not self._enter_stage5():
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(2)
+                self.tabs.blockSignals(False)
+        elif index == 4:
+            if not self._enter_stage6():
                 self.tabs.blockSignals(True)
                 self.tabs.setCurrentIndex(3)
                 self.tabs.blockSignals(False)
-        elif index == 5:
-            if not self._enter_stage6():
-                self.tabs.blockSignals(True)
-                self.tabs.setCurrentIndex(4)
-                self.tabs.blockSignals(False)
-
-    def _enter_stage2(self) -> bool:
-        try:
-            session = self._ensure_review_session()
-            self._sync_review_document(session)
-            self._refresh_stage2_ui()
-            self._update_status()
-            return True
-        except PipelineStateError as error:
-            self._error(str(error))
-            return False
-        except Exception as error:
-            self._error(f"Step 2 failed: {error}")
-            return False
-
-    # ------------------------------------------------------- Step 2 review
-    def _ensure_master_dictionary(self):
-        from chinese.master_dictionary import MasterDictionary, MasterDictionaryError
-
-        if self._master_dictionary is None:
-            self._master_dictionary = MasterDictionary()
-        self.stage2_dictionary_label.setText("Master dictionary: validating/indexing fixed assets…")
-        QApplication.processEvents()
-        try:
-            health = self._master_dictionary.ensure_ready()
-        except MasterDictionaryError as error:
-            self._dictionary_error = str(error)
-            self.stage2_dictionary_label.setText(f"Master dictionary error: {error}")
-            self.stage2_dictionary_label.setStyleSheet("color: #b00020;")
-            self._log(f"❌ Master dictionary unavailable: {error}")
-            return None
-        self._dictionary_error = ""
-        self.stage2_dictionary_label.setStyleSheet("")
-        warning = health.warning_summary()
-        summary = (
-            f"Master dictionary: {health.indexed_entries:,} phrase alternatives · "
-            f"{health.indexed_rules:,} rules · {health.indexed_phonetics:,} phonetics"
-        )
-        if warning:
-            summary += f" · {warning}"
-        self.stage2_dictionary_label.setText(summary)
-        return self._master_dictionary
-
-    def _ensure_review_session(self, *, rescan: bool = False):
-        from chinese.detector import has_han
-        from chinese.review import ChineseReviewSession
-
-        step2_input, source_label = self.document.begin_chinese_review()
-        self.stage2_source_label.setText(source_label)
-        dictionary = self._ensure_master_dictionary() if has_han(step2_input) else None
-        session = self.document.chinese_review_session
-        if (
-            session is None
-            or session.source_revision != self.document.normalized_revision
-            or session.source_text != self.document._chinese_review_source_text
-        ):
-            session = ChineseReviewSession(
-                step2_input,
-                dictionary,
-                source_revision=self.document.normalized_revision,
-            )
-            self.document.chinese_review_session = session
-        elif rescan:
-            session.dictionary = dictionary
-            session.scan_all()
-        return session
-
-    def _sync_review_document(self, session) -> None:
-        working = session.working_text
-        self.document.set_chinese_review_output(working)
-        counts = {
-            "total_sentences": session.total_sentences,
-            "resolved_sentences": session.resolved_sentences,
-            "remaining_sentences": session.remaining_sentences,
-            "actions": len(session.actions),
-        }
-        status = self.document.stage(StageKey.CHINESE)
-        if session.is_complete:
-            self.document.complete_chinese_review(working)
-            status.touch(
-                f"{len(session.source_text)} characters",
-                "Chinese residue review complete",
-                counts,
-            )
-        else:
-            status.ran = True
-            status.ok = False
-            status.input_summary = f"{len(session.source_text)} characters"
-            status.result_summary = session.progress_text()
-            status.counts = counts
-            status.error = ""
-
-    def _refresh_stage2_ui(self) -> None:
-        session = self.document.chinese_review_session
-        if session is None:
-            self.stage2_progress_label.setText(
-                "Total sentences: 0    Resolved: 0    Remaining: 0"
-            )
-            self.stage2_continue_btn.setEnabled(False)
-            return
-
-        self._set_editor_text(self.stage2_input_preview, session.working_text)
-        self.stage2_progress_label.setText(session.progress_text())
-        self.stage2_continue_btn.setEnabled(session.is_complete)
-        lines = []
-        for number, sentence_id in enumerate(session.review_sentence_ids[:100], 1):
-            sentence = session.sentences[sentence_id]
-            state = "Resolved" if not sentence.unresolved else "Remaining"
-            fragments = ", ".join(
-                f"{fragment.text} [{fragment.status.value}]" for fragment in sentence.fragments
-            ) or "No Han characters"
-            actions = "; ".join(
-                (
-                    f"{action.fragment} [Skipped]"
-                    if action.status.value == "Skipped"
-                    else f"{action.fragment} → {action.replacement} [{action.status.value}]"
-                )
-                for action in session.actions_for_sentence(sentence_id)
-            )
-            audit = f"\n   Actions: {actions}" if actions else ""
-            lines.append(
-                f"{number}. {state}: {fragments}\n   {sentence.display_text}{audit}"
-            )
-        if not lines:
-            lines.append("No Chinese Han characters remain in the Step 2 working copy.")
-        self._set_editor_text(self.stage2_output, "\n\n".join(lines))
-        self._render_review_sentence()
-
-    def _render_review_sentence(self) -> None:
-        session = self.document.chinese_review_session
-        sentence = session.current_sentence if session is not None else None
-        self._updating_review_widgets = True
-        try:
-            self.stage2_fragment_combo.blockSignals(True)
-            self.stage2_fragment_combo.clear()
-            if sentence is None:
-                self.stage2_position_label.setText("No Chinese residue")
-                self._set_editor_text(self.stage2_sentence_text, "")
-            else:
-                self.stage2_position_label.setText(
-                    f"Sentence {session.current_position + 1} of {session.total_sentences}"
-                )
-                self._set_editor_text(self.stage2_sentence_text, sentence.display_text)
-                for fragment in sentence.fragments:
-                    self.stage2_fragment_combo.addItem(
-                        f"{fragment.text} — {fragment.status.value}", fragment.id
-                    )
-            self.stage2_fragment_combo.blockSignals(False)
-        finally:
-            self._updating_review_widgets = False
-        self._render_review_fragment()
-        self.stage2_previous_btn.setEnabled(
-            bool(session and session.review_sentence_ids and session.current_position > 0)
-        )
-        self.stage2_next_btn.setEnabled(
-            bool(
-                session
-                and session.review_sentence_ids
-                and session.current_position < len(session.review_sentence_ids) - 1
-            )
-        )
-
-    def _selected_review_fragment(self):
-        session = self.document.chinese_review_session
-        if session is None:
-            return None
-        fragment_id = self.stage2_fragment_combo.currentData()
-        return session.fragment_by_id(str(fragment_id)) if fragment_id else None
-
-    def _render_review_fragment(self) -> None:
-        fragment = self._selected_review_fragment()
-        self._updating_review_widgets = True
-        self._manual_edit_mode = False
-        try:
-            self.stage2_suggestion_combo.blockSignals(True)
-            self.stage2_suggestion_combo.clear()
-            self.stage2_suggestion_combo.addItem("Select a suggestion…", None)
-            self.stage2_replacement_edit.blockSignals(True)
-            self.stage2_replacement_edit.setReadOnly(True)
-            self.stage2_replacement_edit.clear()
-            if fragment is None:
-                self.stage2_fragment_status.setText("Resolved" if self.document.chinese_review_session else "")
-                session = self.document.chinese_review_session
-                sentence = session.current_sentence if session is not None else None
-                actions = session.actions_for_sentence(sentence.id) if sentence is not None else []
-                self.stage2_suggestion_message.setText(
-                    "; ".join(
-                        f"{action.fragment} → {action.replacement} [{action.status.value}]"
-                        for action in actions
-                        if action.status.value != "Skipped"
-                    )
-                )
-            else:
-                self.stage2_fragment_status.setText(fragment.status.value)
-                for index, suggestion in enumerate(fragment.suggestions):
-                    self.stage2_suggestion_combo.addItem(suggestion.display_text, index)
-                if not fragment.suggestions:
-                    self.stage2_suggestion_message.setText(
-                        "No suggestion found. Click Edit to enter a manual replacement."
-                    )
-                elif len(fragment.suggestions) > 1:
-                    self.stage2_suggestion_message.setText(
-                        "Multiple dictionary alternatives found. Select one or enter a manual replacement."
-                    )
-                else:
-                    suggestion = fragment.suggestions[0]
-                    self.stage2_suggestion_message.setText(
-                        f"{suggestion.kind.title()} suggestion from {suggestion.source_label}."
-                    )
-                    self.stage2_suggestion_combo.setCurrentIndex(1)
-                    self.stage2_replacement_edit.setText(suggestion.value)
-            self.stage2_replacement_edit.blockSignals(False)
-            self.stage2_suggestion_combo.blockSignals(False)
-        finally:
-            self._updating_review_widgets = False
-        self._update_review_buttons()
-
-    def _on_fragment_changed(self, _index: int) -> None:
-        if not self._updating_review_widgets:
-            self._render_review_fragment()
-
-    def _on_suggestion_changed(self, _index: int) -> None:
-        if self._updating_review_widgets:
-            return
-        fragment = self._selected_review_fragment()
-        suggestion_index = self.stage2_suggestion_combo.currentData()
-        self._manual_edit_mode = False
-        self.stage2_replacement_edit.setReadOnly(True)
-        if fragment is None or suggestion_index is None:
-            self.stage2_replacement_edit.clear()
-        else:
-            self.stage2_replacement_edit.setText(
-                fragment.suggestions[int(suggestion_index)].value
-            )
-        self._update_review_buttons()
-
-    def _on_review_edit(self) -> None:
-        if self._selected_review_fragment() is None:
-            return
-        self._manual_edit_mode = True
-        self.stage2_replacement_edit.setReadOnly(False)
-        self.stage2_replacement_edit.setFocus()
-        self.stage2_replacement_edit.selectAll()
-        self._update_review_buttons()
-
-    def _on_review_confirm(self) -> None:
-        self._apply_review_replacement(replace_all=False)
-
-    def _on_review_replace_all(self) -> None:
-        self._apply_review_replacement(replace_all=True)
-
-    def _apply_review_replacement(self, *, replace_all: bool) -> None:
-        from chinese.review import ReviewStatus
-
-        session = self.document.chinese_review_session
-        fragment = self._selected_review_fragment()
-        if session is None or fragment is None:
-            return
-        replacement = self.stage2_replacement_edit.text().strip()
-        suggestion_selected = self.stage2_suggestion_combo.currentData() is not None
-        if not replacement or (not self._manual_edit_mode and not suggestion_selected):
-            self._error("Select a suggestion or enter a manual replacement first.")
-            return
-        status = ReviewStatus.MANUAL if self._manual_edit_mode else ReviewStatus.CONFIRMED
-        try:
-            count = session.apply(
-                fragment.id, replacement, status, replace_all=replace_all
-            )
-            self._sync_review_document(session)
-            self._refresh_stage2_ui()
-            self._update_status()
-            self._log(
-                f"✓ Replaced {count} occurrence(s) of {fragment.text} with {replacement}."
-            )
-        except ValueError as error:
-            self._error(str(error))
-
-    def _on_review_skip(self) -> None:
-        session = self.document.chinese_review_session
-        fragment = self._selected_review_fragment()
-        if session is None or fragment is None:
-            return
-        try:
-            session.skip(fragment.id)
-            self._sync_review_document(session)
-            self._refresh_stage2_ui()
-            self._update_status()
-        except ValueError as error:
-            self._error(str(error))
-
-    def _on_review_previous(self) -> None:
-        session = self.document.chinese_review_session
-        if session is not None:
-            session.previous()
-            self._render_review_sentence()
-
-    def _on_review_next(self) -> None:
-        session = self.document.chinese_review_session
-        if session is not None:
-            session.next()
-            self._render_review_sentence()
-
-    def _update_review_buttons(self, *_args) -> None:
-        fragment = self._selected_review_fragment()
-        has_replacement = bool(self.stage2_replacement_edit.text().strip())
-        selected = self.stage2_suggestion_combo.currentData() is not None
-        can_apply = bool(
-            fragment and has_replacement and (self._manual_edit_mode or selected)
-        )
-        self.stage2_confirm_btn.setEnabled(can_apply)
-        self.stage2_replace_all_btn.setEnabled(can_apply)
-        self.stage2_edit_btn.setEnabled(fragment is not None)
-        self.stage2_skip_btn.setEnabled(fragment is not None)

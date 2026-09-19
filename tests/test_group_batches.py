@@ -192,13 +192,19 @@ class GroupBatchTests(unittest.TestCase):
             return processor
         panel.processor_for = factory
         processor = factory(group, self.settings)
-        processor.audio_dir.mkdir()
-        (processor.audio_dir / 'chunk_00001.mp3').write_bytes(b'audio')
-        atomic_write_json(processor.manifest_path, {'schema_version': 1, 'settings': {'voice': processor.voice}, 'chunks': {'1': {'text_sha256': processor.chunks[0].text_sha256, 'voice': processor.voice}}})
+        class Client:
+            def __init__(self, text): self.text = text
+            async def save(self, path):
+                if self.text != processor.chunks[0].text:
+                    raise RuntimeError('missing')
+                Path(path).write_bytes(b'audio')
+        processor.client_factory = lambda text, voice: Client(text)
+        processor.retry_count = 1
+        processor.run()
         self.assertGreater(len(processor.chunks), 1)
         with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.No):
             panel.merge_partial()
-        self.assertFalse(Path(group.output_dir, group.slug + '_audiobook.mp3').exists())
+        self.assertFalse(Path(group.output_dir, 'audiobook.mp3').exists())
         with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
             panel.merge_partial()
             self.wait_finished(panel)
@@ -236,7 +242,7 @@ class GroupBatchTests(unittest.TestCase):
         self.assertIn('thumbnail', self.groups[1].state)
         # The selected images and previews survive a matching restore.
         from media.groups import restore_groups
-        restored = document_for(self.doc.step2_confirmed_output, self.root)
+        restored = document_for(self.doc.require_grouping_input(), self.root)
         restore_groups(restored, self.settings, self.doc.job_title, 1)
         self.assertEqual(restored.chapter_groups[0].state['thumbnail_source'], str(self.root / 'red.png'))
         self.assertEqual(restored.chapter_groups[2].state['thumbnail_source'], str(self.root / 'blue.png'))
@@ -257,14 +263,14 @@ class GroupBatchTests(unittest.TestCase):
         self.assertIn('externally modified', panel.summary[1])
         self.assertEqual(len(panel.summary), 3)
 
-    def test_step4_can_delete_any_group_and_refresh_later_stages(self):
+    def test_step3_can_delete_any_group_and_refresh_later_stages(self):
         window = MainWindow(self.settings)
         window.document = self.doc
         Path(self.groups[2].txt_path).write_bytes(b'changed')
         window._refresh_group_panels()
         with patch.object(window, '_error', side_effect=AssertionError('A damaged job must not block Step 4')):
-            window._continue_to_stage4()
-        self.assertEqual(window.tabs.currentIndex(), 3)
+            window._continue_to_stage3()
+        self.assertEqual(window.tabs.currentIndex(), 2)
         panel = window.group4
         panel.groups.setCurrentRow(2)
         self.assertTrue(panel.first_chapter.toPlainText() == '')
@@ -290,7 +296,7 @@ class GroupBatchTests(unittest.TestCase):
         self.assertTrue(panel.first_chapter.toPlainText() == '')
         self.assertEqual(window.stage4_stack.currentWidget(), panel)
         with patch.object(window, '_error', side_effect=AssertionError('Empty group management remains accessible')):
-            window._continue_to_stage4()
+            window._continue_to_stage3()
         window.close()
 
     def test_step4_busy_blocks_image_selection_and_group_deletion(self):

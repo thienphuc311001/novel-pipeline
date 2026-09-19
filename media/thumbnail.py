@@ -1,4 +1,4 @@
-"""Deterministic YouTube thumbnail rendering for Step 4."""
+"""Deterministic YouTube thumbnail rendering for Step 3."""
 
 from __future__ import annotations
 

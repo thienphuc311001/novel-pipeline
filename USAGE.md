@@ -14,10 +14,10 @@
 
 3. **Process through the pipeline**
    - Tab 1: Normalize chapters
-   - Tab 2: Review Chinese text (optional)
-   - Tab 3: Clean and chunk
-   - Tab 4: Generate thumbnail and audiobook
-   - Tab 5: Create the final MP4
+   - Tab 2: Detect chapters and group
+   - Tab 3: Generate thumbnail and audiobook
+   - Tab 4: Create the final MP4
+   - Tab 5: Upload to YouTube
 
 ## Stage 1: Input & Normalize
 
@@ -48,7 +48,7 @@ Click **"▶️ Normalize Chapters"** to:
    - `第12章`, `第九十八章 标题`
    - `12.`, `12:`, `#12`
 
-2. **Unwrap JSON** translation artifacts automatically
+2. **Unwrap JSON** artifacts automatically
 
 3. **Split glued headers** like `Chương 3: Chạy trốnNàng vội...`
    → Header: `Chương 3: Chạy trốn`
@@ -60,59 +60,22 @@ Click **"▶️ Normalize Chapters"** to:
 
 **Output:** List of normalized chapters with diagnostics
 
-## Stage 2: Chinese Review
+## Stage 2: Detect Chapters & Group
 
-### Scanning Chinese Text
+After Step 1, the grouping stage consumes the normalized text directly. Chinese
+content is preserved as-is; there is no Chinese residue scan, dictionary review,
+or translation gate. Chinese chapter headers and numerals remain supported when
+recognizing chapter structure. If Step 1 has not run successfully, grouping
+uses the original loaded text as the documented fallback.
 
-Click **"🔍 Scan Chinese"** to:
-- Find all Chinese characters (Han ideographs)
-- Group identical phrases
-- Show occurrence counts and locations
-- Report total unique phrases
-
-**Example output:**
-```
-Found 150 unique Chinese phrases:
-• 修炼 (45x)
-• 修炼者 (23x)
-• 灵气 (18x)
-```
-
-### Translation Workflow
-
-**Manual translation:**
-1. Edit phrases in the table
-2. Press Enter to save
-3. Translations persist across sessions
-
-**AI translation (optional):**
-1. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/)
-2. Open Settings and enter your key
-3. Click "🔄 Translate with AI"
-4. Wait for batch completion
-5. Review and edit results
-
-**Priority order:**
-- Manual edits (highest priority)
-- AI translations
-- Offline dictionary (fallback)
-- Hán-Việt readings (last resort)
-
-**Applying translations:**
-Click **"🔄 Apply Translations"** to replace Chinese with Vietnamese throughout the text.
-
-**Algorithm:** Longest phrases first, so `修炼者` (tu luyện giả) replaces before `修炼` (tu luyện).
-
-## Stage 3: Detect Chapters & Group
-
-Complete Step 2 first. Enter/select a saved novel title. Step 3 displays the
+Enter/select a saved novel title. Step 2 displays the
 detected count and exact first/last headings. Choose **10**, **20** (default),
 **25**, **50**, or **Custom** chapters per group; the full preview updates
 automatically. Numbering gaps, repeats, and resets are reported but not changed.
 `Quyển` headings count as flat entries, not a volume hierarchy.
 
 If detected headings are fewer than the numeric range because chapter numbers
-are missing, Step 3 does not group by heading count. It previews numeric ranges
+are missing, Step 2 does not group by heading count. It previews numeric ranges
 and asks for confirmation before using them. Missing headings inside a range
 (including an end number) are allowed; every calculated group-start heading
 must exist exactly once. A missing, duplicate, or reset boundary disables
@@ -123,11 +86,11 @@ Click **Create Group Files**. Each group receives exact UTF-8 `final.txt` and
 The first group retains the preamble. These files are not cleaned or TTS-chunked.
 The novel folder contains `chapter_groups.json`, the source of truth for all
 later stages. **Restore Matching Groups** validates that manifest against the
-current confirmed text, title, grouping configuration, heading patterns and
+current grouping source text, title, grouping configuration, heading patterns and
 numeric-boundary confirmation identity when applicable, and canonical files.
 It never discovers/regroups files by scanning folders.
 
-## Stage 4: Thumbnail & Audiobook
+## Stage 3: Thumbnail & Audiobook
 
 All groups appear unchecked. Highlight a group and click **Select Image for
 Highlighted Group** to choose its own image and create a 1280×720 `thumbnail.jpg`
@@ -135,14 +98,14 @@ labeled with its range. Repeat for each group; checklist selections control
 the TTS batch. Highlight a group to inspect its canonical paths, exact first
 chapter, thumbnail, and failure details.
 
-**Delete Highlighted Group** removes that job from Steps 4–6, even if its
+**Delete Highlighted Group** removes that job from Steps 3–5, even if its
 canonical files are missing or modified. Deletions persist in the manifest
 and remain excluded when restoring matching groups. Existing files are kept;
-**Create Group Files** in Step 3 recreates the full group list. A damaged job
+**Create Group Files** in Step 2 recreates the full group list. A damaged job
 reports the affected file and fails independently while other batch jobs continue.
 
-**Start TTS** processes groups sequentially. Inside each group, Step 4 cleans a
-working copy and creates chapter-safe 1200-character chunks in `tts_chunks.json`.
+**Start TTS** processes groups sequentially. Inside each group, Step 3 cleans a
+working copy and creates chapter-safe 700-character chunks in `tts_chunks.json`.
 `final.txt`/`final.json` remain unchanged. Numbered audio and the resume manifest
 live in `audio_chunks/`; the final file is `<group-name>_audiobook.mp3`.
 Current-group and overall progress stay visible. **Cancel** stops queued groups
@@ -156,13 +119,13 @@ failed chunk, is non-empty and bounded by the chunk limit, and persists in
 Chunks** requires explicit confirmation and valid existing audio; excluded
 numbers are recorded and the result is labeled partial.
 
-Unless **Output folder override** is set in Settings, the Step 3 job folder is
-created beside the first TXT/ZIP selected in Step 1. Steps 4 and 5 continue to
+Unless **Output folder override** is set in Settings, the Step 2 job folder is
+created beside the first TXT/ZIP selected in Step 1. Steps 3–5 continue to
 use that same folder.
 
-## Stage 5: Create Video
+## Stage 4: Create Video
 
-Step 5 automatically uses the current Step 4 thumbnail and audiobook. It
+Step 4 automatically uses the current Step 3 thumbnail and audiobook. It
 detects the installed GPU, drivers, FFmpeg hardware backends, and H.264
 encoders, then performs a real short encode before selecting an encoder. A
 failed hardware encoder falls back to another verified option and finally to
@@ -174,6 +137,20 @@ without stretching, FFmpeg progress and speed remain visible, and **Cancel**
 stops only the partial render. The completed file is saved automatically as
 `<title>_<chapter>.mp4` in the current job folder.
 
+## Stage 5: YouTube Upload
+
+Create the Step 4 video, then click **Continue to Step 5**. The current MP4 and
+Step 3 thumbnail appear automatically. Step 5 never selects a separate video or
+renders another MP4.
+
+Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings → YouTube** once; see [installation setup](INSTALL.md#optional-youtube-desktop-oauth). Click **Connect YouTube Account** and authorize in your system browser. The panel shows the connected email and channel. **Disconnect** removes the local saved credentials; it does not remove previously uploaded videos or job records.
+
+Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
+
+All group checkboxes start unchecked. Select groups and click **Start Uploads**. Uploads run sequentially with current-group and overall progress. Authentication failures pause the batch for reconnect; **Cancel** stops queued groups at a safe boundary.
+
+`youtube_upload.json` persists video ID/URL, metadata, byte position, and independent video/thumbnail/playlist outcomes. Resumable URLs and OAuth tokens remain in the OS credential store. **Resume Upload** queries an existing session rather than creating a new video; uncertain uploads never automatically create duplicates.
+
 ## Common Workflows
 
 ### Basic Novel Processing
@@ -181,23 +158,20 @@ stops only the partial render. The completed file is saved automatically as
 ```
 1. Load TXT files
 2. Normalize chapters
-3. Complete Chinese review
-4. Detect/group chapters to create canonical TXT/JSON
-5. Generate thumbnail and/or audiobook
-6. Create MP4 video
+3. Detect/group chapters to create canonical TXT/JSON
+4. Generate thumbnail and/or audiobook
+5. Create MP4 video
+6. Upload selected videos to YouTube
 ```
 
-### Chinese to Vietnamese Translation
+### Text containing Chinese content
 
 ```
 1. Load TXT files
 2. Normalize chapters
-3. Scan Chinese
-4. Translate (manual or AI)
-5. Apply translations
-6. Detect/group chapters to create canonical TXT/JSON
-7. Generate thumbnail and/or audiobook
-8. Create MP4 video
+3. Detect/group chapters directly; Chinese text is preserved
+4. Generate thumbnail and/or audiobook
+5. Create MP4 video
 ```
 
 ### TTS Preparation
@@ -205,10 +179,9 @@ stops only the partial render. The completed file is saved automatically as
 ```
 1. Load pre-translated text
 2. Normalize chapters
-3. Confirm Step 2 has no Chinese residue
-4. Create chapter groups, then clean/chunk each selected group in Step 4
-5. Generate/resume the Edge-TTS audiobook
-6. Create the final MP4
+3. Create chapter groups, then clean/chunk each selected group in Step 3
+4. Generate/resume the Edge-TTS audiobook
+5. Create the final MP4
 ```
 
 ## Settings
@@ -219,7 +192,7 @@ Settings are auto-saved to:
 
 **Key settings:**
 - Chapter prefix format: `Chương {n}`, `Chapter {n}`, etc.
-- Maximum chunk size: defaults to 1200 characters
+- TTS chunk target: 700 characters
 - Encoding chain: Order of encoding attempts
 - TTS cleaning rules: What to remove/convert
 - Edge-TTS: voice, concurrency, timeout, and retry counts
@@ -232,6 +205,11 @@ The bottom status panel shows:
 - Warnings (missing chapters, duplicates)
 - Errors (encoding issues, parse failures)
 - Info (chapters detected, chunks created)
+
+Read-only generated text panels, previews, group details, failure dialogs,
+YouTube results, and diagnostics include **Copy all**. The action copies the
+complete plain text with its original line breaks; editable title, description,
+JSON, and TTS fields remain ordinary editors.
 
 **Example:**
 ```
@@ -249,16 +227,15 @@ The bottom status panel shows:
 
 2. **Check diagnostics** - Review warnings before exporting
 
-3. **Save often** - Settings auto-save, but translations are in-memory until you export
+3. **Save often** - Settings auto-save; generated output remains available in the job folder
 
 4. **Test chunks** - Export a small range first to verify formatting
 
-5. **Backup translations** - The translation table is saved separately
+5. **Backup job folders** - Canonical TXT/JSON, audio, video, and upload records are kept separately
 
 ### Performance
 
 - **Large files:** The app handles 1000+ chapters without issues
-- **AI translation:** Batches of 40 phrases take ~10-30 seconds
 - **Chunking:** Near-instant for typical novels (50-200 chapters)
 
 ### Troubleshooting
@@ -278,44 +255,10 @@ The bottom status panel shows:
 - Check for very long sentences
 - Review those chunks manually
 
-**"Chinese not detected"**
-- Verify text actually contains Han characters
-- Check encoding (must decode correctly)
-- Look at the Unicode ranges in source
-
-## Step 6: YouTube Upload
-
-Create the Step 5 video, then click **Continue to Step 6** (direct tab selection uses the same validation). The current MP4 and Step 4 thumbnail appear automatically. Step 6 never selects a separate video or renders another MP4.
-
-Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings → YouTube** once; see [installation setup](INSTALL.md#optional-youtube-desktop-oauth). Click **Connect YouTube Account** and authorize in your system browser. The panel shows the connected email and channel. **Disconnect** removes the local saved credentials; it does not remove previously uploaded videos or job records.
-
-Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
-
-All group checkboxes start unchecked. Select groups and click **Start Uploads**.
-Uploads run sequentially with current-group and overall progress. Description,
-tags, category, visibility, made-for-kids, playlist, and schedule are shared;
-highlight each not-started group to edit its individual title. Selections and
-settings are snapshotted when starting. Temporary failures retain resumable
-recovery data; group-specific failures do not stop other groups. Authentication
-failure pauses the batch: reconnect the original channel and click **Resume
-Paused Batch**. **Cancel** stops queued groups and the active request at its
-next safe boundary. Upstream/concurrent batch controls are disabled while running.
-
-`youtube_upload.json` persists video ID/URL, metadata, byte position, and independent video/thumbnail/playlist outcomes. Resumable URLs and OAuth tokens remain in the OS credential store. **Resume Upload** queries that existing session rather than creating a new video. Resume uses the metadata originally sent; edit metadata for a new upload only. If a session expires or completion cannot be confirmed, the app stops. Check YouTube Studio to establish the previous outcome before explicitly using **Upload Again**. It never automatically creates another upload from an uncertain state.
-
-Started/paused rows explicitly show **using saved metadata**. Shared edits apply
-only to sessions not yet started; a resumed insertion keeps its original metadata.
-After video upload, thumbnail and playlist operations remain independent. Select
-an incomplete uploaded group and start again to retry only unfinished follow-ups,
-not its video. Uncertain playlist insertion is checked for existing membership.
-
-A normal batch skips completed uploads. **Open YouTube Video** and **Copy URL**
-operate on the highlighted group. **Upload Again (selected group)** requires
-explicit confirmation and affects only that group. **Edit Uploaded Video
-Metadata** is a separate API action: it preserves unrelated mutable fields and
-updates the local record only after API success, without changing thumbnail or
-playlist membership. Keep `youtube_upload.json` and secure credentials for
-recovery; an uncertain session never automatically starts another video.
+**"Chinese chapter headers are not recognized"**
+- Check the decoded text and encoding
+- Verify the header pattern or Chinese numeral is supported by chapter settings
+- Use the Step 2 preview diagnostics to inspect missing or ambiguous boundaries
 
 Each grouped job has this layout:
 
@@ -366,20 +309,11 @@ Add replacement patterns in settings:
 }
 ```
 
-### Translation Priority
-
-The app uses a strict priority order:
-1. Manual edits (you typed it)
-2. AI translations (if enabled)
-3. Dictionary terms (common phrases)
-4. Hán-Việt readings (single characters)
-5. Leave unchanged (if nothing else works)
-
 ## Data Safety
 
 **What's persistent:**
 - Settings (`config.json`)
-- Translation table (`translations.json`)
+- Job artifacts and manifests in the configured output folder
 
 **What's temporary:**
 - Loaded text (in-memory only)
@@ -388,8 +322,7 @@ The app uses a strict priority order:
 
 **What's never lost:**
 - Source files (never modified)
-- Manual translations (auto-saved)
-- Export history (files on disk)
+- Canonical group files and export history (files on disk)
 
 **No data loss guarantee:**
 - Vietnamese text never treated as artifact

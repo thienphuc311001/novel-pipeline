@@ -38,8 +38,12 @@ class LastInputFolderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             input_dir = Path(directory) / "input"
             override = Path(directory) / "override"
+            input_dir.mkdir()
+            input_file = input_dir / "input.txt"
+            input_file.write_text("source", encoding="utf-8")
             settings = Settings()
             self.assertEqual(settings.resolved_output_dir(input_dir), input_dir)
+            self.assertEqual(settings.resolved_output_dir(input_file), input_dir)
 
             settings.output_dir = str(override)
             self.assertEqual(settings.resolved_output_dir(input_dir), override)

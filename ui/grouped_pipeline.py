@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLi
 from media.groups import (prepare_tts, record_media, save_job_state, edit_failed_chunk, delete_group,
                          record_video, record_tts_provenance)
 from pipeline.document import PipelineStateError
+from ui.copy_controls import add_copy_button, add_copyable_label
 
 
 class ActionWorker(QObject):
@@ -89,7 +90,9 @@ class GroupBatchPanel(QWidget):
         overview_layout = QHBoxLayout(overview)
         overview_layout.setContentsMargins(0, 0, 0, 0)
         overview_layout.addWidget(self.groups, 1)
-        overview_layout.addWidget(self.details, 2)
+        details_column = QVBoxLayout()
+        add_copy_button(details_column, self.details, button_attr="copy_btn")
+        overview_layout.addLayout(details_column, 2)
         overview.setMaximumHeight(150)
         overview.setMinimumHeight(100)
         self.layout_main.insertWidget(0, overview)
@@ -114,7 +117,7 @@ class GroupBatchPanel(QWidget):
         self.result = QTextEdit()
         self.result.setReadOnly(True)
         self.result.setMaximumHeight(95)
-        self.layout_main.addWidget(self.result)
+        add_copy_button(self.layout_main, self.result, button_attr="copy_btn")
 
     @property
     def busy(self):
@@ -314,7 +317,7 @@ class TtsBatchPanel(GroupBatchPanel):
         self.cover_btn = QPushButton("Select Image for Highlighted Group")
         self.cover_btn.clicked.connect(self.select_cover)
         self.delete_btn = QPushButton("Delete Highlighted Group")
-        self.delete_btn.setToolTip("Remove this group from Steps 4–6. Existing files are retained; recreate groups in Step 3 to recover it.")
+        self.delete_btn.setToolTip("Remove this group from Steps 3–5. Existing files are retained; recreate groups in Step 2 to recover it.")
         self.delete_btn.clicked.connect(self.delete_selected_group)
         group_actions = QHBoxLayout()
         group_actions.addWidget(self.cover_btn)
@@ -332,7 +335,9 @@ class TtsBatchPanel(GroupBatchPanel):
         self.first_chapter.setMinimumHeight(90)
         self.content_layout.removeWidget(self.first_chapter)
         preview_row = QHBoxLayout()
-        preview_row.addWidget(self.first_chapter, 3)
+        first_chapter_column = QVBoxLayout()
+        add_copy_button(first_chapter_column, self.first_chapter, button_attr="copy_btn")
+        preview_row.addLayout(first_chapter_column, 3)
         preview_row.addWidget(self.thumbnail, 1)
         self.content_layout.addLayout(preview_row, 1)
         actions = QHBoxLayout()
@@ -424,30 +429,44 @@ class TtsBatchPanel(GroupBatchPanel):
             group = delete_group(self.document_provider(), group_id)
             self.refresh()
             self.groups_changed.emit()
-            self.status.setText(f"Deleted {group.label} from Steps 4–6. Existing files retained.")
+            self.status.setText(f"Deleted {group.label} from Steps 3–5. Existing files retained.")
         except Exception as error:
             self.status.setText(str(error))
 
+    def start_batch(self, ids=None):
+        if not self.busy:
+            self._tts_batch_document_snapshot = self.document_provider().clone()
+        super().start_batch(ids)
+
     def processor_for(self, group, settings):
         from media.tts import TtsProcessor
-        _, chunks = prepare_tts(self.document_provider(), group.group_id, settings)
-        return TtsProcessor(chunks, Path(group.output_dir) / "audio_chunks", voice=settings.tts_voice,
+        plan, chunks = prepare_tts(getattr(self, "_tts_document_snapshot", None) or self.document_provider(),
+                                   group.group_id, settings, cancel_event=self.cancel_event)
+        processor = TtsProcessor(chunks, Path(group.output_dir) / "audio_chunks", voice=settings.tts_voice,
                             max_concurrency=settings.tts_max_concurrency, timeout_seconds=settings.tts_timeout_seconds,
                             retry_count=settings.tts_retry_count, fallback_retry_count=settings.tts_fallback_retry_count,
                             cancel_event=self.cancel_event)
+        processor.preparation_plan = plan
+        return processor
 
     def process_group(self, group):
-        processor = self.processor_for(group, self.batch_settings)
-        self.processor = processor
+        self._tts_document_snapshot = self._tts_batch_document_snapshot.clone()
         group.state.update(tts_status="Generating", failures=[])
         group.state.pop("last_error", None)
         # A new plan withdraws authority for an old MP3, without deleting it.
         group.state.pop("audiobook", None)
         group.state.pop("video", None)
         save_job_state(group)
-        output = Path(group.output_dir) / f"{group.slug}_audiobook.mp3"
+        output = Path(group.output_dir) / "audiobook.mp3"
 
         def action(worker):
+            worker.message.emit(f"{group.label}: Preparing TTS text…")
+            processor = self.processor_for(group, self.batch_settings)
+            self.processor = processor
+            plan = getattr(processor, "preparation_plan", {})
+            worker.message.emit("TTS preprocessing: " + str(plan.get("statistics", {})))
+            for message in plan.get("warnings", []):
+                worker.message.emit(message)
             processor.progress = lambda done, total, message: worker.progress.emit({"fraction": done / max(1, total), "message": f"{group.label}\nTTS chunks: {done} / {total}\n{message}"})
             worker.message.emit(f"{group.label}: Voice {processor.voice}")
             result = processor.run()
@@ -458,6 +477,10 @@ class TtsBatchPanel(GroupBatchPanel):
 
     def tts_completed(self, result):
         group = self.document_provider().require_group_artifacts(self.current_id)
+        plan = getattr(self.processor, "preparation_plan", {})
+        if plan:
+            group.state["tts_plan_id"] = plan["plan_id"]
+        self._tts_document_snapshot = None
         group.state.update(failures=[asdict(f) for f in result.failures], successful_orders=result.successful_orders,
                            tts_status="Cancelled" if result.cancelled else "TTS Incomplete" if result.failures else "Completed")
         if group.state["tts_status"] == "Completed":
@@ -469,10 +492,11 @@ class TtsBatchPanel(GroupBatchPanel):
         self.group_done(group.state["tts_status"])
 
     def group_failed(self, message):
+        self._tts_document_snapshot = None
         if self.current_id:
             group = next((g for g in self.document_provider().chapter_groups if g.group_id == self.current_id), None)
             if group:
-                group.state["tts_status"] = "TTS Incomplete"
+                group.state["tts_status"] = "Cancelled" if self.cancel_event.is_set() else "TTS Incomplete"
         super().group_failed(message)
 
     def view_failures(self):
@@ -487,7 +511,7 @@ class TtsBatchPanel(GroupBatchPanel):
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText("\n\n".join(f"Chunk {f['chunk_number']}\n{f['original_text']}\nFailed part: {f.get('failed_part_text', '')}\n{f['error_type']}: {f['error_message']}" for f in group.state.get("failures", [])) or "No failed chunks.")
-        layout.addWidget(text)
+        add_copy_button(layout, text, button_attr="copy_btn")
         dialog.exec()
 
     def edit_failure(self):
@@ -535,6 +559,7 @@ class TtsBatchPanel(GroupBatchPanel):
         from media.tts import TtsResult, TtsFailure
         group = self.document_provider().require_group_artifacts(self.selected_id())
         try:
+            self.cancel_event.clear()
             processor = self.processor_for(group, self.settings)
             processor._load_manifest()
             successful = [c.order for c in processor.chunks if processor._is_resumable(c)]
@@ -551,7 +576,7 @@ class TtsBatchPanel(GroupBatchPanel):
             self.running = True
             self.set_busy(True)
             def action(worker):
-                processor.merge(result, Path(group.output_dir) / f"{group.slug}_audiobook.mp3", skip_failed=True)
+                processor.merge(result, Path(group.output_dir) / "audiobook.mp3", skip_failed=True)
                 return result
             def completed(value):
                 group.state.update(tts_status="Partial", excluded_chunks=missing)
@@ -575,9 +600,11 @@ class VideoBatchPanel(GroupBatchPanel):
         self.start_btn.setText("Create Videos")
         self.capabilities = None
         self.session = None
-        self.capability_label = QLabel("GPU/FFmpeg: detection starts when Step 5 opens.")
+        self.capability_label = QLabel("GPU/FFmpeg: detection starts when Step 4 opens.")
         self.capability_label.setWordWrap(True)
-        self.content_layout.addWidget(self.capability_label)
+        capability_column = QVBoxLayout()
+        add_copyable_label(capability_column, self.capability_label, self.capability_label.text)
+        self.content_layout.addLayout(capability_column)
 
     def status_for(self, group):
         return group.state.get("video", {}).get("status", "Video not created") + (" (partial audio)" if group.state.get("tts_status") == "Partial" else "")
@@ -630,6 +657,8 @@ class VideoBatchPanel(GroupBatchPanel):
         from media.video import probe_audio, mp3_copy_is_safe, validate_rendered_video
         if self.capabilities is None:
             raise PipelineStateError("Wait for verified encoder detection before starting.")
+        if group.state.get("tts_status") != "Completed":
+            raise PipelineStateError("Complete every TTS chunk in Step 3 before creating a video; partial audiobooks are unsupported.")
         media = self.document_provider().require_step4_outputs(group.group_id)
         caps = self.capabilities
         def prepare(worker):
@@ -637,27 +666,31 @@ class VideoBatchPanel(GroupBatchPanel):
             try:
                 video = self.document_provider().require_step5_outputs(group.group_id)
                 validate_rendered_video(Path(video.video_path), audio.duration, caps.ffprobe_path)
-                return media, audio, None
+                return media, audio, None, None
             except (PipelineStateError, ValueError, OSError, RuntimeError):
                 pass
+            from media.video_pages import prepare_video_timeline
+            timeline = prepare_video_timeline(media, caps.ffprobe_path, cancel_event=self.cancel_event,
+                                              progress=lambda done, total, message: worker.progress.emit({"fraction": done / total, "message": message}))
+            audio.duration = timeline.audiobook_duration
             copy_audio = mp3_copy_is_safe(Path(media.audiobook_path), caps.ffmpeg_path, caps.ffprobe_path, temp_dir=Path(group.output_dir))
-            return media, audio, copy_audio
+            return media, audio, copy_audio, timeline
         self.launch(prepare, self.prepared)
 
     def prepared(self, value):
-        media, audio, copy_audio = value
-        self.details.append(f"Estimated duration: {audio.duration:.1f}s\nAudio: {'MP3 copy' if copy_audio else 'AAC 192k'}")
+        media, audio, copy_audio, timeline = value
+        self.details.append(f"Measured duration: {audio.duration:.1f}s\nAudio: {'MP3 copy' if copy_audio else 'AAC 192k'}")
         if copy_audio is None:
             self.group_done("Skipped — current verified MP4")
             return
-        self._after_thread = lambda: self.render(media, audio, copy_audio)
+        self._after_thread = lambda: self.render(media, audio, copy_audio, timeline)
 
-    def render(self, media, audio, copy_audio):
+    def render(self, media, audio, copy_audio, timeline):
         if self.cancel_event.is_set():
             self.finish_batch()
             return
         from ui.main_window import _VideoRenderSession
-        self.session = _VideoRenderSession(self.capabilities, media, audio.duration, audio_copy=copy_audio, parent=self)
+        self.session = _VideoRenderSession(self.capabilities, media, audio.duration, audio_copy=copy_audio, timeline=timeline, parent=self)
         self.session.progress.connect(lambda p: self.update_progress(p["percentage"] / 100, f"{media.chapter}\nElapsed: {p['elapsed']:.1f}s / {audio.duration:.1f}s · speed {p['speed']:.1f}x · remaining {p['eta']:.1f}s"))
         self.session.status.connect(self.diagnostic.emit)
         self.session.completed.connect(self.rendered)

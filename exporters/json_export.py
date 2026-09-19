@@ -59,13 +59,9 @@ def export_detailed_json(
             "info": document.count_severity("info"),
         }
     
-    if document.translations:
-        output["translation_count"] = len(document.translations)
-    
     if document.source_files:
         output["sources"] = [source.to_dict() for source in document.source_files]
     
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
-

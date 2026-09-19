@@ -88,6 +88,18 @@ class CleaningOptions:
         )
 
 
+    @classmethod
+    def for_tts(cls, settings) -> "CleaningOptions":
+        """Keep structure for the dedicated sanitizer; explicit user rules remain."""
+        options = cls.from_settings(settings)
+        options.quote_mode = options.bracket_mode = "keep"
+        options.symbol_map_enabled = options.enforce_period = False
+        options.remove_html = options.unescape_html_entities = False
+        options.remove_control_chars = options.strip_zero_width = False
+        options.normalize_spacing = options.drop_empty_lines = False
+        return options
+
+
 @dataclass
 class CleanReport:
     """Counts of everything the cleaning pass touched."""

@@ -1,4 +1,4 @@
-"""Step 6 input provenance and persistent duplicate-guard regressions."""
+"""Step 5 input provenance and persistent duplicate-guard regressions."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ class YouTubePipelineTests(unittest.TestCase):
     def ready_document(self) -> PipelineDocument:
         document = PipelineDocument()
         document.load_original_input("Chương 1\nNội dung.")
-        document.complete_chinese_review("Chương 1\nNội dung.")
         document.set_job_identity("Bắc Tống", "Chương 1")
         document.set_cleaned_output("Chương 1\n\nNội dung.\n")
         document.chunks = [Chunk(1, 1, 1, "Chương 1\nNội dung.", char_count=20)]
@@ -35,10 +34,12 @@ class YouTubePipelineTests(unittest.TestCase):
         audiobook = job_dir / f"{bundle.slug}_audiobook.mp3"
         thumbnail.write_bytes(b"jpeg")
         audiobook.write_bytes(b"mp3")
+        from tests.support import create_narration_fixture
+        processor = create_narration_fixture(Path(bundle.output_dir), document.chunks, audiobook)
         document.set_thumbnail_output(str(thumbnail))
         document.set_tts_output(
-            audio_chunks_dir=str(job_dir / "audio"),
-            manifest_path=str(job_dir / "manifest.json"),
+            audio_chunks_dir=str(processor.audio_dir),
+            manifest_path=str(processor.manifest_path),
             audiobook_path=str(audiobook),
         )
         video = Path(document.require_step4_outputs().video_path)
@@ -130,7 +131,7 @@ class YouTubePipelineTests(unittest.TestCase):
             document.require_step5_outputs()
 
         document = self.ready_document()
-        document.step2_revision += 1
+        document.normalized_revision += 1
         with self.assertRaisesRegex(PipelineStateError, "stale"):
             document.require_step5_outputs()
 

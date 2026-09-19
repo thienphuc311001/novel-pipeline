@@ -164,11 +164,11 @@ class Chunk:
 
 @dataclass
 class Step3ArtifactBundle:
-    """The immutable-on-disk bundle materialized by Step 3.
+    """The immutable-on-disk bundle materialized by the grouping stage.
 
     The strings stay in :class:`PipelineDocument`; this object only records the
     exact files that represent that state and the fingerprints needed to reject
-    stale or manually modified files before Step 4 consumes them.
+    stale or manually modified files before the media stage consumes them.
     """
 
     title: str
@@ -205,7 +205,7 @@ class Step3ArtifactBundle:
 
 @dataclass
 class Step4MediaBundle:
-    """Validated media inputs that Step 5 is allowed to consume."""
+    """Validated media inputs that the video stage is allowed to consume."""
 
     title: str
     chapter: str
@@ -216,11 +216,13 @@ class Step4MediaBundle:
     video_path: str
     thumbnail_fingerprint: Dict[str, Any]
     audiobook_fingerprint: Dict[str, Any]
+    tts_manifest_path: str = ""
+    effective_text_sha256: str = ""
 
 
 @dataclass
 class Step5UploadBundle:
-    """Current generated video and thumbnail that Step 6 may upload."""
+    """Current generated video and thumbnail that the upload stage may use."""
 
     title: str
     chapter: str
@@ -275,16 +277,14 @@ class StageStatus:
 
 class StageKey:
     NORMALIZE = "normalize"
-    CHINESE = "chinese"
     CLEAN_CHUNK = "clean_chunk"
     FILTER_EXPORT = "filter_export"
     VIDEO = "video"
     YOUTUBE = "youtube"
 
-    ORDER = [NORMALIZE, CHINESE, CLEAN_CHUNK, FILTER_EXPORT, VIDEO, YOUTUBE]
+    ORDER = [NORMALIZE, CLEAN_CHUNK, FILTER_EXPORT, VIDEO, YOUTUBE]
     NAMES = {
         NORMALIZE: "Chuẩn hoá chương",
-        CHINESE: "Duyệt & dịch Trung",
         CLEAN_CHUNK: "Phát hiện & nhóm chương",
         FILTER_EXPORT: "Thumbnail & audiobook",
         VIDEO: "Tạo video",
@@ -322,9 +322,9 @@ def render_chapters_text(chapters: Sequence[Chapter], *, chapter_separator: str 
 def derive_chapters_from_text(text: str, pattern_set: Any, *, source_name: str = "pipeline") -> List[Chapter]:
     """Build chapter views from a later-stage text without normalizing it.
 
-    Step 3 needs chapter boundaries for chunking, but it must not rerun Step 1
-    and silently alter a user-edited or translated Step 2 string.  Detection is
-    therefore used only as a lossless structural view here.
+    The grouping stage needs chapter boundaries for chunking, but it must not
+    rerun Step 1 and silently alter a user-edited normalized string. Detection
+    is therefore used only as a lossless structural view here.
     """
     if not text:
         return []
@@ -362,14 +362,9 @@ class PipelineDocument:
         # produced an output yet; an empty string is still a real output.
         self.original_input_text: str = ""
         self.normalized_text: Optional[str] = None
-        self.chinese_review_text: Optional[str] = None
-        self.step2_confirmed_output: Optional[str] = None
-        self.chinese_review_session: Optional[Any] = None
-        self._chinese_review_source_text: Optional[str] = None
         self.normalized_revision: int = 0
-        self.step2_revision: int = 0
         self.cleaned_text: Optional[str] = None
-        # Step 3/4/5/6 job state is intentionally distinct from the text stages.
+        # Group/media job state is intentionally distinct from the text stage.
         # Existing files are never deleted by invalidation; only the in-memory
         # authority to use them is withdrawn.
         self.job_title: str = ""
@@ -399,8 +394,6 @@ class PipelineDocument:
         self.preamble: str = ""
         self.chapters: List[Chapter] = []
         self.chunks: List[Chunk] = []
-        self.translations: Dict[str, str] = {}
-        self.translation_meta: Dict[str, Dict[str, Any]] = {}
         self.diagnostics: List[Diagnostic] = []
         self.stage_status: Dict[str, StageStatus] = {
             key: StageStatus(key=key, name=StageKey.NAMES[key]) for key in StageKey.ORDER
@@ -421,16 +414,7 @@ class PipelineDocument:
         clone.merge_order = list(self.merge_order)
         clone.original_input_text = self.original_input_text
         clone.normalized_text = self.normalized_text
-        clone.chinese_review_text = self.chinese_review_text
-        clone.step2_confirmed_output = self.step2_confirmed_output
-        clone.chinese_review_session = (
-            self.chinese_review_session.clone()
-            if self.chinese_review_session is not None
-            else None
-        )
-        clone._chinese_review_source_text = self._chinese_review_source_text
         clone.normalized_revision = self.normalized_revision
-        clone.step2_revision = self.step2_revision
         clone.cleaned_text = self.cleaned_text
         clone.job_title = self.job_title
         clone.job_chapter = self.job_chapter
@@ -458,8 +442,6 @@ class PipelineDocument:
         clone.source_files = [copy.copy(f) for f in self.source_files]
         clone.chapters = [copy.copy(c) for c in self.chapters]
         clone.chunks = [copy.copy(c) for c in self.chunks]
-        clone.translations = dict(self.translations)
-        clone.translation_meta = copy.deepcopy(self.translation_meta)
         clone.diagnostics = [copy.copy(d) for d in self.diagnostics]
         clone.stage_status = {k: copy.copy(v) for k, v in self.stage_status.items()}
         clone.generated_headers = copy.deepcopy(self.generated_headers)
@@ -520,12 +502,7 @@ class PipelineDocument:
         self.original_text = self.original_input_text
         self.text = self.original_input_text
         self.normalized_text = None
-        self.chinese_review_text = None
-        self.step2_confirmed_output = None
-        self.chinese_review_session = None
-        self._chinese_review_source_text = None
         self.normalized_revision = 0
-        self.step2_revision = 0
         self.cleaned_text = None
         self.job_title = ""
         self.job_chapter = ""
@@ -533,8 +510,6 @@ class PipelineDocument:
         self.filtered_output = None
         self.chapters = []
         self.chunks = []
-        self.translations = {}
-        self.translation_meta = {}
         self.selection = []
         self.diagnostics = []
         self.stage_status = {
@@ -548,10 +523,6 @@ class PipelineDocument:
         self.normalized_revision += 1
         self.text = rendered
         self.chapters = list(chapters)
-        self.chinese_review_text = None
-        self.step2_confirmed_output = None
-        self.chinese_review_session = None
-        self._chinese_review_source_text = None
         self.cleaned_text = None
         self._clear_step3_artifacts()
         self.filtered_output = None
@@ -567,10 +538,6 @@ class PipelineDocument:
         self.text = value
         if changed:
             self.normalized_revision += 1
-            self.chinese_review_text = None
-            self.step2_confirmed_output = None
-            self.chinese_review_session = None
-            self._chinese_review_source_text = None
             self.cleaned_text = None
             self._clear_step3_artifacts()
             self.filtered_output = None
@@ -578,117 +545,32 @@ class PipelineDocument:
             self.reset_downstream(StageKey.NORMALIZE)
         return changed
 
-    def begin_chinese_review(self) -> tuple[str, str]:
-        """Return the canonical Step 2 source and its user-facing label."""
+    def grouping_input_text(self) -> tuple[str, str]:
+        """Return the lossless text that the grouping stage may consume."""
         normalized_status = self.stage(StageKey.NORMALIZE)
         if normalized_status.ran and normalized_status.ok:
             if self.normalized_text is None:
                 raise PipelineStateError(
                     "Step 1 is marked successful but has no normalized text output."
                 )
-            step2_input = self.step2_input_text()
-            source_label = "Source: Step 1 — Normalized Text"
-            # Safe provenance check: successful normalization can never select
-            # the immutable original input.
-            if step2_input != self.normalized_text:
-                raise PipelineStateError("Step 2 input is not the current normalized output.")
+            return self.normalized_text, "Source: Step 1 — Normalized Text"
         else:
-            step2_input = self.original_input_text
-            source_label = (
+            return self.original_input_text, (
                 "Source: Original File — Step 1 failed"
                 if normalized_status.ran
                 else "Source: Original File — Step 1 not run"
             )
 
-        if (
-            self.chinese_review_text is None
-            or self._chinese_review_source_text != step2_input
-        ):
-            self.chinese_review_text = step2_input
-            self.step2_confirmed_output = None
-            self.chinese_review_session = None
-            self._chinese_review_source_text = step2_input
-            self.text = step2_input
-        return self.chinese_review_text, source_label
-
-    def step2_input_text(self) -> str:
-        """Return only the upstream text eligible to initialize Step 2."""
-        status = self.stage(StageKey.NORMALIZE)
-        if status.ran and status.ok:
-            if self.normalized_text is None:
-                raise PipelineStateError(
-                    "Step 1 is marked successful but has no normalized text output."
-                )
-            return self.normalized_text
-        return self.original_input_text
-
-    def set_chinese_review_output(self, text: str) -> None:
-        """Commit Step 2's current text and invalidate later stages."""
-        value = text or ""
-        if (
-            self.chinese_review_session is not None
-            and self.chinese_review_session.working_text != value
-        ):
-            self.chinese_review_session = None
-        changed = value != self.chinese_review_text
-        self.chinese_review_text = value
-        if changed:
-            self.step2_revision += 1
-        if not changed:
-            return
-        self.step2_confirmed_output = None
-        self.text = self.chinese_review_text
-        self.cleaned_text = None
-        self._clear_step3_artifacts()
-        self.filtered_output = None
-        self.chunks = []
-        self.reset_downstream(StageKey.CHINESE)
-
-    def complete_chinese_review(self, text: str) -> str:
-        """Commit the only text that Step 3 is allowed to consume."""
-        from chinese.detector import has_han
-
-        value = text or ""
-        if has_han(value):
-            self.step2_confirmed_output = None
-            raise PipelineStateError(
-                "Step 2 cannot be completed while Chinese Han characters remain."
-            )
-        changed = value != self.chinese_review_text or self.step2_confirmed_output != value
-        if changed:
-            self.step2_revision += 1
-        self.chinese_review_text = value
-        self.step2_confirmed_output = value
-        self.text = value
-        if changed:
-            self.cleaned_text = None
-            self._clear_step3_artifacts()
-            self.filtered_output = None
-            self.chunks = []
-            self.reset_downstream(StageKey.CHINESE)
-        return value
-
-    def require_step2_confirmed_output(self) -> str:
-        """Return Step 2's verified result or fail closed."""
-        if self.step2_confirmed_output is None:
-            raise PipelineStateError(
-                "Complete Step 2 Chinese Residue Review before continuing to Step 3."
-            )
-        from chinese.detector import has_han
-
-        if has_han(self.step2_confirmed_output):
-            raise PipelineStateError(
-                "Step 2 confirmed output is invalid because Han characters remain."
-            )
-        if self.chinese_review_text != self.step2_confirmed_output:
-            raise PipelineStateError(
-                "Step 2 working text changed after confirmation; review it again."
-            )
-        return self.step2_confirmed_output
+    def require_grouping_input(self) -> str:
+        """Return the current normalized/original text for downstream stages."""
+        text, _source = self.grouping_input_text()
+        if not text:
+            raise PipelineStateError("Load text before continuing to Step 2.")
+        return text
 
     def step3_input_text(self) -> str:
-        """Compatibility accessor with the same fail-closed Step 3 contract."""
-        return self.require_step2_confirmed_output()
+        """Compatibility accessor for the grouping source text."""
+        return self.require_grouping_input()
 
     def set_cleaned_output(self, text: str) -> None:
         value = text or ""
@@ -700,7 +582,7 @@ class PipelineDocument:
     def set_filtered_output(self, text: str) -> None:
         self.filtered_output = text or ""
 
-    # ---------------------------------------------------------- Step 3/4
+    # ---------------------------------------------------------- Group/media stages
     def set_job_identity(self, title: str, chapter: str) -> bool:
         """Set editable per-job labels and invalidate only derived artifacts."""
         title = (title or "").strip()
@@ -746,10 +628,11 @@ class PipelineDocument:
 
     def set_video_output(self, path: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         media = self.require_step4_outputs()
+        source = (metadata or {}).get("source") or self._current_video_source_fingerprint(media)
         self.video_path = path or ""
         self.video_fingerprint = self._fingerprint_file(self.video_path)
         self.video_metadata = dict(metadata or {})
-        self._video_source_fingerprint = self._current_video_source_fingerprint(media)
+        self._video_source_fingerprint = source
         self._clear_youtube_upload_state()
 
     def _clear_video_output(self) -> None:
@@ -769,7 +652,7 @@ class PipelineDocument:
         self.youtube_upload_state = copy.deepcopy(state)
         status = self.stage(StageKey.YOUTUBE)
         if state.get("status") == "completed" and state.get("video_id"):
-            status.touch("Step 5 video", "YouTube upload completed", {
+            status.touch("Step 4 video", "YouTube upload completed", {
                 "video_id": state["video_id"], "thumbnail_uploaded": state.get("thumbnail_uploaded", False),
                 "playlist_added": state.get("playlist_added", False),
             })
@@ -791,15 +674,12 @@ class PipelineDocument:
     def _current_video_source_fingerprint(self, media: Step4MediaBundle) -> Dict[str, Any]:
         bundle = self.step3_artifacts
         if bundle is None:
-            raise PipelineStateError("Step 3 bundle is missing; regenerate the video.")
-        return {
-            "source_revision": bundle.source_revision,
-            "text_sha256": bundle.text_sha256,
-            "chunks_sha256": bundle.chunks_sha256,
-            "thumbnail": dict(media.thumbnail_fingerprint),
-            "audiobook": dict(media.audiobook_fingerprint),
-            "output_path": str(Path(media.video_path).expanduser().resolve()),
-        }
+            raise PipelineStateError("Grouping bundle is missing; regenerate the chapter groups.")
+        from media.video_pages import source_fingerprint
+        try:
+            return source_fingerprint(media)
+        except RuntimeError as error:
+            raise PipelineStateError(str(error)) from error
 
     @staticmethod
     def _fingerprint_file(path: str) -> Dict[str, Any]:
@@ -836,14 +716,14 @@ class PipelineDocument:
         bundle = self.step3_artifacts
         if bundle is None:
             raise PipelineStateError(
-                "Run Step 3 to create the TXT/JSON chapter group files first."
+                "Run Step 2 to create the TXT/JSON chapter group files first."
             )
-        if self.cleaned_text is None or bundle.source_revision != self.step2_revision:
-            raise PipelineStateError("Step 3 bundle is stale; run Step 3 again.")
+        if self.cleaned_text is None or bundle.source_revision != self.normalized_revision:
+            raise PipelineStateError("Grouping bundle is stale; run Step 2 again.")
         text_hash = hashlib.sha256(self.cleaned_text.encode("utf-8")).hexdigest()
         chunks_hash = self.chunk_fingerprint()
         if text_hash != bundle.text_sha256 or chunks_hash != bundle.chunks_sha256:
-            raise PipelineStateError("Step 3 bundle no longer matches the current pipeline output.")
+            raise PipelineStateError("Grouping bundle no longer matches the current pipeline output.")
         try:
             from media.artifacts import validate_step3_bundle
 
@@ -851,7 +731,7 @@ class PipelineDocument:
         except ImportError:
             raise
         except Exception as error:
-            raise PipelineStateError(f"Step 3 bundle is unavailable or modified: {error}") from error
+            raise PipelineStateError(f"Grouping bundle is unavailable or modified: {error}") from error
         return bundle
 
     def require_group_artifacts(self, group_id: str):
@@ -859,35 +739,39 @@ class PipelineDocument:
 
         group = next((g for g in self.chapter_groups if g.group_id == group_id), None)
         if group is None:
-            raise PipelineStateError("Unknown or invalidated chapter group. Create group files in Step 3.")
-        validate_group(group, self.require_step2_confirmed_output())
+            raise PipelineStateError("Unknown or invalidated chapter group. Create group files in Step 2.")
+        validate_group(group, self.require_grouping_input())
         return group
 
     def require_chapter_groups(self, *, validate_files=True, allow_empty=False):
         """Validate full source membership while allowing explicitly deleted jobs."""
         if not self.chapter_groups and not (allow_empty and self.deleted_chapter_groups):
-            raise PipelineStateError("Create chapter group TXT/JSON files in Step 3 first.")
+            raise PipelineStateError("Create chapter group TXT/JSON files in Step 2 first.")
         if any(left.order >= right.order for left, right in zip(self.chapter_groups, self.chapter_groups[1:])):
-            raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 3.")
-        source = self.require_step2_confirmed_output()
+            raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 2.")
+        source = self.require_grouping_input()
         source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
         deleted_ids = {group.group_id for group in self.deleted_chapter_groups}
         groups = sorted(self.chapter_groups + self.deleted_chapter_groups, key=lambda group: group.order)
         if len({group.group_id for group in groups}) != len(groups):
-            raise PipelineStateError("Chapter groups contain duplicate membership; recreate them in Step 3.")
+            raise PipelineStateError("Chapter groups contain duplicate membership; recreate them in Step 2.")
         cursor = 0
         for order, group in enumerate(groups, 1):
             if group.order != order or group.start != cursor or group.end <= group.start:
-                raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 3.")
+                raise PipelineStateError("Chapter groups do not preserve the current source order; recreate them in Step 2.")
             if (group.source_sha256 != source_hash or
                     group.text_sha256 != hashlib.sha256(source[group.start:group.end].encode("utf-8")).hexdigest()):
-                raise PipelineStateError(f"{group.label}: group source is stale; recreate group files in Step 3.")
+                raise PipelineStateError(f"{group.label}: group source is stale; recreate group files in Step 2.")
             if validate_files and group.group_id not in deleted_ids:
                 self.require_group_artifacts(group.group_id)
             cursor = group.end
         if cursor != len(source):
-            raise PipelineStateError("Chapter groups do not cover the complete Step 2 output; recreate them in Step 3.")
+            raise PipelineStateError("Chapter groups do not cover the complete source text; recreate them in Step 2.")
         return self.chapter_groups
+
+    def _effective_tts_hash(self):
+        from media.artifacts import sha256_text
+        return sha256_text("\n".join(f"{c.order}\0{c.text}" for c in sorted(self.chunks, key=lambda c: c.order)))
 
     def require_step4_outputs(self, group_id: Optional[str] = None) -> Step4MediaBundle:
         """Return only the current, validated thumbnail and audiobook pair."""
@@ -895,12 +779,12 @@ class PipelineDocument:
             from media.groups import require_media
             return require_media(self, group_id)
         if self.chapter_groups:
-            raise PipelineStateError("Select an explicit chapter group for Step 4 outputs.")
+            raise PipelineStateError("Select an explicit chapter group for Step 3 outputs.")
         bundle = self.require_step3_artifacts()
         if not self.thumbnail_path:
-            raise PipelineStateError("Generate the Step 4 thumbnail before opening Step 5.")
+            raise PipelineStateError("Generate the Step 3 thumbnail before opening Step 4.")
         if not self.audiobook_path:
-            raise PipelineStateError("Generate the Step 4 audiobook before opening Step 5.")
+            raise PipelineStateError("Generate the Step 3 audiobook before opening Step 4.")
 
         output_dir = Path(bundle.output_dir).expanduser().resolve()
         current = (
@@ -911,12 +795,12 @@ class PipelineDocument:
             path = Path(value).expanduser()
             fingerprint = self._fingerprint_file(str(path))
             if not fingerprint or fingerprint["size"] <= 0:
-                raise PipelineStateError(f"Step 4 {label} is missing or empty: {path}")
+                raise PipelineStateError(f"Step 3 {label} is missing or empty: {path}")
             if path.resolve().parent != output_dir:
-                raise PipelineStateError(f"Step 4 {label} is outside the current job folder.")
+                raise PipelineStateError(f"Step 3 {label} is outside the current job folder.")
             if not recorded or fingerprint != recorded:
                 raise PipelineStateError(
-                    f"Step 4 {label} changed after it was generated; regenerate it before Step 5."
+                    f"Step 3 {label} changed after it was generated; regenerate it before Step 4."
                 )
 
         return Step4MediaBundle(
@@ -929,34 +813,36 @@ class PipelineDocument:
             video_path=str(output_dir / f"{bundle.slug}.mp4"),
             thumbnail_fingerprint=dict(self.thumbnail_fingerprint),
             audiobook_fingerprint=dict(self.audiobook_fingerprint),
+            tts_manifest_path=self.tts_manifest_path,
+            effective_text_sha256=self._effective_tts_hash(),
         )
 
     def require_step5_outputs(self, group_id: Optional[str] = None) -> Step5UploadBundle:
-        """Fail closed unless Step 6 would upload the current generated video."""
+        """Fail closed unless the upload stage would use the current video."""
         if group_id is not None:
             from media.groups import require_video
             return require_video(self, group_id)
         if self.chapter_groups:
-            raise PipelineStateError("Select an explicit chapter group for Step 5 outputs.")
+            raise PipelineStateError("Select an explicit chapter group for Step 4 outputs.")
         media = self.require_step4_outputs()
         if not self.video_path:
-            raise PipelineStateError("Create the Step 5 video before opening Step 6.")
+            raise PipelineStateError("Create the Step 4 video before opening Step 5.")
         path = Path(self.video_path).expanduser()
         fingerprint = self._fingerprint_file(str(path))
         if not fingerprint or fingerprint["size"] <= 0 or not path.is_file():
-            raise PipelineStateError(f"Step 5 video is missing or empty: {path}")
+            raise PipelineStateError(f"Step 4 video is missing or empty: {path}")
         if (
             path.resolve().parent != Path(media.output_dir).expanduser().resolve()
             or path.resolve() != Path(media.video_path).expanduser().resolve()
         ):
-            raise PipelineStateError("Step 5 video is not the generated MP4 for the current job.")
+            raise PipelineStateError("Step 4 video is not the generated MP4 for the current job.")
         if not self.video_fingerprint or fingerprint != self.video_fingerprint:
             raise PipelineStateError(
-                "Step 5 video changed after it was generated; create it again before Step 6."
+                "Step 4 video changed after it was generated; create it again before Step 5."
             )
         if self._video_source_fingerprint != self._current_video_source_fingerprint(media):
             raise PipelineStateError(
-                "Step 5 video no longer matches the current Step 4 outputs; create it again."
+                "Step 4 video no longer matches the current Step 3 outputs; create it again."
             )
         return Step5UploadBundle(
             title=media.title,
@@ -1001,8 +887,6 @@ class PipelineDocument:
     def total_characters(self) -> int:
         if self.cleaned_text is not None:
             return len(self.cleaned_text)
-        if self.chinese_review_text is not None:
-            return len(self.chinese_review_text)
         if self.normalized_text is not None:
             return len(self.normalized_text)
         if self.chapters:
@@ -1024,16 +908,12 @@ class PipelineDocument:
         if index < StageKey.ORDER.index(StageKey.YOUTUBE):
             self._clear_youtube_upload_state()
         self.diagnostics = [d for d in self.diagnostics if d.stage in StageKey.ORDER[: index + 1]]
-        if stage_key in (StageKey.NORMALIZE, StageKey.CHINESE):
+        if stage_key in (StageKey.NORMALIZE,):
             self.chunks = []
             self.cleaned_text = None
             self.filtered_output = None
         if stage_key in (StageKey.NORMALIZE,):
             self.selection = []
-            self.chinese_review_text = None
-            self.step2_confirmed_output = None
-            self.chinese_review_session = None
-            self._chinese_review_source_text = None
 
     # ------------------------------------------------------------- export
     def summary(self) -> Dict[str, Any]:
@@ -1045,7 +925,6 @@ class PipelineDocument:
             "characters": self.total_characters(),
             "chapter_count": len(self.chapters),
             "chunk_count": len(self.chunks),
-            "translation_count": len(self.translations),
             "chunk_min": min(chunk_sizes) if chunk_sizes else 0,
             "chunk_max": max(chunk_sizes) if chunk_sizes else 0,
             "chunk_avg": int(sum(chunk_sizes) / len(chunk_sizes)) if chunk_sizes else 0,

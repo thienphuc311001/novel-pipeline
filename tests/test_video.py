@@ -62,7 +62,10 @@ class FakeRunner:
             })
         elif command and command[0] == "system_profiler":
             stdout = json.dumps({"SPDisplaysDataType": [{"sppci_model": "Apple M4", "sppci_vendor": "Apple"}]})
-        elif "-f null -" in joined:
+        elif command[0] == "ffprobe" and "-select_streams" in command:
+            stdout = json.dumps({"frames": [{"best_effort_timestamp_time": str(t)} for t in (0, .137, .508)],
+                                 "streams": [{"duration": "0.509"}]})
+        elif "-f null -" in joined or ("lavfi" in command and "-fps_mode" in command):
             is_cpu = "libx264" in command
             if not is_cpu and not self.hardware_ok:
                 code = 1
@@ -133,22 +136,25 @@ class VideoTests(unittest.TestCase):
     def test_render_command_is_static_1080p_and_preserves_audio_when_safe(self):
         candidate = EncoderCandidate("h264_vaapi", "VA-API", "/dev/dri/renderD128", verified=True)
         command = build_video_command(
-            "ffmpeg", candidate, Path("thumb.jpg"), Path("audio.mp3"), Path("out.mp4"),
+            "ffmpeg", candidate, Path("timeline.ffconcat"), Path("audio.mp3"), Path("out.mp4"),
             audio_copy=True,
         )
         joined = " ".join(command)
-        self.assertIn("-framerate 1", joined)
+        self.assertIn("-f concat", joined)
+        self.assertIn("-fps_mode vfr", joined)
+        self.assertNotIn("-r", command)
+        self.assertNotIn("-loop", command)
         self.assertIn("scale=1920:1080:force_original_aspect_ratio=decrease", joined)
         self.assertIn("pad=1920:1080", joined)
         self.assertIn("format=nv12,hwupload", joined)
         self.assertIn("-c:v h264_vaapi", joined)
         self.assertIn("-c:a copy", joined)
-        self.assertIn("-shortest", command)
+        self.assertNotIn("-shortest", command)
         self.assertIn("+faststart", command)
 
         cpu = EncoderCandidate("libx264", "CPU", hardware=False, verified=True)
         cpu_command = build_video_command(
-            "ffmpeg", cpu, Path("thumb.jpg"), Path("audio.mp3"), Path("out.mp4"),
+            "ffmpeg", cpu, Path("timeline.ffconcat"), Path("audio.mp3"), Path("out.mp4"),
             audio_copy=False,
         )
         self.assertIn("-b:a 192k", " ".join(cpu_command))

@@ -54,7 +54,7 @@ class ChapterGroup:
 
 @dataclass
 class GroupingAnalysis:
-    """Read-only grouping facts for the current, untouched Step 2 text."""
+    """Read-only grouping facts for the current, untouched source text."""
 
     headings: list[HeadingSpan]
     diagnostics: list[str]
@@ -243,8 +243,17 @@ def _group_id(source_hash, title, size, item, method, numeric_fingerprint):
     return sha256_text(value)[:24]
 
 
+def _manifest_path(document, settings, title):
+    """Resolve the manifest without abandoning a job when Settings changes."""
+    remembered = Path(getattr(document, "group_manifest_path", "") or "").expanduser()
+    if remembered.is_file():
+        return remembered.resolve()
+    root = settings.resolved_output_dir(document.input_directory).resolve()
+    return root / slugify_job_name(title, "").rstrip("_") / "chapter_groups.json"
+
+
 def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_DETECTED, confirmation_fingerprint=""):
-    text = document.require_step2_confirmed_output()
+    text = document.require_grouping_input()
     title = title.strip()
     if not title:
         raise PipelineStateError("Enter a novel title before creating group files.")
@@ -256,7 +265,8 @@ def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_D
     if method == GROUPING_METHOD_NUMERIC and confirmation_fingerprint != analysis.numeric_identity_fingerprint:
         raise PipelineStateError("Numeric-boundary grouping requires a current user confirmation.")
     title_slug = slugify_job_name(title, "").rstrip("_")
-    novel_dir = settings.resolved_output_dir(document.input_directory).resolve() / title_slug
+    output_root = settings.resolved_output_dir(document.input_directory).resolve()
+    novel_dir = output_root / title_slug
     source_hash = sha256_text(text)
     config = grouping_config(settings, size, method)
     groups, used = [], set()
@@ -278,6 +288,9 @@ def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_D
         group.state = load_job_state(group)
         groups.append(group)
     manifest = {"schema_version": 2, "title": title, "source_sha256": source_hash,
+                "source_revision": document.normalized_revision,
+                "resolved_output_dir": str(output_root),
+                "job_output_dir": str(novel_dir),
                 "grouping_method": method, "config": config,
                 "groups": [dict(asdict(g), state={}) for g in groups]}
     if method == GROUPING_METHOD_NUMERIC:
@@ -300,9 +313,9 @@ def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_D
 
 def restore_groups(document, settings, title, size):
     """Restore solely from a manifest, validating it against current content."""
-    text = document.require_step2_confirmed_output()
-    novel = settings.resolved_output_dir(document.input_directory).resolve() / slugify_job_name(title, "").rstrip("_")
-    path = novel / "chapter_groups.json"
+    text = document.require_grouping_input()
+    path = _manifest_path(document, settings, title)
+    novel = path.parent
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -327,6 +340,8 @@ def restore_groups(document, settings, title, size):
         if (data["schema_version"] != 2 or data["title"] != title or data["source_sha256"] != sha256_text(text)
                 or data["config"] != grouping_config(settings, size, method) or len(data["groups"]) != len(expected)):
             raise ValueError("Manifest does not match the current source/configuration.")
+        if "source_revision" in data and data["source_revision"] != document.normalized_revision:
+            raise ValueError("Manifest belongs to an older normalized text revision.")
         groups = [ChapterGroup(**row) for row in data["groups"]]
         deleted_ids = data.get("deleted_group_ids", [])
         if (not isinstance(deleted_ids, list) or any(not isinstance(value, str) for value in deleted_ids) or
@@ -383,7 +398,7 @@ def delete_group(document, group_id):
                 data.get("config") != document.grouping_config or
                 data.get("groups") != [dict(asdict(item), state={}) for item in groups] or
                 data.get("deleted_group_ids", []) != deleted_ids):
-            raise ValueError("Manifest changed; restore matching groups in Step 3 before deleting.")
+            raise ValueError("Manifest changed; restore matching groups in Step 2 before deleting.")
         removed = {*deleted_ids, group_id}
         data["deleted_group_ids"] = [item.group_id for item in groups if item.group_id in removed]
         atomic_write_json(path, data)
@@ -402,12 +417,12 @@ def validate_group(group, source):
             raise ValueError("Canonical paths are outside the group folder.")
         expected = source[group.start:group.end]
         if sha256_text(source) != group.source_sha256 or sha256_text(expected) != group.text_sha256:
-            raise ValueError("Group source is stale; recreate group files in Step 3.")
+            raise ValueError("Group source is stale; recreate group files in Step 2.")
         for path, fingerprint in ((Path(group.txt_path), group.text_sha256), (Path(group.json_path), group.json_sha256)):
             if not path.is_file():
-                raise ValueError(f"Missing {path.name}; recreate group files in Step 3 or delete this group in Step 4.")
+                raise ValueError(f"Missing {path.name}; recreate group files in Step 2 or delete this group in Step 3.")
             if sha256_file(path) != fingerprint:
-                raise ValueError(f"{path.name} was externally modified; recreate group files in Step 3 or delete this group in Step 4.")
+                raise ValueError(f"{path.name} was externally modified; recreate group files in Step 2 or delete this group in Step 3.")
         data = json.loads(Path(group.json_path).read_text(encoding="utf-8"))
         if data["text"] != expected or data["chapters"] != group.chapters or data["group_id"] != group.group_id or "chunks" in data:
             raise ValueError("Group JSON does not describe the canonical text.")
@@ -429,6 +444,7 @@ def load_job_state(group):
 
 def save_job_state(group):
     group.state.update(schema_version=1, group_id=group.group_id, text_sha256=group.text_sha256)
+    group.state.setdefault("resolved_output_dir", str(Path(group.output_dir).resolve().parents[1]))
     atomic_write_json(Path(group.output_dir) / "job_state.json", group.state)
 
 
@@ -445,11 +461,11 @@ def require_media(document, group_id):
     for kind in ("thumbnail", "audiobook"):
         row = group.state.get(kind, {})
         if not isinstance(row, dict):
-            raise PipelineStateError(f"{group.label}: invalid {kind} recovery state; regenerate it in Step 4.")
+            raise PipelineStateError(f"{group.label}: invalid {kind} recovery state; regenerate it in Step 3.")
         current = document._fingerprint_file(row.get("path", ""))
         if (not current or current["size"] < 1 or current != row.get("fingerprint") or
                 Path(row["path"]).resolve().parent != folder):
-            raise PipelineStateError(f"{group.label}: generate a current {kind} in Step 4 first.")
+            raise PipelineStateError(f"{group.label}: generate a current {kind} in Step 3 first.")
     if group.state.get("tts_status") not in {"Completed", "Partial"}:
         raise PipelineStateError(f"{group.label}: TTS is incomplete; resume it or explicitly merge with missing chunks.")
     provenance = group.state.get("tts_provenance", {})
@@ -464,7 +480,8 @@ def require_media(document, group_id):
                 raise PipelineStateError(f"{group.label}: TTS text/overrides changed; resume TTS before rendering.")
     return Step4MediaBundle(group.title, group.label, group.slug, group.output_dir,
                            group.state["thumbnail"]["path"], group.state["audiobook"]["path"],
-                           str(folder / f"{group.slug}.mp4"), group.state["thumbnail"]["fingerprint"], group.state["audiobook"]["fingerprint"])
+                           str(folder / f"{group.slug}.mp4"), group.state["thumbnail"]["fingerprint"], group.state["audiobook"]["fingerprint"],
+                           str(folder / "audio_chunks" / "manifest.json"), provenance.get("effective_text_sha256", ""))
 
 
 def record_tts_provenance(group, processor):
@@ -477,82 +494,120 @@ def record_tts_provenance(group, processor):
 
 
 def video_source(media):
-    return {"thumbnail": media.thumbnail_fingerprint, "audio": media.audiobook_fingerprint,
-            "profile": {"version": 1, "width": 1920, "height": 1080, "fps": 1, "codec": "h264"}}
+    from media.video_pages import source_fingerprint
+    try:
+        return source_fingerprint(media)
+    except RuntimeError as error:
+        raise PipelineStateError(str(error)) from error
 
 
 def record_video(document, group_id, result):
     group = document.require_group_artifacts(group_id)
+    if group.state.get("tts_status") != "Completed":
+        raise PipelineStateError("Complete every TTS chunk before Step 4; partial audiobooks cannot be rendered.")
     media = require_media(document, group_id)
     group.state["video"] = {"path": str(result.output_path), "fingerprint": document._fingerprint_file(str(result.output_path)),
-                            "source": video_source(media), "result": result.to_dict(), "status": "Completed"}
+                            "source": getattr(result, "source", None) or video_source(media), "result": result.to_dict(), "status": "Completed"}
     save_job_state(group)
 
 
 def require_video(document, group_id):
     group = document.require_group_artifacts(group_id)
+    if group.state.get("tts_status") != "Completed":
+        raise PipelineStateError("Complete every TTS chunk before Step 4; partial audiobooks cannot be rendered.")
     media = require_media(document, group_id)
     row = group.state.get("video", {})
     fp = document._fingerprint_file(row.get("path", ""))
     if (not fp or fp["size"] <= 0 or fp != row.get("fingerprint") or row.get("source") != video_source(media) or
             Path(row["path"]).resolve() != Path(media.video_path).resolve()):
-        raise PipelineStateError(f"{group.label}: create a current video in Step 5 first.")
+        raise PipelineStateError(f"{group.label}: create a current video in Step 4 first.")
     return Step5UploadBundle(group.title, group.label, group.output_dir, row["path"], media.thumbnail_path, fp, media.thumbnail_fingerprint)
 
 
-def prepare_tts(document, group_id, settings):
-    """Cleaning/chunking lives exclusively in Step 4, never canonical files."""
-    from cleaning.textclean import CleaningOptions, clean_text
-    from chunking.splitter import split_chapters, clamp_chunk_size
+def prepare_tts(document, group_id, settings, *, cancel_event=None):
+    """Cleaning/chunking lives exclusively in Step 3, never canonical files."""
+    from cleaning.textclean import CleaningOptions
+    from chunking.splitter import split_chapters, clamp_chunk_size, TTS_CHUNK_TARGET
     from media.tts import TtsChunk
     group = document.require_group_artifacts(group_id)
-    source = validate_group(group, document.require_step2_confirmed_output())
-    options = CleaningOptions.from_settings(settings)
-    minimum = max(50, int(settings.min_chunk_chars or 200))
-    limit = clamp_chunk_size(settings.clamp_chunk_size(), minimum)
-    config = {"cleaning": asdict(options), "limit": limit, "minimum": minimum}
-    identity = sha256_text(json.dumps({"source": group.text_sha256, "config": config}, ensure_ascii=False, sort_keys=True))
+    source = validate_group(group, document.require_grouping_input())
+    from cleaning.tts_prepare import prepare_chapter
+    from cleaning.tts_text_preprocessor import preprocessing_identity
+    from cleaning.tts_boundaries import meaningful_text
+    def check_cancel():
+        if cancel_event is not None and cancel_event.is_set():
+            raise PipelineStateError("Đã hủy chuẩn bị TTS; các MP3 đã có được giữ lại.")
+    check_cancel()
+    options = CleaningOptions.for_tts(settings)
+    minimum = min(TTS_CHUNK_TARGET, max(50, int(settings.min_chunk_chars or 200)))
+    limit = TTS_CHUNK_TARGET
+    config = {"cleaning": asdict(options), "limit": limit, "minimum": minimum, **preprocessing_identity(settings)}
+    identity = sha256_text(json.dumps({
+        "source": group.text_sha256,
+        "source_revision": document.normalized_revision,
+        "config": config,
+    }, ensure_ascii=False, sort_keys=True))
     folder = Path(group.output_dir)
     path = folder / "tts_chunks.json"
     try:
         plan = json.loads(path.read_text(encoding="utf-8"))
-        if plan["plan_id"] != identity or plan["group_id"] != group_id:
+        if plan.get("schema_version") != 2 or plan["plan_id"] != identity or plan["group_id"] != group_id or plan.get("config") != config:
             raise ValueError("Changed TTS plan")
         base = plan["chunks"]
         if [c["order"] for c in base] != list(range(1, len(base) + 1)) or not base:
             raise ValueError("Invalid chunk ordering")
         if any(sha256_text(c["text"]) != c["text_sha256"] for c in base):
             raise ValueError("Changed chunk text")
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         chapters = []
+        statistics, warnings = {}, []
         first_start = group.chapters[0]["start"] - group.start
+        raw_chapters = []
         if first_start > 0 and source[:first_start].strip():
-            cleaned, _ = clean_text(source[:first_start], options)
-            chapters.append(Chapter(number=0, header_line="", text=cleaned))
+            raw_chapters.append(Chapter(number=0, header_line="", text=source[:first_start]))
         for row in group.chapters:
             body = source[row["body_start"] - group.start:row["end"] - group.start]
-            cleaned, _ = clean_text(body, options)
-            header, _ = clean_text(row["heading"], options)
-            chapters.append(Chapter(number=row["number"], header_line=header, text=cleaned))
-        chunks, _, _ = split_chapters(chapters, limit, include_header=True, min_chunk=minimum)
+            raw_chapters.append(Chapter(number=row["number"], header_line=row["heading"], text=body))
+        for chapter in raw_chapters:
+            check_cancel()
+            prepared, stats, messages = prepare_chapter(chapter, settings)
+            chapters.append(prepared)
+            for key, value in stats.items():
+                statistics[key] = statistics.get(key, 0) + value
+            warnings.extend(f"Chapter {chapter.number}: {message}" for message in messages)
+        check_cancel()
+        chunks, _, diagnostics = split_chapters(chapters, limit, include_header=True, min_chunk=minimum,
+                                             abbreviations=config["preprocessing"]["abbreviations"])
+        warnings.extend(d.message for d in diagnostics)
         base = [{"order": c.order, "chapter": c.chapter, "text": c.text, "text_sha256": sha256_text(c.text)} for c in chunks]
         if not base:
             raise PipelineStateError(f"{group.label}: no speakable text after cleaning.")
-        plan = {"schema_version": 1, "group_id": group_id, "plan_id": identity, "config": config, "chunks": base}
+        plan = {"schema_version": 2, "group_id": group_id, "plan_id": identity,
+                "source_revision": document.normalized_revision, "config": config, "chunks": base,
+                "statistics": statistics, "warnings": warnings}
+        check_cancel()
         atomic_write_json(path, plan)
+    check_cancel()
+    plan = dict(plan)
+    plan["warnings"] = list(plan.get("warnings", []))
     overrides = {}
     try:
         saved = json.loads((folder / "tts_overrides.json").read_text(encoding="utf-8"))
         if saved["plan_id"] == identity:
             overrides = saved["overrides"]
-    except (OSError, ValueError, KeyError):
+        elif saved.get("overrides"):
+            plan["warnings"].append("Saved TTS overrides belong to an older plan; retained but not applied.")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
+    if not isinstance(overrides, dict):
+        raise PipelineStateError("Invalid saved TTS overrides; correct the failed chunk text.")
     effective = []
     for row in base:
         text = overrides.get(str(row["order"]), row["text"])
-        if not isinstance(text, str) or not text.strip() or len(text) > limit:
+        if not isinstance(text, str) or not meaningful_text(text) or len(text) > limit:
             raise PipelineStateError("Invalid saved TTS override; correct the failed chunk text.")
         effective.append(TtsChunk(row["order"], text, row["chapter"]))
+    check_cancel()
     group.state["tts_plan_id"] = identity
     return plan, effective
 
@@ -562,7 +617,12 @@ def edit_failed_chunk(document, group_id, settings, order, text):
     plan, _ = prepare_tts(document, group_id, settings)
     if order not in {int(f["chunk_number"]) for f in group.state.get("failures", [])}:
         raise PipelineStateError("Only a selected failed TTS chunk can be edited.")
-    if not text.strip() or len(text) > plan["config"]["limit"]:
+    from cleaning.tts_text_preprocessor import TTSPreprocessConfig, preprocess_for_tts
+    from cleaning.tts_boundaries import meaningful_text
+    from cleaning.textclean import CleaningOptions, clean_text
+    cleaned, _ = clean_text(text, CleaningOptions.for_tts(settings))
+    text = preprocess_for_tts(cleaned, TTSPreprocessConfig.from_settings(settings))
+    if not meaningful_text(text) or len(text) > plan["config"]["limit"]:
         raise PipelineStateError(f"Replacement must be non-empty and at most {plan['config']['limit']} characters.")
     path = Path(group.output_dir) / "tts_overrides.json"
     saved = {"schema_version": 1, "plan_id": plan["plan_id"], "overrides": {}}

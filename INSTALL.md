@@ -5,7 +5,7 @@
 - Python 3.11 or newer
 - PyQt6
 - Pillow and edge-tts (installed by `requirements.txt`)
-- FFmpeg and FFprobe on your system PATH (required for audiobook merge and Step 5 video)
+- FFmpeg and FFprobe on your system PATH (required for audiobook merge and Step 4 video)
 - Optional GPU drivers/runtime for VA-API, Quick Sync, NVENC, AMF, or VideoToolbox
 - ~10 MB disk space
 
@@ -99,17 +99,6 @@ You can override the config location with:
 ```bash
 export NOVEL_PIPELINE_CONFIG_DIR=/custom/path
 ```
-
-## Optional: Gemini AI Translation
-
-To enable AI translation:
-
-1. Get API key from [Google AI Studio](https://aistudio.google.com/)
-2. Open the app and go to Settings
-3. Enter your API key in the "Gemini API Key" field
-4. Save settings
-
-The app works fully offline without this feature.
 
 ## Optional: YouTube desktop OAuth
 

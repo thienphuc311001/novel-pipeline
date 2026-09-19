@@ -14,7 +14,7 @@ from pipeline.document import Chapter, Chunk, PipelineDocument, PipelineStateErr
 class Step3ArtifactTests(unittest.TestCase):
     def make_document(self) -> PipelineDocument:
         document = PipelineDocument()
-        document.step2_revision = 4
+        document.normalized_revision = 4
         document.chapters = [
             Chapter(number=1, header_line="Chương 1", text="Nội dung chương một.", char_count=20),
             Chapter(number=2, header_line="Chương 2", text="Nội dung chương hai.", char_count=20),

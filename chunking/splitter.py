@@ -3,27 +3,30 @@
 Guarantees:
 
 * a chunk never crosses a chapter boundary;
-* break preference is paragraph -> sentence -> clause -> space;
+* break preference is sentence -> clause -> space;
 * hard slicing happens only when a single sentence/clause/word already exceeds
   the limit, and those chunks are flagged (``hard_split``) with a warning;
-* chunk sizes are clamped to sane limits (50 .. 20000 characters).
+* chunk sizes are clamped to sane limits (600 .. 2000 characters).
 """
 
 from __future__ import annotations
 
 import re
+import bisect
+import unicodedata
+from cleaning.tts_boundaries import (CHUNKER_VERSION, protection_mask, protected_spans,
+                                     boundary_positions, meaningful_text, split_units)
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 from pipeline.document import Chapter, Chunk, Diagnostic, Severity
 
 MIN_CHUNK = 600
 MAX_CHUNK = 2000
-DEFAULT_CHUNK = 1200
+DEFAULT_CHUNK = 700
+TTS_CHUNK_TARGET = 700
 
 PARAGRAPH_RE = re.compile(r"\n\s*\n")
-SENTENCE_RE = re.compile(r"(?<=[.!?。！？…])\s*")
-CLAUSE_RE = re.compile(r"(?<=[,;:，；：、])\s*")
 
 
 class BreakStrategy:
@@ -77,100 +80,83 @@ def _split_paragraphs(text: str) -> List[str]:
 
 
 def _split_sentences(text: str) -> List[str]:
-    parts = [part for part in SENTENCE_RE.split(text) if part]
-    return parts or [text]
+    return split_units(text)
 
 
 def _split_clauses(text: str) -> List[str]:
-    parts = [part for part in CLAUSE_RE.split(text) if part]
-    return parts or [text]
+    return split_units(text, "clause")
 
 
 def _hard_slice(text: str, limit: int) -> List[str]:
-    return [text[index: index + limit] for index in range(0, len(text), limit)] or [text]
+    pieces, start = [], 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        while end > start and end < len(text) and unicodedata.combining(text[end]):
+            end -= 1
+        if end == start:
+            raise ValueError(f"Combining sequence exceeds chunk limit at character {start}")
+        pieces.append(text[start:end])
+        start = end
+    return pieces or [text]
 
 
-def _pack_units(units: Sequence[str], limit: int, joiner: str = "") -> Tuple[List[str], bool]:
-    """Pack units into pieces of at most *limit* characters."""
-    pieces: List[str] = []
-    buffer = ""
-    hard = False
-    for unit in units:
-        if len(unit) > limit:
-            if buffer:
-                pieces.append(buffer)
-                buffer = ""
-            pieces.extend(_hard_slice(unit, limit))
-            hard = True
-            continue
-        candidate = f"{buffer}{joiner}{unit}" if buffer else unit
-        if len(candidate) <= limit:
-            buffer = candidate
-            continue
-        if buffer:
-            pieces.append(buffer)
-        buffer = unit
-    if buffer:
-        pieces.append(buffer)
-    return pieces, hard
-
-
-def _units_at(text: str, level: int) -> Tuple[List[str], str]:
-    """Break *text* at one preference level: paragraph/sentence/clause/space."""
-    if level == 0:
-        return _split_paragraphs(text), "\n\n"
-    if level == 1:
-        return _split_sentences(text), ""
-    if level == 2:
-        return _split_clauses(text), ""
-    return text.split(" "), " "
-
-
-def _split_level(text: str, limit: int, level: int, out: List[Tuple[str, str, bool]]) -> None:
-    """Recursively split *text*, recording the strategy and hard-split flag."""
-    levels = [BreakStrategy.PARAGRAPH, BreakStrategy.SENTENCE, BreakStrategy.CLAUSE, BreakStrategy.SPACE]
-    if len(text) <= limit:
-        strategy = levels[max(0, min(level - 1, len(levels) - 1))] if level else BreakStrategy.PARAGRAPH
-        out.append((text, strategy, False))
-        return
-    if level >= len(levels):
-        for piece in _hard_slice(text, limit):
-            out.append((piece, BreakStrategy.HARD, True))
-        return
-    units, joiner = _units_at(text, level)
-    if len(units) <= 1:
-        _split_level(text, limit, level + 1, out)
-        return
-    buffer = ""
-    for unit in units:
-        if len(unit) > limit:
-            if buffer:
-                out.append((buffer, levels[level], False))
-                buffer = ""
-            _split_level(unit, limit, level + 1, out)
-            continue
-        candidate = f"{buffer}{joiner}{unit}" if buffer else unit
-        if len(candidate) <= limit:
-            buffer = candidate
-            continue
-        if buffer:
-            out.append((buffer, levels[level], False))
-        buffer = unit
-    if buffer:
-        out.append((buffer, levels[level], False))
-
-
-def split_text_by_limit(text: str, limit: int) -> ChunkPlan:
-    """Split *text* respecting break preference, falling back when necessary."""
+def split_text_by_limit(text: str, limit: int, *, abbreviations=None) -> ChunkPlan:
+    """Select boundaries by preference, preserving every meaningful character."""
+    from cleaning.tts_boundaries import DEFAULT_ABBREVIATIONS
+    abbreviations = DEFAULT_ABBREVIATIONS if abbreviations is None else abbreviations
     limit = clamp_chunk_size(limit)
     plan = ChunkPlan()
-    if not text:
+    if not meaningful_text(text):
         return plan
-    out: List[Tuple[str, str, bool]] = []
-    _split_level(text, limit, 0, out)
-    plan.chunks = [item[0] for item in out]
-    plan.strategies = [item[1] for item in out]
-    plan.hard_splits = [index for index, item in enumerate(out) if item[2]]
+    for start, end in protected_spans(text, abbreviations):
+        if end - start > limit:
+            raise ValueError(f"Protected token exceeds {limit} characters at character {start}")
+    mask = protection_mask(text, abbreviations)
+    quoted = protection_mask(text, abbreviations, quote_limit=limit)
+    sentences = boundary_positions(text, abbreviations=abbreviations)
+    clauses = boundary_positions(text, "clause", abbreviations)
+    spaces = [m.end() for m in re.finditer(r"\s+", text) if not mask[m.start()]]
+    # Complete sentences always take precedence; clauses/words are oversized-sentence fallbacks.
+    levels = [(sentences, BreakStrategy.SENTENCE),
+              ([c for c in clauses if (not quoted[c - 1] or c == len(text) or not quoted[c])], BreakStrategy.CLAUSE),
+              (clauses, BreakStrategy.CLAUSE),
+              ([c for c in spaces if c == len(text) or not quoted[c - 1] or not quoted[c]], BreakStrategy.SPACE),
+              (spaces, BreakStrategy.SPACE)]
+    start = 0
+    while start < len(text):
+        if len(text) - start <= limit:
+            cut, strategy, hard = len(text), BreakStrategy.PARAGRAPH, False
+        else:
+            cut, strategy, hard = 0, BreakStrategy.HARD, True
+            for positions, label in levels:
+                index = bisect.bisect_right(positions, start + limit) - 1
+                if index >= 0 and positions[index] > start:
+                    candidate = positions[index]
+                    # Do not begin the next chunk with loose closing punctuation.
+                    next_char = candidate
+                    while next_char < len(text) and text[next_char].isspace():
+                        next_char += 1
+                    if next_char < len(text) and text[next_char] in ',.!?…;:”’)]}':
+                        continue
+                    cut, strategy, hard = candidate, label, False
+                    break
+            if not cut:
+                cut = start + limit
+                while cut > start and (mask[cut - 1] or (cut < len(text) and unicodedata.combining(text[cut]))):
+                    cut -= 1
+                if cut <= start:
+                    raise ValueError(f"No safe split within {limit} characters at character {start}")
+        piece = text[start:cut].strip()
+        if meaningful_text(piece):
+            if hard:
+                plan.hard_splits.append(len(plan.chunks))
+            plan.chunks.append(piece)
+            plan.strategies.append(strategy)
+        elif piece and plan.chunks:
+            if len(plan.chunks[-1]) + len(piece) > limit:
+                raise ValueError(f"Loose punctuation cannot fit chunk at character {start}")
+            plan.chunks[-1] += piece
+        start = cut
     return plan
 
 
@@ -180,11 +166,19 @@ def split_chapter(
     *,
     include_header: bool = False,
     min_chunk: int = MIN_CHUNK,
+    abbreviations=None,
 ) -> ChunkPlan:
     """Split one chapter, never merging it with another chapter."""
     limit = clamp_chunk_size(limit, min_chunk)
-    body = chapter.body(include_header=include_header) if include_header else (chapter.text or "")
-    return split_text_by_limit(body, limit)
+    plan = split_text_by_limit(chapter.text or "", limit, abbreviations=abbreviations)
+    if include_header and meaningful_text(chapter.header_line or ""):
+        header = chapter.header_line.strip()
+        if len(header) > limit:
+            raise ValueError(f"Chapter {chapter.number}: heading exceeds {limit} characters")
+        plan.chunks.insert(0, header)
+        plan.strategies.insert(0, BreakStrategy.PARAGRAPH)
+        plan.hard_splits = [index + 1 for index in plan.hard_splits]
+    return plan
 
 
 def split_chapters(
@@ -196,6 +190,7 @@ def split_chapters(
     min_chunk: int = MIN_CHUNK,
     include_empty: bool = False,
     stage: str = "clean_chunk",
+    abbreviations=None,
 ) -> Tuple[List[Chunk], ChunkPlan, List[Diagnostic]]:
     """Produce chunk objects for every chapter, with diagnostics."""
     limit = clamp_chunk_size(limit, min_chunk)
@@ -205,7 +200,7 @@ def split_chapters(
     order = 0
 
     for chapter in chapters:
-        plan = split_chapter(chapter, limit, include_header=include_header, min_chunk=min_chunk)
+        plan = split_chapter(chapter, limit, include_header=include_header, min_chunk=min_chunk, abbreviations=abbreviations)
         if not plan.chunks and not include_empty:
             diagnostics.append(
                 Diagnostic(
@@ -248,9 +243,10 @@ def split_chapters(
                         stage=stage,
                     )
                 )
+        offset = len(combined.chunks)
         combined.chunks.extend(plan.chunks)
         combined.strategies.extend(plan.strategies)
-        combined.hard_splits.extend(plan.hard_splits)
+        combined.hard_splits.extend(offset + index for index in plan.hard_splits)
         if merge_short and len(plan.chunks) == 1 and len(plan.chunks[0]) < min_chunk:
             diagnostics.append(
                 Diagnostic(

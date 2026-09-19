@@ -1,8 +1,8 @@
 """Local configuration for the unified novel pipeline application.
 
 Everything is stored in a small JSON file under the user config directory.
-No mandatory cloud dependency. Normalization and review work offline;
-AI translation, Edge-TTS, and YouTube upload use network services when invoked.
+No mandatory cloud dependency. Normalization and grouping work offline;
+Edge-TTS and YouTube upload use network services when invoked.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ DEFAULT_BRACKET_PAIRS: List[str] = [
 
 
 def config_dir() -> Path:
-    """Return the directory used to persist settings and the API key."""
+    """Return the directory used to persist application settings."""
     override = os.environ.get("NOVEL_PIPELINE_CONFIG_DIR")
     if override:
         return Path(override).expanduser()
@@ -143,22 +143,8 @@ class Settings:
     custom_rules: List[Dict[str, Any]] = field(default_factory=list)
     drop_empty_lines: bool = False
 
-    # --- chinese review ---------------------------------------------------
-    chinese_extraction_mode: str = "segments"  # "segments" | "line"
-    chinese_context_chars: int = 0
-    dictionary_enabled: bool = True
-    dictionary_paths: List[str] = field(default_factory=list)
-
-    # --- translation ------------------------------------------------------
-    ai_enabled: bool = False
-    gemini_model: str = "gemini-2.0-flash"
-    gemini_api_key: str = ""
-    ai_batch_size: int = 40
-    ai_target_language: str = "Vietnamese"
-    ai_timeout: int = 60
-
     # --- chunking ---------------------------------------------------------
-    max_chunk_chars: int = 1200
+    max_chunk_chars: int = 700
     min_chunk_chars: int = 200
     chunk_by_chapters: bool = True
 
@@ -170,13 +156,14 @@ class Settings:
     zip_folder_per_range: bool = False
 
     # --- tts --------------------------------------------------------------
+    tts_preprocessing: Dict[str, Any] = field(default_factory=dict)
     tts_engine: str = "edge-tts"
     tts_voice: str = DEFAULT_TTS_VOICE
     tts_rate: int = 175
     tts_max_concurrency: int = 60
     tts_timeout_seconds: int = 120
     tts_retry_count: int = 5
-    tts_fallback_retry_count: int = 3
+    tts_fallback_retry_count: int = 3  # Legacy config compatibility; full-chunk retries only.
 
     # --- thumbnail --------------------------------------------------------
     thumbnail_bottom_height: int = 145
@@ -210,6 +197,8 @@ class Settings:
         settings.title_history = list(dict.fromkeys(
             str(title).strip() for title in settings.title_history if str(title).strip()
         ))
+        if not isinstance(settings.tts_preprocessing, dict):
+            settings.tts_preprocessing = {}
         settings.tts_voice = str(settings.tts_voice or "").strip() or DEFAULT_TTS_VOICE
         return settings
 
@@ -252,10 +241,16 @@ class Settings:
         Step 1 input.  The historical home-directory fallback remains useful
         for callers that do not yet have a loaded document.
         """
-        if self.output_dir:
-            return Path(self.output_dir).expanduser()
+        configured = str(self.output_dir or "").strip()
+        if configured:
+            return Path(configured).expanduser()
         if input_dir:
-            return Path(input_dir).expanduser()
+            candidate = Path(input_dir).expanduser()
+            # Callers normally pass Step 1's parent directory. Accepting a
+            # file path as well keeps the resolver correct for folder/file
+            # input providers and avoids placing generated jobs beside the
+            # selected file's parent-of-parent.
+            return candidate.parent if candidate.is_file() else candidate
         return Path.home() / "novel-pipeline-output"
 
     def resolved_input_dir(self) -> str:

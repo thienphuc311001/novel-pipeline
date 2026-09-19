@@ -241,7 +241,7 @@ class YouTubeUploader:
     def _fingerprint(self, video: Path) -> dict:
         stat = video.stat()
         if not video.is_file() or stat.st_size <= 0:
-            raise YouTubeUploadError("The Step 5 MP4 is missing or empty.")
+            raise YouTubeUploadError("The Step 4 MP4 is missing or empty.")
         digest = sha256()
         with video.open("rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -437,7 +437,7 @@ class YouTubeUploader:
             if not thumbnail.is_file() or not 0 < thumbnail.stat().st_size <= 2 * 1024 * 1024:
                 raise YouTubeUploadError("Thumbnail must be a non-empty JPEG/PNG of at most 2 MB.")
             mime = "image/png" if thumbnail.suffix.lower() == ".png" else "image/jpeg"
-            self.log("Uploading the Step 4 thumbnail…")
+            self.log("Uploading the Step 3 thumbnail…")
             response = self._request_retry("POST", f"{UPLOAD_API}/thumbnails/set", params={"videoId": state["video_id"], "uploadType": "media"},
                                            headers={"Content-Type": mime}, data=thumbnail.read_bytes())
             if response.status_code not in {200, 201}:

@@ -1,6 +1,7 @@
 """Secure credential storage, refresh, loopback authorization, and API status."""
 
 import json
+import importlib.util
 import tempfile
 import threading
 import unittest
@@ -200,6 +201,10 @@ class AuthTests(unittest.TestCase):
                 auth.connect()
         self.assertIn("REFRESH_SECRET", self.secrets.get(CREDENTIAL_KEY))
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("google_auth_oauthlib") is not None,
+        "google-auth-oauthlib is optional in the headless test environment",
+    )
     def test_installed_oauth_library_generates_loopback_state_and_pkce(self):
         from media.youtube_auth import _flow_factory
 

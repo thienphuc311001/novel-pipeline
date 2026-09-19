@@ -77,8 +77,8 @@ class YouTubeUiTests(unittest.TestCase):
 
     def test_continue_and_direct_navigation_share_automatic_inputs_and_metadata(self):
         self.enter()
-        self.assertEqual(self.window.tabs.count(), 6)
-        self.assertEqual(self.window.tabs.currentIndex(), 5)
+        self.assertEqual(self.window.tabs.count(), 5)
+        self.assertEqual(self.window.tabs.currentIndex(), 4)
         self.assertEqual(self.tab.video_label.text(), self.document.video_path)
         self.assertEqual(self.tab.thumbnail_label.text(), self.document.thumbnail_path)
         self.assertEqual(self.tab.title_edit.text(), "Bắc Tống | Chương 1")
@@ -89,8 +89,8 @@ class YouTubeUiTests(unittest.TestCase):
         self.assertFalse(any("select" in btn.text().lower() or "save" in btn.text().lower()
                              for btn in self.tab.findChildren(QPushButton)))
         with patch.object(self.window, "_start_video_detection"):
+            self.window.tabs.setCurrentIndex(3)
             self.window.tabs.setCurrentIndex(4)
-            self.window.tabs.setCurrentIndex(5)
         self.assertEqual(self.tab.video_label.text(), self.document.video_path)
         self.document.set_thumbnail_output(self.document.thumbnail_path)
         with self.assertRaises(PipelineStateError):

@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from pipeline.document import PipelineStateError
+from ui.copy_controls import add_copy_button
 
 
 class _YouTubeWorker(QObject):
@@ -166,7 +167,7 @@ class YouTubeTab(QWidget):
         self.result.setMinimumHeight(120)
         self.result.setMaximumHeight(180)
         self.result.setVisible(False)
-        outer.addWidget(self.result)
+        self.result_copy_btn = add_copy_button(outer, self.result, button_attr="copy_btn")
         retry_actions = QHBoxLayout()
         self.retry_thumbnail_btn = QPushButton("Retry Thumbnail")
         self.retry_playlist_btn = QPushButton("Retry Playlist")
@@ -440,6 +441,7 @@ class YouTubeTab(QWidget):
     def _show_state(self):
         state = self.state
         self.result.setVisible(bool(state))
+        self.result_copy_btn.setVisible(bool(state))
         video_id = state.get("video_id")
         if video_id:
             complete = state.get("status") == "completed"

@@ -1,4 +1,4 @@
-"""Atomic Step 3 TXT/JSON artifact creation and validation."""
+"""Atomic grouping-stage TXT/JSON artifact creation and validation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from pipeline.document import PipelineDocument, PipelineStateError, Step3ArtifactBundle
 
@@ -127,7 +127,7 @@ def publish_job_file_names(bundle: Step3ArtifactBundle, media, cancel_event) -> 
 def _canonical_cleaned_text(document: PipelineDocument) -> str:
     text = document.cleaned_text
     if text is None:
-        raise PipelineStateError("Step 3 has no cleaned text to materialize.")
+        raise PipelineStateError("The grouping stage has no cleaned text to materialize.")
     return text.rstrip("\n") + "\n" if text else ""
 
 
@@ -138,14 +138,15 @@ def write_step3_artifacts(
     title: str,
     chapter: str,
     chunk_limit: int,
+    tts_preparation: Optional[Dict[str, Any]] = None,
 ) -> Step3ArtifactBundle:
-    """Write the exact current Step 3 state as a paired UTF-8 job bundle."""
+    """Write the exact current grouping state as a paired UTF-8 job bundle."""
     title = (title or "").strip()
     chapter = (chapter or "").strip()
     if not title or not chapter:
-        raise ValueError("Title and chapter are required before creating Step 3 files.")
+        raise ValueError("Title and chapter are required before creating group files.")
     if not document.chunks:
-        raise PipelineStateError("No Step 3 chunks are available to export.")
+        raise PipelineStateError("No chunks are available to export.")
 
     paths = artifact_paths(output_root, title, chapter)
     text = _canonical_cleaned_text(document)
@@ -161,7 +162,8 @@ def write_step3_artifacts(
         "schema_version": 1,
         "title": title,
         "chapter": chapter,
-        "source_revision": document.step2_revision,
+        "source_revision": document.normalized_revision,
+        "resolved_output_dir": str(Path(output_root).expanduser().resolve()),
         "cleaned_text_sha256": text_hash,
         "chunks_sha256": chunks_hash,
         "chunk_settings": {
@@ -172,6 +174,8 @@ def write_step3_artifacts(
         "chapters": [entry.to_dict() for entry in document.chapters],
         "chunks": chunks,
     }
+    if tts_preparation is not None:
+        payload["tts_preparation"] = tts_preparation
     atomic_write_text(paths["txt"], text)
     atomic_write_json(paths["json"], payload)
     return Step3ArtifactBundle(
@@ -181,7 +185,7 @@ def write_step3_artifacts(
         output_dir=str(paths["directory"]),
         txt_path=str(paths["txt"]),
         json_path=str(paths["json"]),
-        source_revision=document.step2_revision,
+        source_revision=document.normalized_revision,
         text_sha256=text_hash,
         chunks_sha256=chunks_hash,
         txt_sha256=sha256_file(paths["txt"]),

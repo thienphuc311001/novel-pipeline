@@ -1,4 +1,4 @@
-"""Canonical grouping and independent Step 4 plans (no network/GPU)."""
+"""Canonical grouping and independent Step 3 plans (no network/GPU)."""
 import json
 import tempfile
 import unittest
@@ -12,14 +12,15 @@ from media.groups import (GROUPING_METHOD_NUMERIC, analyze_grouping, preview_gro
                          save_job_state, record_video)
 from media.groups import delete_group
 from media.video import VideoRenderResult
-from pipeline.document import PipelineDocument, PipelineStateError
+from pipeline.document import PipelineDocument, PipelineStateError, StageKey
 
 
 def document_for(text, folder):
     doc = PipelineDocument()
     doc.original_input_text = "immutable original input"
-    doc.normalized_text = "older Step 1 output"
-    doc.chinese_review_text = doc.step2_confirmed_output = text
+    doc.normalized_text = text
+    doc.normalized_revision = 1
+    doc.stage(StageKey.NORMALIZE).touch("fixture", "fixture")
     doc.input_directory = str(folder)
     doc.job_title = "Bắc Tống"
     return doc
@@ -79,10 +80,10 @@ class ChapterGroupTests(unittest.TestCase):
         self.settings.custom_chapter_regex = r'^Section (?P<number>\d+)$'
         self.assertEqual(len(scan_headings('Section 1\nB.', self.settings)), 1)
 
-    def test_files_are_exact_and_step3_never_cleans_or_chunks(self):
+    def test_files_are_exact_and_step2_never_cleans_or_chunks(self):
         text = 'Foreword\r\n\r\nChương 1\r\n<p>50% & a/b</p>  \r\n\r\nChapter 02: T\r\n"Hello."\r\n'
         doc = document_for(text, self.root)
-        with patch('cleaning.textclean.clean_text', side_effect=AssertionError('Step 3 cleaning forbidden')), patch('chunking.splitter.split_chapters', side_effect=AssertionError('Step 3 TTS chunking forbidden')):
+        with patch('cleaning.textclean.clean_text', side_effect=AssertionError('Step 2 cleaning forbidden')), patch('chunking.splitter.split_chapters', side_effect=AssertionError('Step 2 TTS chunking forbidden')):
             groups = write_groups(doc, self.settings, doc.job_title, 1)
         self.assertEqual(''.join(Path(g.txt_path).read_bytes().decode('utf-8') for g in groups), text)
         self.assertEqual(doc.original_input_text, 'immutable original input')
@@ -142,6 +143,7 @@ class ChapterGroupTests(unittest.TestCase):
 
         manifest = json.loads(Path(doc.group_manifest_path).read_text(encoding='utf-8'))
         self.assertEqual(manifest['grouping_method'], GROUPING_METHOD_NUMERIC)
+        self.assertEqual(manifest['source_revision'], doc.normalized_revision)
         self.assertEqual(manifest['numeric_confirmation']['fingerprint'], analysis.numeric_identity_fingerprint)
         self.assertEqual(manifest['numeric_confirmation']['descriptor'], analysis.numeric_identity_descriptor)
         restored = document_for(text, self.root)
@@ -206,6 +208,9 @@ class ChapterGroupTests(unittest.TestCase):
         doc = document_for('Chương 1\nA.', self.root)
         group = write_groups(doc, self.settings, doc.job_title, 20)[0]
         self.assertEqual(Path(group.output_dir).parent.parent, self.root)
+        manifest = json.loads(Path(doc.group_manifest_path).read_text(encoding='utf-8'))
+        self.assertEqual(Path(manifest['resolved_output_dir']), self.root.resolve())
+        self.assertEqual(Path(manifest['job_output_dir']), self.root / 'Bắc_Tống')
         with self.assertRaises(PipelineStateError):
             doc.require_step4_outputs()
         with self.assertRaises(PipelineStateError):
@@ -213,6 +218,21 @@ class ChapterGroupTests(unittest.TestCase):
         self.settings.output_dir = str(self.root / 'override')
         group = write_groups(doc, self.settings, doc.job_title, 20)[0]
         self.assertEqual(Path(group.output_dir).parent.parent, self.root / 'override')
+
+    def test_restore_uses_recorded_manifest_path_after_output_override_changes(self):
+        text = 'Chương 1\nÂn Chính Mậu.'
+        doc = document_for(text, self.root)
+        groups = write_groups(doc, self.settings, doc.job_title, 20)
+        recorded_manifest = Path(doc.group_manifest_path)
+        new_settings = Settings(output_dir=str(self.root / 'new-override'))
+        restored = document_for(text, self.root)
+        restored.group_manifest_path = str(recorded_manifest)
+
+        resumed = restore_groups(restored, new_settings, doc.job_title, 20)
+
+        self.assertEqual([item.group_id for item in resumed], [item.group_id for item in groups])
+        self.assertEqual(Path(resumed[0].output_dir).resolve(), Path(groups[0].output_dir).resolve())
+        self.assertEqual(Path(restored.group_manifest_path).resolve(), recorded_manifest.resolve())
 
     def test_delete_damaged_groups_preserves_source_order_files_and_restore(self):
         text = ''.join(f'Chương {number}\nBody {number}.\n' for number in range(1, 5))
@@ -226,7 +246,7 @@ class ChapterGroupTests(unittest.TestCase):
         delete_group(doc, groups[1].group_id)
         self.assertEqual(doc.require_chapter_groups(), [groups[0], groups[3]])
         self.assertEqual([group.order for group in doc.chapter_groups], [1, 4])
-        self.assertEqual(doc.step2_confirmed_output, text)
+        self.assertEqual(doc.require_grouping_input(), text)
         self.assertTrue(marker.exists())
         self.assertEqual(Path(groups[2].txt_path).read_bytes(), b'externally modified')
         with self.assertRaises(PipelineStateError):
@@ -287,13 +307,13 @@ class ChapterGroupTests(unittest.TestCase):
             data['deleted_group_ids'] = deleted
             manifest_path.write_text(json.dumps(data), encoding='utf-8')
             with self.assertRaisesRegex(PipelineStateError, 'deleted-group membership'):
-                restore_groups(document_for(doc.step2_confirmed_output, self.root), self.settings, doc.job_title, 1)
+                restore_groups(document_for(doc.require_grouping_input(), self.root), self.settings, doc.job_title, 1)
         data = json.loads(before)
         data['deleted_group_ids'] = [groups[0].group_id]
         data['groups'][0]['text_sha256'] = 'changed'
         manifest_path.write_text(json.dumps(data), encoding='utf-8')
         with self.assertRaisesRegex(PipelineStateError, 'Manifest group text'):
-            restore_groups(document_for(doc.step2_confirmed_output, self.root), self.settings, doc.job_title, 1)
+                restore_groups(document_for(doc.require_grouping_input(), self.root), self.settings, doc.job_title, 1)
         manifest_path.write_text('[]', encoding='utf-8')
         with self.assertRaisesRegex(PipelineStateError, 'Manifest must describe'):
             delete_group(doc, groups[0].group_id)
@@ -345,7 +365,7 @@ class ChapterGroupTests(unittest.TestCase):
         self.assertIn('Foreword', speech)
         self.assertIn('Chương 1', speech)
         self.assertNotIn('<p>', speech)
-        self.assertNotIn('&', speech)
+        self.assertIn('a & b', speech)  # Safe TTS profile preserves semantic symbols.
         self.assertEqual(before, [Path(g.txt_path).read_bytes() for g in groups])
         self.assertEqual(plans[0][0], prepare_tts(doc, groups[0].group_id, self.settings)[0])
 
@@ -364,6 +384,8 @@ class ChapterGroupTests(unittest.TestCase):
         self.assertEqual(prepare_tts(doc, group.group_id, self.settings)[1][0].text, 'Fixed speech.')
         self.assertEqual(Path(group.txt_path).read_bytes(), original)
         self.settings.max_chunk_chars = 1000
+        self.assertEqual(prepare_tts(doc, group.group_id, self.settings)[1][0].text, 'Fixed speech.')
+        self.settings.tts_preprocessing = {'sentence_per_line': True}
         self.assertNotEqual(prepare_tts(doc, group.group_id, self.settings)[1][0].text, 'Fixed speech.')
 
     def test_group_media_isolation_and_video_invalidation(self):
@@ -383,7 +405,19 @@ class ChapterGroupTests(unittest.TestCase):
             doc.require_step4_outputs(groups[1].group_id)
         Path(media.video_path).write_bytes(b'video')
         result = VideoRenderResult(media.video_path, 3, 5, 'libx264', 'CPU', 10, 'copy')
+        with self.assertRaisesRegex(PipelineStateError, 'partial'):
+            record_video(doc, g.group_id, result)
+        from tests.support import create_narration_fixture
+        from media.groups import record_tts_provenance
+        _, chunks = prepare_tts(doc, g.group_id, self.settings)
+        processor = create_narration_fixture(g.output_dir, chunks, media.audiobook_path)
+        record_media(g, "audiobook", media.audiobook_path)
+        record_tts_provenance(g, processor)
+        g.state['tts_status'] = 'Completed'
         record_video(doc, g.group_id, result)
+        self.assertEqual(doc.require_step5_outputs(g.group_id).video_path, media.video_path)
+        from media.groups import load_job_state
+        g.state = load_job_state(g)
         self.assertEqual(doc.require_step5_outputs(g.group_id).video_path, media.video_path)
         record_media(g, 'thumbnail', media.thumbnail_path)
         with self.assertRaises(PipelineStateError):

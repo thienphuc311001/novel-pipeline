@@ -1,3 +1,5 @@
+"""Direct Step 2 grouping UI regression tests."""
+
 from __future__ import annotations
 
 import os
@@ -10,9 +12,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from config.settings import Settings
-from pipeline.document import StageKey
-from tests.support import create_dictionary_fixture
-from ui.main_window import MainWindow
+from media.groups import write_groups
+from pipeline.document import StageKey, PipelineDocument
+from ui.grouped_pipeline import GroupBatchPanel
+from ui.main_window import MainWindow, _FailedChunksDialog
+from ui.youtube_tab import YouTubeTab
 
 
 class Step2UiTests(unittest.TestCase):
@@ -20,77 +24,94 @@ class Step2UiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.dictionary = create_dictionary_fixture(Path(self.temp.name))
+    def make_window(self, text: str) -> tuple[MainWindow, tempfile.TemporaryDirectory]:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(output_dir=temporary.name)
+        window = MainWindow(settings)
+        document = PipelineDocument()
+        document.load_original_input(text)
+        document.normalized_text = text
+        document.normalized_revision = 1
+        document.stage(StageKey.NORMALIZE).touch("1 source", "1 chapter")
+        window.document = document
+        window._set_job_editors("Novel", "Chương 1")
+        return window, temporary
 
-    def tearDown(self):
-        self.dictionary.close()
-        self.temp.cleanup()
+    def test_step2_is_grouping_and_preserves_chinese_text(self):
+        window, temporary = self.make_window("Chương 1\n中文 修炼者.")
+        self.addCleanup(window.close)
+        self.addCleanup(temporary.cleanup)
 
-    def make_window(self, text: str) -> MainWindow:
-        window = MainWindow(Settings(output_dir=self.temp.name), master_dictionary=self.dictionary)
-        window.document.load_original_input(text)
-        window.document.normalized_text = text
-        window.document.normalized_revision = 1
-        window.document.stage(StageKey.NORMALIZE).touch("input", "normalized")
-        return window
-
-    def test_confirm_updates_preview_and_unlocks_step3(self):
-        text = "Chương 1\n\nHắn nhìn 大相国寺 rồi đi."
-        window = self.make_window(text)
-
-        self.assertTrue(window._enter_stage2())
-        self.assertEqual(window.stage2_source_label.text(), "Source: Step 1 — Normalized Text")
-        self.assertIn("大相国寺", window.stage2_sentence_text.toPlainText())
-        self.assertEqual(window.stage2_suggestion_combo.count(), 2)
-        self.assertTrue(window.stage2_confirm_btn.isEnabled())
-
-        window._on_review_confirm()
-
-        self.assertIn("Đại Tướng Quốc Tự", window.stage2_input_preview.toPlainText())
+        self.assertEqual(window.tabs.count(), 5)
         self.assertEqual(
-            window.document.step2_confirmed_output,
-            "Chương 1\n\nHắn nhìn Đại Tướng Quốc Tự rồi đi.",
+            [window.tabs.tabText(i) for i in range(window.tabs.count())],
+            [
+                "1️⃣ Input & Normalize",
+                "2️⃣ Detect Chapters & Group",
+                "3️⃣ Thumbnail & Audiobook",
+                "4️⃣ Create Video",
+                "5️⃣ YouTube Upload",
+            ],
         )
-        self.assertTrue(window.stage2_continue_btn.isEnabled())
-        window._on_clean_chunk()
-        self.assertTrue(window.document.chunks)
+        self.assertNotIn("Chinese", " ".join(window.tabs.tabText(i) for i in range(window.tabs.count())))
 
-    def test_multiple_dictionary_values_require_explicit_selection(self):
-        window = self.make_window("Chương 1\n\nHắn 阻挡不了 việc đó.")
-        window._enter_stage2()
-
-        self.assertGreater(window.stage2_suggestion_combo.count(), 2)
-        self.assertFalse(window.stage2_confirm_btn.isEnabled())
-
-        window.stage2_suggestion_combo.setCurrentIndex(1)
-        self.assertTrue(window.stage2_confirm_btn.isEnabled())
-        window._on_review_confirm()
-        self.assertIsNotNone(window.document.step2_confirmed_output)
-
-    def test_skip_remains_unresolved_and_direct_step3_navigation_is_blocked(self):
-        window = self.make_window("Chương 1\n\nHắn nhìn 大相国寺.")
-        errors = []
-        window._error = errors.append
-        window._enter_stage2()
-        window._on_review_skip()
-
-        self.assertIn("Skipped", window.stage2_fragment_combo.currentText())
-        self.assertFalse(window.stage2_continue_btn.isEnabled())
-        window.tabs.setCurrentIndex(2)
+        window._continue_to_stage2()
         self.assertEqual(window.tabs.currentIndex(), 1)
-        self.assertTrue(errors)
+        self.assertEqual(window.document.require_grouping_input(), "Chương 1\n中文 修炼者.")
+        self.assertIn("Effective output root:", window.stage3_output.toPlainText())
+        self.assertIn("Job folder:", window.stage3_output.toPlainText())
+        window.stage3_create_groups_btn.click()
 
-    def test_missing_master_file_shows_error_without_small_dictionary_fallback(self):
-        (self.dictionary.dictionary_dir / "Names.txt").unlink()
-        window = self.make_window("Chương 1\n\nHắn nhìn 大相国寺.")
+        group_text = Path(window.document.chapter_groups[0].txt_path).read_text(encoding="utf-8")
+        self.assertIn("中文 修炼者", group_text)
 
-        self.assertTrue(window._enter_stage2())
-        self.assertIn("Master dictionary error", window.stage2_dictionary_label.text())
-        self.assertEqual(window.stage2_suggestion_combo.count(), 1)
-        self.assertIn("No suggestion found", window.stage2_suggestion_message.text())
-        self.assertFalse(window.stage2_confirm_btn.isEnabled())
+    def test_copy_all_copies_complete_step2_output(self):
+        window, temporary = self.make_window("Chương 1\nNội dung.")
+        self.addCleanup(window.close)
+        self.addCleanup(temporary.cleanup)
+
+        expected = "first line\nsecond line"
+        window.stage3_output.setPlainText(expected)
+        window.stage3_output.copy_btn.click()
+        self.assertEqual(self.app.clipboard().text(), expected)
+
+    def test_copy_all_covers_diagnostics_group_panel_dialog_and_youtube(self):
+        window, temporary = self.make_window("Chương 1\nNội dung.")
+        self.addCleanup(window.close)
+        self.addCleanup(temporary.cleanup)
+
+        diagnostics = "warning\nsecond diagnostic line"
+        window.status_text.setPlainText(diagnostics)
+        window.status_text.copy_btn.click()
+        self.assertEqual(self.app.clipboard().text(), diagnostics)
+
+        document = window.document
+        write_groups(document, window.settings, "Novel", 1)
+        panel = GroupBatchPanel(lambda: document, window.settings)
+        self.addCleanup(panel.close)
+        panel.refresh()
+        group_details = "group details\nwith line breaks"
+        panel.details.setPlainText(group_details)
+        panel.details.copy_btn.click()
+        self.assertEqual(self.app.clipboard().text(), group_details)
+
+        dialog = _FailedChunksDialog([{
+            "chunk_number": 1,
+            "failed_part": "whole",
+            "attempts": 1,
+            "error_type": "Error",
+            "error_message": "failure",
+            "original_text": "failed output\nline 2",
+        }], allow_merge=False)
+        self.addCleanup(dialog.close)
+        dialog.failure_text.copy_btn.click()
+        self.assertEqual(self.app.clipboard().text(), "ORIGINAL CHUNK TEXT:\nfailed output\nline 2")
+
+        youtube = YouTubeTab(lambda: document, window.settings)
+        self.addCleanup(youtube.close)
+        youtube.result.setPlainText("upload result\nvideo id")
+        youtube.result_copy_btn.click()
+        self.assertEqual(self.app.clipboard().text(), "upload result\nvideo id")
 
 
 if __name__ == "__main__":

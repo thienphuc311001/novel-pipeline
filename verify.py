@@ -11,10 +11,8 @@ def test_imports():
         from config.settings import Settings
         from pipeline.document import PipelineDocument
         from chapters import chinese_to_int, normalize_chapters, build_patterns, NormalizeOptions
-        from chinese import extract_located_segments, group_segments, get_dictionary
         from chunking import split_chapters
         from filtering import parse_ranges, filter_chunks_by_ranges
-        from translation import TranslationStore
         print("✓ All imports successful")
         return True
     except Exception as e:
@@ -70,28 +68,6 @@ Chương 3: Chạy trốnNàng vội vàng bỏ đi.
     
     return len(chapters) == 3
 
-def test_phrase_replacement():
-    """Test longest-first phrase replacement."""
-    print("\nTesting phrase replacement...")
-    from chinese.replacer import replace_phrases
-    
-    text = "他在修炼者之中修炼"
-    translations = {
-        "修炼": "tu luyện",
-        "修炼者": "tu luyện giả"
-    }
-    
-    result = replace_phrases(text, translations)
-    expected = "他在tu luyện giả之中tu luyện"
-    
-    status = "✓" if result.text == expected else "✗"
-    print(f"  {status} Phrase replacement")
-    print(f"    Input:  {text}")
-    print(f"    Output: {result.text}")
-    print(f"    Replacements: {result.total_replacements}")
-    
-    return result.text == expected
-
 def test_chunking():
     """Test sentence-aware chunking."""
     print("\nTesting chunking...")
@@ -110,21 +86,6 @@ def test_chunking():
     
     return True
 
-def test_dictionary():
-    """Test offline dictionary."""
-    print("\nTesting dictionary...")
-    from chinese.dictionary import get_dictionary
-    
-    dictionary = get_dictionary()
-    print(f"  ✓ Loaded dictionary: {dictionary.phrase_count} phrases, {dictionary.reading_count} characters")
-    
-    # Test lookup
-    entry = dictionary.lookup_phrase("修炼")
-    if entry:
-        print(f"    - 修炼 → {entry.translation}")
-    
-    return dictionary.phrase_count > 0
-
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -135,9 +96,7 @@ def main():
         test_imports,
         test_chinese_numerals,
         test_chapter_detection,
-        test_phrase_replacement,
         test_chunking,
-        test_dictionary,
     ]
     
     results = []

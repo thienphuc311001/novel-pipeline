@@ -8,12 +8,14 @@ desktop UI owns the asynchronous QProcess used for a full render.
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
 import shutil
 import subprocess
 import tempfile
+from fractions import Fraction
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
@@ -87,6 +89,7 @@ class VideoRenderResult:
     render_speed: float
     audio_mode: str
     attempt_errors: List[str] = field(default_factory=list)
+    source: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -365,7 +368,11 @@ def detect_video_capabilities(
         if completed is None:
             candidate.error = "Test encode could not be started or timed out."
         elif completed.returncode == 0:
-            candidate.verified = True
+            try:
+                verify_vfr_encoder(ffmpeg, ffprobe, candidate, runner)
+                candidate.verified = True
+            except VideoValidationError as error:
+                candidate.error = str(error)
         else:
             candidate.error = (completed.stderr or completed.stdout or "Test encode failed.").strip()
         capabilities.candidates.append(candidate)
@@ -381,7 +388,8 @@ def probe_audio(path: Path, ffprobe_path: str, runner: CommandRunner = _default_
         raise VideoValidationError(f"Audiobook is missing or empty: {path}")
     command = [
         ffprobe_path, "-v", "error", "-select_streams", "a:0",
-        "-show_entries", "stream=codec_name,sample_rate,channels,duration:format=duration",
+        "-show_entries", "stream=codec_name,sample_rate,channels,duration,time_base:format=duration:"
+        "packet=duration,duration_time:packet_side_data=skip_samples,discard_padding",
         "-of", "json", str(path),
     ]
     completed = runner(command, 20.0)
@@ -394,11 +402,28 @@ def probe_audio(path: Path, ffprobe_path: str, runner: CommandRunner = _default_
         codec = str(stream.get("codec_name") or "")
         sample_rate = int(stream.get("sample_rate") or 0)
         channels = int(stream.get("channels") or 0)
-    except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError) as error:
+        packets = data.get("packets") or []
+        if codec == "mp3" and packets and sample_rate > 0:
+            # Older FFprobe versions include encoder padding in stream.duration.
+            # Packet durations minus explicit skip/discard samples measure the
+            # playable file duration consistently, without estimating from text.
+            if stream.get("time_base") and all("duration" in p for p in packets):
+                packet_duration = Fraction(stream["time_base"]) * sum(int(p["duration"]) for p in packets)
+            else:
+                packet_duration = math.fsum(float(p["duration_time"]) for p in packets)
+            padding = sum(int(s.get("skip_samples") or 0) + int(s.get("discard_padding") or 0)
+                          for p in packets for s in p.get("side_data_list", []))
+            duration = float(packet_duration - Fraction(padding, sample_rate))
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, ZeroDivisionError, OverflowError) as error:
         raise VideoValidationError("FFprobe returned invalid audiobook metadata.") from error
-    if duration <= 0 or not codec or channels <= 0:
+    if not math.isfinite(duration) or duration <= 0 or not codec or channels <= 0 or sample_rate <= 0:
         raise VideoValidationError("Audiobook has no valid audio stream or duration.")
     return AudioProbe(duration, codec, sample_rate, channels)
+
+
+def audio_rounding_tolerance(probe):
+    samples = (576 if probe.sample_rate <= 24000 else 1152) if probe.codec == 'mp3' else 1024
+    return max(0.002, 2 * samples / probe.sample_rate)
 
 
 def mp3_copy_is_safe(
@@ -436,7 +461,7 @@ def mp3_copy_is_safe(
 def build_video_command(
     ffmpeg_path: str,
     candidate: EncoderCandidate,
-    thumbnail_path: Path,
+    timeline_path: Path,
     audiobook_path: Path,
     output_path: Path,
     *,
@@ -446,17 +471,18 @@ def build_video_command(
     if candidate.name == "h264_vaapi" and candidate.device:
         command += ["-vaapi_device", candidate.device]
     command += [
-        "-progress", "pipe:1", "-loop", "1", "-framerate", "1", "-i", str(thumbnail_path),
+        "-progress", "pipe:1", "-f", "concat", "-safe", "0", "-i", str(timeline_path),
         "-i", str(audiobook_path), "-map", "0:v:0", "-map", "1:a:0",
         "-vf", encoder_filter(candidate), *encoder_options(candidate),
-        "-r", "1", "-g", "60", "-fps_mode", "cfr",
+        "-g", "1", "-bf", "0", "-fps_mode", "vfr",
+        "-enc_time_base", "1:1000", "-video_track_timescale", "1000000",
     ]
     if audio_copy:
         command += ["-c:a", "copy"]
     else:
         command += ["-c:a", "aac", "-b:a", "192k"]
     command += [
-        "-shortest", "-map_metadata", "-1", "-movflags", "+faststart",
+        "-map_metadata", "-1", "-movflags", "+faststart",
         "-f", "mp4", str(output_path),
     ]
     return command
@@ -495,7 +521,7 @@ def parse_progress_line(state: Dict[str, Any], line: str, duration: float) -> Op
 def probe_video(path: Path, ffprobe_path: str, runner: CommandRunner = _default_runner) -> Dict[str, Any]:
     command = [
         ffprobe_path, "-v", "error", "-show_entries",
-        "stream=codec_type,codec_name,width,height:format=duration", "-of", "json", str(path),
+        "stream=codec_type,codec_name,width,height,sample_rate,duration:format=duration", "-of", "json", str(path),
     ]
     completed = runner(command, 30.0)
     if completed.returncode != 0:
@@ -527,13 +553,17 @@ def validate_rendered_video(
         raise VideoValidationError("Output does not contain an audio stream.")
     try:
         duration = float(data.get("format", {}).get("duration") or 0)
+        audio_duration = float(audio.get("duration") or 0)
     except (TypeError, ValueError):
-        duration = 0.0
-    tolerance = max(2.0, expected_duration * 0.01)
-    if duration <= 0 or abs(duration - expected_duration) > tolerance:
+        duration = audio_duration = 0.0
+    sample_rate = int(audio.get("sample_rate") or 24000)
+    tolerance = audio_rounding_tolerance(AudioProbe(expected_duration, str(audio.get("codec_name") or "aac"), sample_rate, 1))
+    if not math.isfinite(duration) or duration <= 0 or abs(duration - expected_duration) > tolerance:
         raise VideoValidationError(
             f"Output duration {duration:.2f}s does not match audiobook {expected_duration:.2f}s."
         )
+    if not math.isfinite(audio_duration) or abs(audio_duration - expected_duration) > tolerance:
+        raise VideoValidationError("Output audio duration does not match the complete audiobook.")
     return duration
 
 
@@ -542,3 +572,23 @@ def format_duration(seconds: float) -> str:
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def verify_vfr_encoder(ffmpeg_path, ffprobe_path, candidate, runner=_default_runner):
+    """A single-frame smoke test cannot establish sparse timestamp support."""
+    from types import SimpleNamespace
+    from media.video_pages import validate_timeline_timestamps
+    with tempfile.TemporaryDirectory(prefix="video_vfr_probe_") as directory:
+        output = Path(directory) / "probe.mp4"
+        command = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error"]
+        if candidate.name == "h264_vaapi" and candidate.device:
+            command += ["-vaapi_device", candidate.device]
+        command += ["-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=1000:d=0.003",
+                    "-an", "-vf", encoder_filter(candidate) + ",setpts='if(eq(N,0),0,if(eq(N,1),137,508))'",
+                    *encoder_options(candidate), "-g", "1", "-bf", "0", "-fps_mode", "vfr",
+                    "-enc_time_base", "1:1000", "-video_track_timescale", "1000000", str(output)]
+        completed = _run_optional(command, runner, timeout=15.0)
+        if completed is None or completed.returncode:
+            raise VideoValidationError("VFR test encode failed: " + ((completed.stderr or "") if completed else "timeout"))
+        timeline = SimpleNamespace(pages=[SimpleNamespace(start=0.0), SimpleNamespace(start=0.137)], duration=0.509)
+        validate_timeline_timestamps(output, timeline, ffprobe_path, runner)

@@ -34,16 +34,11 @@ from config.settings import Settings
 class SettingsDialog(QDialog):
     """A complete editor for user-facing :class:`Settings` fields."""
 
-    # Retained in Settings only for compatibility with existing config files.
-    # Step 2 now has a fixed sentence-review mode and a fixed master source.
     HIDDEN_FIELDS = {
         "window_geometry",
-        "chinese_extraction_mode",
-        "chinese_context_chars",
-        "dictionary_enabled",
-        "dictionary_paths",
         "tts_engine",
         "tts_rate",
+        "tts_fallback_retry_count",
         "title_history",
     }
 
@@ -131,23 +126,6 @@ class SettingsDialog(QDialog):
         self._json(form, "custom_rules", "Custom rules (JSON list)", height=160)
         self._bool(form, "drop_empty_lines", "Remove empty lines")
 
-        form = self._tab("Chinese")
-        fixed_dictionary = QLabel(
-            "Chinese Residue Review uses the seven fixed files bundled in the "
-            "application dictionary folder. The source cannot be disabled, uploaded, "
-            "or replaced from Settings."
-        )
-        fixed_dictionary.setWordWrap(True)
-        form.addRow("Master dictionary", fixed_dictionary)
-
-        form = self._tab("Translation")
-        self._bool(form, "ai_enabled", "Enable optional AI translation")
-        self._text(form, "gemini_model", "Gemini model")
-        self._text(form, "gemini_api_key", "Gemini API key", password=True)
-        self._int(form, "ai_batch_size", "AI batch size", 1, 1000)
-        self._text(form, "ai_target_language", "Target language")
-        self._int(form, "ai_timeout", "Request timeout (seconds)", 1, 3600)
-
         form = self._tab("Chunk & Export")
         self._int(form, "min_chunk_chars", "Minimum chunk characters", 50, 20000)
         self._int(form, "max_chunk_chars", "Maximum chunk characters", 50, 20000)
@@ -160,11 +138,12 @@ class SettingsDialog(QDialog):
 
         form = self._tab("TTS & UI")
         form.addRow("TTS engine", QLabel("Edge-TTS (online)"))
+        self._tts_preprocessing(form)
         self._text(form, "tts_voice", "TTS voice")
         self._int(form, "tts_max_concurrency", "Maximum concurrent requests", 1, 100)
         self._int(form, "tts_timeout_seconds", "Chunk timeout (seconds)", 10, 600)
         self._int(form, "tts_retry_count", "Attempts per chunk", 1, 10)
-        self._int(form, "tts_fallback_retry_count", "Attempts per fallback part", 1, 10)
+        form.addRow("Step 3 chunk target", QLabel("700 characters · full-chunk retries"))
         self._int(form, "thumbnail_bottom_height", "Thumbnail black band (pixels)", 100, 300)
         self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
         self._int(form, "font_size", "Application font size", 7, 32)
@@ -291,6 +270,40 @@ class SettingsDialog(QDialog):
         selected = QFileDialog.getExistingDirectory(self, label, str(current))
         if selected:
             editor.setText(selected)
+
+    def _tts_preprocessing(self, form):
+        from dataclasses import asdict
+        from cleaning.tts_text_preprocessor import TTSPreprocessConfig
+        container = QWidget()
+        layout = QFormLayout(container)
+        enabled, emoji, sentences = QCheckBox(), QCheckBox(), QCheckBox()
+        url, email = QComboBox(), QComboBox()
+        for combo in (url, email):
+            for policy in ("remove", "keep", "replace"):
+                combo.addItem(policy, policy)
+        advanced = QTextEdit()
+        advanced.setMaximumHeight(110)
+        for label, widget in (("Enable text preprocessing", enabled), ("URL policy", url),
+                              ("Email policy", email), ("Remove decorative emoji", emoji),
+                              ("One sentence per line", sentences), ("Advanced options (JSON)", advanced)):
+            layout.addRow(label, widget)
+        basic = {"enabled", "remove_emoji", "sentence_per_line", "url_policy", "email_policy"}
+        def write(values):
+            config = TTSPreprocessConfig(**values)
+            enabled.setChecked(config.enabled)
+            emoji.setChecked(config.remove_emoji)
+            sentences.setChecked(config.sentence_per_line)
+            url.setCurrentIndex(url.findData(config.url_policy))
+            email.setCurrentIndex(email.findData(config.email_policy))
+            advanced.setPlainText(json.dumps({k: v for k, v in asdict(config).items() if k not in basic}, ensure_ascii=False, indent=2))
+        def read():
+            values = json.loads(advanced.toPlainText())
+            if not isinstance(values, dict):
+                raise ValueError("Preprocessing options must be a JSON object")
+            values.update(enabled=enabled.isChecked(), remove_emoji=emoji.isChecked(),
+                          sentence_per_line=sentences.isChecked(), url_policy=url.currentData(), email_policy=email.currentData())
+            return asdict(TTSPreprocessConfig(**values))
+        self._register(form, "tts_preprocessing", "TTS text preparation", container, read, write)
 
     # ---------------------------------------------------------- validation
     def _collect(self) -> Settings:

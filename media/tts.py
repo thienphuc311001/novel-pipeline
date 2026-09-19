@@ -20,7 +20,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-from media.artifacts import atomic_write_json
+from media.artifacts import atomic_write_json, sha256_file
 
 
 class TtsDependencyError(RuntimeError):
@@ -90,19 +90,7 @@ def _chunk_path(audio_dir: Path, order: int) -> Path:
 def _safe_concat_line(path: Path) -> str:
     # FFmpeg concat demuxer uses a single-quoted path. Escape a literal quote
     # without invoking a shell.
-    return "file '" + path.resolve().as_posix().replace("'", r"'\\''") + "'\n"
-
-
-def _split_near_word(text: str) -> tuple[str, str]:
-    text = text or ""
-    midpoint = len(text) // 2
-    candidates = [index for index, char in enumerate(text) if char.isspace()]
-    if candidates:
-        cut = min(candidates, key=lambda index: abs(index - midpoint))
-        if 0 < cut < len(text) - 1:
-            return text[:cut].strip(), text[cut:].strip()
-    cut = max(1, midpoint)
-    return text[:cut].strip(), text[cut:].strip()
+    return "file '" + path.resolve().as_posix().replace("'", "'\\''") + "'\n"
 
 
 class TtsProcessor:
@@ -129,7 +117,7 @@ class TtsProcessor:
         self.max_concurrency = max(1, int(max_concurrency))
         self.timeout_seconds = max(1, int(timeout_seconds))
         self.retry_count = max(1, int(retry_count))
-        self.fallback_retry_count = max(1, int(fallback_retry_count))
+        # Accepted for settings/API compatibility; only full-chunk retries are used.
         self.client_factory = client_factory
         self.progress = progress or (lambda _done, _total, _message: None)
         self.cancel_event = cancel_event or Event()
@@ -171,24 +159,35 @@ class TtsProcessor:
             data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeError):
             data = {}
-        if data.get("schema_version") != 1 or data.get("settings") != self._settings_fingerprint():
+        if not isinstance(data, dict) or data.get("schema_version") != 2 or data.get("settings") != self._settings_fingerprint():
+            data = {}
+        if not isinstance(data.get("chunks", {}), dict) or not isinstance(data.get("failures", []), list):
             data = {}
         self._manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "settings": self._settings_fingerprint(),
             "chunks": dict(data.get("chunks") or {}),
             "failures": list(data.get("failures") or []),
         }
 
     def _is_resumable(self, chunk: TtsChunk) -> bool:
-        record = self._manifest["chunks"].get(str(chunk.order), {})
-        path = _chunk_path(self.audio_dir, chunk.order)
-        return (
-            record.get("text_sha256") == chunk.text_sha256
-            and record.get("voice") == self.voice
-            and path.is_file()
-            and path.stat().st_size > 0
-        )
+        try:
+            record = self._manifest["chunks"].get(str(chunk.order), {})
+            path = _chunk_path(self.audio_dir, chunk.order)
+            return (
+                record.get("order") == chunk.order
+                and record.get("file") == path.name
+                and record.get("text_sha256") == chunk.text_sha256
+                and record.get("text") == chunk.text
+                and record.get("request_mode") == "full_chunk"
+                and record.get("chapter") == chunk.chapter
+                and record.get("voice") == self.voice
+                and path.is_file()
+                and path.stat().st_size > 0
+                and record.get("mp3_sha256") == sha256_file(path)
+            )
+        except (OSError, AttributeError, TypeError):
+            return False
 
     async def _write_manifest(self) -> None:
         assert self._manifest_lock is not None
@@ -259,7 +258,9 @@ class TtsProcessor:
             process = subprocess.Popen(
                 [
                     str(self.ffmpeg_path), "-y", "-f", "concat", "-safe", "0",
-                    "-i", list_name, "-c", "copy", str(temporary),
+                    # Decode each input's gapless metadata and remove concat timestamp gaps.
+                    "-i", list_name, "-af", "asetpts=N/SR/TB",
+                    "-c:a", "libmp3lame", "-b:a", "128k", str(temporary),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -289,45 +290,6 @@ class TtsProcessor:
             Path(list_name).unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
 
-    async def _fallback(self, chunk: TtsChunk, original: Exception, attempts: int) -> Optional[TtsFailure]:
-        first, second = _split_near_word(chunk.text)
-        if not first or not second:
-            return TtsFailure(
-                chunk.order, chunk.text, "whole", type(original).__name__, str(original), attempts,
-                failed_part_text=chunk.text,
-            )
-        part1 = self.audio_dir / f".chunk_{chunk.order:05d}_part1.mp3"
-        part2 = self.audio_dir / f".chunk_{chunk.order:05d}_part2.mp3"
-        ok1, error1, attempts1 = await self._try_save(first, part1, self.fallback_retry_count)
-        if not ok1:
-            return TtsFailure(
-                chunk.order, chunk.text, "part1", type(error1).__name__, str(error1), attempts1,
-                failed_part_text=first,
-                main_error_type=type(original).__name__,
-                main_error_message=str(original),
-            )
-        ok2, error2, attempts2 = await self._try_save(second, part2, self.fallback_retry_count)
-        if not ok2:
-            return TtsFailure(
-                chunk.order, chunk.text, "part2", type(error2).__name__, str(error2), attempts2,
-                failed_part_text=second,
-                main_error_type=type(original).__name__,
-                main_error_message=str(original),
-            )
-        try:
-            await asyncio.to_thread(self._ffmpeg_concat, [part1, part2], _chunk_path(self.audio_dir, chunk.order))
-        except Exception as error:
-            return TtsFailure(
-                chunk.order, chunk.text, "merge_parts", type(error).__name__, str(error), 1,
-                failed_part_text=f"{first}\n\n{second}",
-                main_error_type=type(original).__name__,
-                main_error_message=str(original),
-            )
-        finally:
-            part1.unlink(missing_ok=True)
-            part2.unlink(missing_ok=True)
-        return None
-
     async def _process_chunk(self, chunk: TtsChunk, semaphore: asyncio.Semaphore) -> None:
         async with semaphore:
             if self.cancel_event.is_set():
@@ -346,7 +308,8 @@ class TtsProcessor:
             ok, error, attempts = await self._try_save(chunk.text, output, self.retry_count)
             failure: Optional[TtsFailure] = None
             if not ok and error is not None and not self.cancel_event.is_set():
-                failure = await self._fallback(chunk, error, attempts)
+                failure = TtsFailure(chunk.order, chunk.text, "whole", type(error).__name__, str(error),
+                                     attempts, failed_part_text=chunk.text)
             if failure is not None:
                 self._result.failures.append(failure)
                 self._manifest["failures"] = [asdict(item) for item in self._result.failures]
@@ -357,7 +320,12 @@ class TtsProcessor:
             if self.cancel_event.is_set():
                 return
             self._manifest["chunks"][str(chunk.order)] = {
+                "order": chunk.order,
+                "chapter": chunk.chapter,
+                "text": chunk.text,
                 "text_sha256": chunk.text_sha256,
+                "request_mode": "full_chunk",
+                "mp3_sha256": sha256_file(output),
                 "voice": self.voice,
                 "file": output.name,
             }
@@ -372,6 +340,8 @@ class TtsProcessor:
         # Keep resumable MP3 records, but make failure diagnostics describe
         # this run rather than an earlier attempt.
         self._manifest["failures"] = []
+        self._manifest.pop("merge", None)
+        self._manifest["ordered_chunks"] = [asdict(c) for c in self.chunks]
         await self._write_manifest()
         self.progress(0, len(self.chunks), f"Bắt đầu xử lý {len(self.chunks)} đoạn")
         semaphore = asyncio.Semaphore(self.max_concurrency)
@@ -380,6 +350,11 @@ class TtsProcessor:
         return self._result
 
     def run(self) -> TtsResult:
+        from cleaning.tts_boundaries import meaningful_text
+        if (not self.chunks or any(not meaningful_text(c.text) for c in self.chunks)
+                or [c.order for c in self.chunks] != list(range(1, len(self.chunks) + 1))
+                or any(c.text_sha256 != sha256(c.text.encode("utf-8")).hexdigest() for c in self.chunks)):
+            raise TtsConfigurationError("Không có nội dung đọc được trong TTS chunks.")
         self.validate_dependencies()
         return asyncio.run(self._run_async())
 
@@ -389,9 +364,26 @@ class TtsProcessor:
         if result.failures and not skip_failed:
             raise RuntimeError("Còn đoạn lỗi; chọn gộp bỏ qua hoặc hủy.")
         usable = set(result.successful_orders)
+        if not usable.issubset({c.order for c in self.chunks}):
+            raise RuntimeError("Unknown chunk order in merge result.")
         if not usable:
             raise RuntimeError("Không có đoạn MP3 thành công để gộp.")
+        if not skip_failed and usable != {c.order for c in self.chunks}:
+            raise RuntimeError("Missing successful chunk MP3s; resume Step 3 before merging.")
         paths = [_chunk_path(self.audio_dir, chunk.order) for chunk in self.chunks if chunk.order in usable]
+        if not self._manifest:
+            self._load_manifest()
+        if any(not self._is_resumable(c) for c in self.chunks if c.order in usable):
+            raise RuntimeError("Chunk MP3 provenance changed; resume Step 3 before merging.")
         self._ffmpeg_concat(paths, Path(output_path))
+        self._manifest["ordered_chunks"] = [asdict(c) for c in self.chunks]
+        self._manifest["merge"] = {
+            "orders": [c.order for c in self.chunks if c.order in usable],
+            "chunks": [dict(self._manifest["chunks"][str(c.order)]) for c in self.chunks if c.order in usable],
+            "complete": len(usable) == len(self.chunks),
+            "file": str(Path(output_path).resolve()),
+            "mp3_sha256": sha256_file(Path(output_path)),
+        }
+        atomic_write_json(self.manifest_path, self._manifest)
         result.audiobook_path = str(output_path)
         return Path(output_path)

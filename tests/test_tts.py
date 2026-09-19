@@ -65,20 +65,20 @@ class TtsTests(unittest.TestCase):
             ).run()
             self.assertEqual(resumed.skipped, [1, 2])
 
-    def test_retry_fallback_and_numeric_merge_order(self):
+    def test_full_chunk_retry_and_numeric_merge_order(self):
         original = "one two three four"
         attempts = {original: 0}
 
         async def selective(text, path):
             attempts[text] = attempts.get(text, 0) + 1
-            if text == original:
+            if text == original and attempts[text] == 1:
                 raise RuntimeError("normal request failed")
             path.write_bytes(text.encode())
 
         with tempfile.TemporaryDirectory() as directory:
             processor = TtsProcessor(
                 [TtsChunk(2, "second"), TtsChunk(1, original)],
-                Path(directory), voice="voice", retry_count=1, fallback_retry_count=1,
+                Path(directory), voice="voice", retry_count=2, fallback_retry_count=1,
                 client_factory=lambda text, _voice: _Client(text, selective), ffmpeg_path="/bin/true",
             )
             seen = []
@@ -91,7 +91,9 @@ class TtsTests(unittest.TestCase):
             processor._ffmpeg_concat = fake_concat  # type: ignore[method-assign]
             result = processor.run()
             self.assertEqual(result.failures, [])
-            self.assertEqual(seen[0], [".chunk_00001_part1.mp3", ".chunk_00001_part2.mp3"])
+            self.assertEqual(seen, [])
+            self.assertEqual(set(attempts), {original, "second"})
+            self.assertEqual(attempts[original], 2)
             final = processor.merge(result, Path(directory) / "final.mp3")
             self.assertEqual(seen[-1], ["chunk_00001.mp3", "chunk_00002.mp3"])
             self.assertTrue(final.is_file())
@@ -137,6 +139,54 @@ class TtsTests(unittest.TestCase):
                 merged,
                 ["chunk_00001.mp3", "chunk_00002.mp3", "chunk_00004.mp3", "chunk_00005.mp3"],
             )
+
+    def test_exact_request_records_resume_migration_and_tampering(self):
+        import json
+        from media.artifacts import atomic_write_json
+        calls = []
+        text = "Đã sửa.\n\nGiữ nguyên đoạn văn và dấu câu!"
+        async def write(value, path):
+            calls.append(value)
+            path.write_bytes(b"mp3:" + value.encode())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def processor():
+                return TtsProcessor([TtsChunk(1, text, 601)], root, voice="voice",
+                                    client_factory=lambda t, v: _Client(t, write), ffmpeg_path="ffmpeg")
+            first = processor()
+            result = first.run()
+            data = json.loads(first.manifest_path.read_text())
+            self.assertEqual(data["ordered_chunks"][0]["text"], calls[0])
+            self.assertEqual(data["chunks"]["1"]["text"], text)
+            self.assertEqual(data["chunks"]["1"]["request_mode"], "full_chunk")
+            first._ffmpeg_concat = lambda inputs, output: Path(output).write_bytes(b"merged")
+            first.merge(result, root / "audiobook.mp3")
+            merged = json.loads(first.manifest_path.read_text())["merge"]
+            self.assertEqual(merged["orders"], [1])
+            self.assertEqual(merged["chunks"][0]["text"], text)
+            self.assertTrue(merged["complete"])
+            self.assertEqual(processor().run().skipped, [1])
+            (root / "chunk_00001.mp3").write_bytes(b"externally changed")
+            self.assertEqual(processor().run().generated, [1])
+            data["schema_version"] = 1
+            atomic_write_json(first.manifest_path, data)
+            self.assertEqual(processor().run().generated, [1])
+            self.assertEqual(calls, [text, text, text])
+
+    def test_failed_full_chunk_never_sends_retry_fragments(self):
+        calls = []
+        text = "Một câu. Một câu khác."
+        async def fail(value, path):
+            calls.append(value)
+            raise RuntimeError("service unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            processor = TtsProcessor([TtsChunk(1, text)], Path(directory), voice="voice", retry_count=1,
+                                    fallback_retry_count=10, client_factory=lambda t, v: _Client(t, fail),
+                                    ffmpeg_path="ffmpeg")
+            result = processor.run()
+            self.assertEqual(calls, [text])
+            self.assertEqual(result.failures[0].failed_part, "whole")
+            self.assertFalse(list(Path(directory).glob("*.mp3")))
 
     def test_merge_rejects_zero_successes_without_calling_ffmpeg(self):
         with tempfile.TemporaryDirectory() as directory:

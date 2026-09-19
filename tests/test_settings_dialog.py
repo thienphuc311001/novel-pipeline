@@ -27,30 +27,44 @@ class SettingsDialogTests(unittest.TestCase):
         expected = set(Settings.__dataclass_fields__) - SettingsDialog.HIDDEN_FIELDS
 
         self.assertEqual(dialog.editable_fields(), expected)
-        self.assertEqual(dialog.tabs.count(), 8)
+        self.assertEqual(dialog.tabs.count(), 6)
+        self.assertNotIn("Chinese", [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())])
+        self.assertNotIn("Translation", [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())])
+
+    def test_legacy_translation_settings_are_ignored_safely(self):
+        settings = Settings.from_dict({
+            "detect_chinese": True,
+            "dictionary_enabled": True,
+            "dictionary_paths": ["old.tsv"],
+            "gemini_api_key": "secret",
+            "ai_enabled": True,
+            "ai_batch_size": 40,
+        })
+        self.assertTrue(settings.detect_chinese)
+        self.assertFalse(hasattr(settings, "dictionary_enabled"))
+        self.assertFalse(hasattr(settings, "gemini_api_key"))
 
     def test_collects_changed_values(self):
         dialog = SettingsDialog(Settings())
         zero_pad = dialog.controls["zero_pad"]
         mode = dialog.controls["quote_mode"]
         symbol_map = dialog.controls["symbol_map"]
-        api_key = dialog.controls["gemini_api_key"]
+        voice = dialog.controls["tts_voice"]
         self.assertIsInstance(zero_pad, QSpinBox)
         self.assertIsInstance(mode, QComboBox)
         self.assertIsInstance(symbol_map, QTextEdit)
-        self.assertIsInstance(api_key, QLineEdit)
+        self.assertIsInstance(voice, QLineEdit)
 
         zero_pad.setValue(4)
         mode.setCurrentIndex(mode.findData("keep"))
         symbol_map.setPlainText('{"%": " phần trăm "}')
-        api_key.setText("secret")
+        voice.setText("vi-VN-HoaiMyNeural")
         updated = dialog._collect()
 
         self.assertEqual(updated.zero_pad, 4)
         self.assertEqual(updated.quote_mode, "keep")
         self.assertEqual(updated.symbol_map, {"%": " phần trăm "})
-        self.assertEqual(updated.gemini_api_key, "secret")
-        self.assertEqual(api_key.echoMode(), QLineEdit.EchoMode.Password)
+        self.assertEqual(updated.tts_voice, "vi-VN-HoaiMyNeural")
 
     def test_blank_saved_voice_uses_default_and_dialog_rejects_empty_edit(self):
         self.assertEqual(Settings.from_dict({"tts_voice": ""}).tts_voice, DEFAULT_TTS_VOICE)
@@ -133,13 +147,11 @@ class SettingsDialogTests(unittest.TestCase):
         window.document.set_normalized_output(chapters)
         window.document.diagnostics.extend(diagnostics)
         window.document.stage(StageKey.NORMALIZE).touch("input", "normalized")
-        window._enter_stage2()
-
         window._on_clean_chunk()
         chunk_text = "\n".join(chunk.text for chunk in window.document.chunks)
 
         self.assertNotIn("<p>", chunk_text)
-        self.assertIn("phần trăm", chunk_text)
+        self.assertIn("10%", chunk_text)  # TTS profile disables global symbol expansion.
 
 
 if __name__ == "__main__":
