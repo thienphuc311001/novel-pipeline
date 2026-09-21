@@ -27,15 +27,17 @@ class PageStyle:
     padding: int = 72
     blur: int = 42
     brightness: float = 0.68
-    title_size: int = 64
+    title_size: int = 54
     chapter_size: int = 32
-    body_size: int = 40
-    # Temporary unblock (was 28): long Step 3 chunks contain many paragraph breaks,
-    # so 26px still stalled 162 of 1706 chunks of the current job and the longest
-    # one needs 19px. The search runs from body_size downwards, so every page that
-    # already fit keeps its size; only the overflowing pages shrink.
-    min_body_size: int = 19
-    line_spacing: float = 1.3
+    body_size: int = 30
+    # The body font searches from body_size downwards, so every page that fits keeps
+    # the largest size; only overflowing pages shrink, and never below this floor.
+    min_body_size: int = 26
+    # Blank lines between paragraphs advance half a step: enough for the eye to read
+    # the break without spending a whole line on it, which keeps paragraph-heavy
+    # chunks inside the readable band instead of failing Step 4.
+    paragraph_gap: float = 0.5
+    line_spacing: float = 1.15
 
 
 DEFAULT_STYLE = PageStyle()
@@ -186,12 +188,18 @@ def line_height(font, size, spacing):
     return max(ascent + descent, math.ceil(size * spacing))
 
 
-def fit_lines(draw, text, path, maximum, minimum, width, height, spacing):
+def block_height(lines, step, gap=1.0):
+    """Advance of a wrapped block; blank paragraph lines take a fraction of one step."""
+    blank = max(1, round(step * gap))
+    return sum(blank if not line else step for line in lines)
+
+
+def fit_lines(draw, text, path, maximum, minimum, width, height, spacing, gap=1.0):
     for size in range(maximum, minimum - 1, -1):
         font = ImageFont.truetype(str(path), size)
         lines = wrap_lines(draw, text, font, width)
         step = line_height(font, size, spacing)
-        if len(lines) * step <= height:
+        if block_height(lines, step, gap) <= height:
             return font, lines, step
     raise VideoValidationError(f"Text cannot fit at readable minimum {minimum}px; correct the chunk in Step 3")
 
@@ -237,7 +245,8 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     title_font, title_lines, title_h = fit_lines(draw, title, bold, style.title_size, 36, width, 156, 1.12)
     chapter_font, chapter_lines, chapter_h = fit_lines(draw, chapter, regular, style.chapter_size, 24, width, 84, 1.2)
     bounds = []
-    def paint(lines, font, line_height, y, color, centered=False):
+    def paint(lines, font, step, y, color, centered=False, gap=1.0):
+        blank_step = max(1, round(step * gap))
         for line in lines:
             tx = (style.width - draw.textlength(line, font=font)) / 2 if centered else x
             ascent, _ = font.getmetrics()
@@ -247,7 +256,7 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
                     raise VideoValidationError("Text would overflow the content frame")
                 bounds.append(bbox)
             draw.text((tx, y + ascent), line, font=font, fill=color, anchor="ls")
-            y += line_height
+            y += step if line else blank_step
         return y
     # A soft title glow contains no additional visual content.
     glow = Image.new("RGBA", canvas.size)
@@ -262,9 +271,9 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     draw.line((x, y, right - style.padding, y), fill=DIVIDER_COLOR, width=1)
     body_top, body_bottom = y + 30, bottom - 44
     font, lines, line_step = fit_lines(draw, text, regular, style.body_size, style.min_body_size,
-                                       width, body_bottom - body_top, style.line_spacing)
-    body_y = body_top + (body_bottom - body_top - len(lines) * line_step) / 2
-    paint(lines, font, line_step, body_y, BODY_COLOR)
+                                       width, body_bottom - body_top, style.line_spacing, style.paragraph_gap)
+    body_y = body_top + (body_bottom - body_top - block_height(lines, line_step, style.paragraph_gap)) / 2
+    paint(lines, font, line_step, body_y, BODY_COLOR, gap=style.paragraph_gap)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".page_", suffix=".png", dir=output.parent)
