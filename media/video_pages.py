@@ -13,8 +13,9 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from media.artifacts import atomic_write_json, atomic_write_text, sha256_file, sha256_text
 from media.text_layout import (DEFAULT_STYLE, FONT_DIR, LAYOUT_FILL_MIN, LAYOUT_FILL_TARGET, PageStyle,
-                               block_height, fit_body, fit_lines, font_paths, gap_ladder, header_reserve,
-                               justify_block, layout_identity, line_height, page_band, renderer_budget,
+                               block_height, draw_segmented_text, fallback_font_paths, fit_body, fit_lines,
+                               font_paths, gap_ladder, header_reserve, justify_block, layout_identity,
+                               line_height, matching_fallback, measure_length, page_band, renderer_budget,
                                scaled_style, wrap_lines)
 from media.video import VideoValidationError, probe_audio, audio_rounding_tolerance
 
@@ -22,11 +23,13 @@ from media.video import VideoValidationError, probe_audio, audio_rounding_tolera
 # here keeps the existing ``media.video_pages`` API (used by thumbnails and tests)
 # working while both sides measure text through one implementation.
 __all__ = [
-    "DEFAULT_STYLE", "FONT_DIR", "PageStyle", "block_height", "fit_body", "fit_lines", "font_paths",
-    "gap_ladder", "line_height", "wrap_lines", "BODY_COLOR", "CHAPTER_COLOR", "DIVIDER_COLOR",
-    "PANEL_COLOR", "PANEL_OUTLINE", "TITLE_COLOR", "draw_frame", "render_page", "scaled_style",
-    "page_chapter_label", "load_narration", "prepare_video_timeline", "source_fingerprint",
-    "validate_page_layout", "validate_timeline_timestamps", "visual_settings", "VideoPage", "VideoTimeline",
+    "DEFAULT_STYLE", "FONT_DIR", "PageStyle", "block_height", "cover_font", "draw_segmented_text",
+    "fallback_font_paths", "fallback_segments", "fallback_textlength", "fit_body", "fit_lines",
+    "font_paths", "gap_ladder", "line_height", "measure_length", "wrap_lines", "BODY_COLOR",
+    "CHAPTER_COLOR", "DIVIDER_COLOR", "PANEL_COLOR", "PANEL_OUTLINE", "TITLE_COLOR", "draw_frame",
+    "render_page", "scaled_style", "page_chapter_label", "load_narration", "prepare_video_timeline",
+    "source_fingerprint", "validate_page_layout", "validate_timeline_timestamps", "visual_settings",
+    "VideoPage", "VideoTimeline",
 ]
 
 # One palette shared by every rendered surface (video pages and thumbnails).
@@ -46,7 +49,7 @@ def visual_settings(style=DEFAULT_STYLE):
     regular, bold = font_paths()
     settings = asdict(style)
     settings["frame"] = list(style.frame)  # Stable equality after JSON recovery.
-    return {"style": settings, "fonts": {p.name: sha256_file(p) for p in (regular, bold)}}
+    return {"style": settings, "fonts": {p.name: sha256_file(p) for p in (regular, bold, *fallback_font_paths())}}
 
 
 def _identity(value):
@@ -213,28 +216,35 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     canvas = draw_frame(background.convert("RGBA"), style.frame, radius=style.radius)
     draw = ImageDraw.Draw(canvas)
     regular, bold = font_paths()
-    left, top, right, bottom = style.frame
+    left, top, right_frame, bottom = style.frame
     x, y = left + style.padding, top + style.title_top_offset
-    width = right - left - style.padding * 2
+    width = right_frame - left - style.padding * 2
     title_font, title_lines, title_h, _ = fit_lines(draw, title, bold, style.title_size, 36, width,
                                                     style.title_max_height, 1.12)
     chapter_font, chapter_lines, chapter_h, _ = fit_lines(draw, chapter, regular, style.chapter_size, 24, width,
                                                           style.chapter_max_height, 1.2)
     bounds = []
-    def paint(lines, font, step, y, color, centered=False, gap=1.0, origin=None):
+    def paint(lines, font, step, y, color, centered=False, gap=1.0, origin=None, font_path=None, size=None):
         blank_step = max(1, round(step * gap))
         for line in lines:
             if centered:
-                tx = (style.width - draw.textlength(line, font=font)) / 2
+                # Measured with the faces that will draw it, so a CJK bracket keeps
+                # the line optically centred instead of being measured as a blank.
+                tx = (style.width - measure_length(draw, line, font,
+                                                   matching_fallback(font_path, size or font.size))) / 2 \
+                    if font_path else (style.width - draw.textlength(line, font=font)) / 2
             else:
                 tx = x if origin is None else origin
             ascent, _ = font.getmetrics()
-            bbox = draw.textbbox((tx, y + ascent), line, font=font, anchor="ls")
+            # CJK glyphs missing from Liberation (【】「」《》…) are drawn with the
+            # bundled Noto Serif CJK face; the text itself is never altered.
+            right, text_top, text_bottom = draw_segmented_text(draw, (tx, y + ascent), line, font=font,
+                                                               size=size or font.size, font_path=font_path,
+                                                               fill=color, anchor="ls")
             if line:
-                if bbox[0] < left or bbox[2] > right or bbox[1] < top or bbox[3] > bottom:
+                if tx < left or right > right_frame or text_top < top or text_bottom > bottom:
                     raise VideoValidationError("Text would overflow the content frame")
-                bounds.append(bbox)
-            draw.text((tx, y + ascent), line, font=font, fill=color, anchor="ls")
+                bounds.append((tx, text_top, right, text_bottom))
             y += step if line else blank_step
         return y
     # A soft title glow contains no additional visual content.
@@ -245,9 +255,11 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
                 line, font=title_font, fill=(255, 255, 255, 65))
     canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(5)))
     draw = ImageDraw.Draw(canvas)
-    title_advance = paint(title_lines, title_font, title_h, y, TITLE_COLOR, True) - y
+    title_advance = paint(title_lines, title_font, title_h, y, TITLE_COLOR, True,
+                          font_path=bold, size=style.title_size) - y
     y += title_advance + style.title_gap
-    chapter_advance = paint(chapter_lines, chapter_font, chapter_h, y, CHAPTER_COLOR, True) - y
+    chapter_advance = paint(chapter_lines, chapter_font, chapter_h, y, CHAPTER_COLOR, True,
+                            font_path=regular, size=style.chapter_size) - y
     y += chapter_advance + style.chapter_gap
     # The body runs in its own readable column, and the divider marks that column so
     # the narrower block reads as a deliberate page grid instead of an accident.
@@ -269,7 +281,8 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     line_step, line_gap, _leftover = justify_block(lines, line_step, line_gap, band)
     justified = block_height(lines, line_step, line_gap)
     body_y = body_top + (band - justified) / 2
-    paint(lines, font, line_step, body_y, BODY_COLOR, gap=line_gap, origin=column_x)
+    paint(lines, font, line_step, body_y, BODY_COLOR, gap=line_gap, origin=column_x,
+          font_path=regular, size=style.body_size)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".page_", suffix=".png", dir=output.parent)

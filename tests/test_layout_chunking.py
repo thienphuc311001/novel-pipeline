@@ -134,6 +134,20 @@ class LayoutBudgetTests(unittest.TestCase):
         self.assertGreater(page_budget(title=wrapping_title).body_height, 0)
         self.assertLess(page_budget(title=wrapping_title).body_height, self.job.body_height)
         self.assertNotEqual(self.job.fingerprint(), self.budget.fingerprint())
+        # The CJK fallback faces are part of the identity: a different fallback face
+        # measures brackets differently and would move a chunk boundary.
+        self.assertIn('NotoSerifCJK-Regular.ttc:', identity['fallback_identities'][0])
+        self.assertIn('NotoSerifCJK-Bold.ttc:', identity['fallback_identities'][1])
+        import media.text_layout as text_layout_module
+        job_fingerprint = self.job.fingerprint()
+        original = text_layout_module.fallback_font_paths
+        fallback_regular, fallback_bold = original()
+        text_layout_module.fallback_font_paths = lambda: (fallback_bold, fallback_regular)
+        try:
+            self.assertNotEqual(identity, layout_identity())
+            self.assertNotEqual(job_fingerprint, page_budget().fingerprint())
+        finally:
+            text_layout_module.fallback_font_paths = original
 
 
 class AdaptiveChunkSizeTests(unittest.TestCase):

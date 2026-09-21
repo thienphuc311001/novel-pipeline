@@ -15,7 +15,8 @@ from unittest.mock import patch
 from PIL import Image
 
 from media.artifacts import atomic_write_json, sha256_file
-from media.text_layout import JUSTIFY_MAX_GAP_GAIN, renderer_budget
+from media.text_layout import (JUSTIFY_MAX_GAP_GAIN, fallback_segments, font_paths, load_font,
+                               matching_fallback, measure_draw, measure_length, renderer_budget)
 from media.tts import TtsChunk, TtsProcessor
 from media.video import (AudioProbe, EncoderCandidate, VideoValidationError, build_video_command,
                          probe_audio, validate_rendered_video, verify_vfr_encoder)
@@ -129,6 +130,64 @@ class VideoPageTests(unittest.TestCase):
                              chapter=chapter, text=self.texts[0])
         self.assertGreaterEqual(layout['font_size'], DEFAULT_STYLE.min_body_size)
         return (self.root / name).read_bytes()
+
+    def test_cjk_brackets_render_visible_ink_on_the_page(self):
+        """【】「」《》 must draw real glyphs: Liberation has no CJK faces for them."""
+        regular, bold = font_paths()
+        fallback = matching_fallback(str(regular), DEFAULT_STYLE.body_size)
+        font = load_font(regular, DEFAULT_STYLE.body_size)
+        draw = measure_draw()
+        text = 'Hắn nói: 【Kiếm来】 rồi「ngươi」 thấy《sư huynh》.'
+        segments = fallback_segments(text, font, fallback)
+        self.assertTrue(any(face is fallback for face, _ in segments), segments)
+        # Purely Latin runs keep the exact primary advance, measured or drawn.
+        for sample in ('Hắn nói: ', ' rồi'):
+            self.assertAlmostEqual(measure_length(draw, sample, font, fallback),
+                                   draw.textlength(sample, font=font), delta=1e-6)
+        self.assertGreater(measure_length(draw, '【', font, fallback), 4)
+        layout = render_page(self.media.thumbnail_path, self.root / 'brackets.png',
+                             title='Truyện【Kiếm】', chapter='Chương 1', text=text)
+        for left, top, right, bottom in layout['text_bounds']:
+            self.assertTrue(96 <= left <= right <= 1824)
+            self.assertTrue(54 <= top <= bottom <= 1026)
+        with Image.open(self.root / 'brackets.png') as image:
+            gray = image.convert('L')
+
+            def ink(box):
+                raw = gray.crop(box).tobytes()
+                return sum(1 for value in raw if value > 100)
+
+            body_left, body_top, body_right, body_bottom = layout['text_bounds'][-1]
+            # The body line opens with 'Hắn nói: ' before the first 【; the bracket
+            # advance window must contain glyph ink (the old path drew a blank there).
+            bracket_x = body_left + measure_length(draw, 'Hắn nói: ', font, fallback)
+            self.assertGreater(ink((int(bracket_x), body_top, int(bracket_x) + 34, body_bottom + 2)), 30)
+            for left, top, right, bottom in layout['text_bounds']:
+                self.assertGreater(ink((int(left), top, int(right), bottom + 2)), 300)
+            # The bold title carries its own brackets through the bold CJK face.
+            title_fallback = matching_fallback(str(bold), DEFAULT_STYLE.title_size)
+            title_font = load_font(bold, DEFAULT_STYLE.title_size)
+            title_left, title_top, title_right, title_bottom = layout['text_bounds'][0]
+            title_bracket = title_left + measure_length(draw, 'Truyện', title_font, title_fallback)
+            self.assertGreater(ink((int(title_bracket), title_top, int(title_bracket) + 46, title_bottom + 2)), 40)
+
+    def test_latin_and_vietnamese_advances_are_unchanged_by_the_fallback(self):
+        """The fallback never touches glyphs Liberation already draws."""
+        regular, _ = font_paths()
+        fallback = matching_fallback(str(regular), DEFAULT_STYLE.body_size)
+        font = load_font(regular, DEFAULT_STYLE.body_size)
+        draw = measure_draw()
+        for sample in ['Hắn bước vào căn phòng.', 'Đường về cố đô, ánh sáng dịu dàng!',
+                       'Chương 601–620, “đã lâu không gặp”']:
+            segments = fallback_segments(sample, font, fallback)
+            self.assertEqual(len(segments), 1, segments)
+            self.assertIs(segments[0][0], font)
+            self.assertAlmostEqual(measure_length(draw, sample, font, fallback),
+                                   draw.textlength(sample, font=font), delta=1e-6)
+        # Spaces and combining marks stay in the primary face: Noto CJK would give a
+        # space a full CJK advance and a bare mark a dotted-circle base.
+        self.assertEqual([segment for _, segment in fallback_segments('hã  lên', font, fallback)],
+                         ['hã  lên'])
 
     def test_invalid_audio_or_request_provenance_is_rejected(self):
         data = json.loads(self.processor.manifest_path.read_text())

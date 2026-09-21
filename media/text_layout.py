@@ -104,6 +104,127 @@ def font_paths():
     return FONT_DIR / "LiberationSerif-Regular.ttf", FONT_DIR / "LiberationSerif-Bold.ttf"
 
 
+# Glyph fallback for characters the Latin serif faces do not cover.
+#
+# Liberation Serif (the page typeface) ships no CJK glyphs: PIL renders a missing
+# face as a zero-height blank, so brackets such as 【】「」《》 silently vanish from
+# the page even though the chunk text, the TTS audio and the planner all carry
+# them.  The CJK fallback below draws only the characters the primary face cannot
+# (detected per glyph, cached per face/size), while every Latin/Vietnamese glyph
+# keeps the exact Liberation advance it always had — measurements therefore stay
+# planner/renderer identical.  The Noto Serif CJK collection matches the serif
+# voice of the page and is OFL-licensed like the Liberation faces.
+def fallback_font_paths():
+    return FONT_DIR / "NotoSerifCJK-Regular.ttc", FONT_DIR / "NotoSerifCJK-Bold.ttc"
+
+
+def _coverage_key(font, character):
+    """Cache key for "does this face draw ``character``" (path+size identify the face)."""
+    return (str(getattr(font, "path", "")), int(getattr(font, "size", 0)), character)
+
+
+_COVERAGE = {}
+
+
+# Characters that never select the CJK fallback: Liberation draws them correctly,
+# while Noto Serif CJK gives a space a full CJK advance and a bare combining mark a
+# dotted-circle base, both of which would visibly change the rendered page.
+def _is_fallback_ignored(character):
+    return character.isspace() or unicodedata.combining(character) != 0
+
+
+def cover_font(font, fallback, character):
+    """Return ``font`` when it really draws ``character``, else the CJK ``fallback``.
+
+    A missing CJK face in Liberation produces a zero-height ``getmask`` box; any
+    other character keeps the primary face and its exact advance.  Results are
+    cached per face and character because the segmentation runs per wrapped line.
+    """
+    if not character or _is_fallback_ignored(character):
+        return font
+    key = _coverage_key(font, character)
+    covered = _COVERAGE.get(key)
+    if covered is None:
+        try:
+            mask = font.getmask(character)
+            covered = mask.size[1] > 0
+        except Exception:
+            covered = False
+        _COVERAGE[key] = covered
+    return font if covered else fallback
+
+
+def fallback_segments(text, font, fallback):
+    """Split ``text`` into ``(face, segment)`` runs sharing one drawing face."""
+    runs, current_face, current = [], None, []
+    for character in text:
+        face = cover_font(font, fallback, character)
+        if face is not current_face:
+            if current:
+                runs.append((current_face, "".join(current)))
+            current_face, current = face, [character]
+        else:
+            current.append(character)
+    if current:
+        runs.append((current_face, "".join(current)))
+    return runs
+
+
+def fallback_textlength(draw, text, *, font, fallback):
+    """Advance of ``text`` measured with the same faces the painter will use."""
+    return math.fsum(draw.textlength(segment, font=face)
+                     for face, segment in fallback_segments(text, font, fallback))
+
+
+@lru_cache(maxsize=8)
+def _fallback_pair(font_path: str, size: int):
+    """(primary, CJK fallback) faces for ``font_path`` at ``size``.
+
+    Cached because :meth:`ImageFont.FreeTypeFont.getmask` is not thread-safe on a
+    shared face instance; every call site resolves its faces through this builder
+    (or through the thread-local :func:`load_font`) before measuring or drawing.
+    """
+    _regular, bold = font_paths()
+    fallback_regular, fallback_bold = fallback_font_paths()
+    fallback = fallback_bold if Path(font_path).name == Path(bold).name else fallback_regular
+    return load_font(font_path, size), load_font(str(fallback), size)
+
+
+def matching_fallback(font_path, size):
+    """Public accessor: the CJK face paired with ``font_path`` at ``size``."""
+    return _fallback_pair(str(font_path), int(size))[1]
+
+
+def draw_segmented_text(draw, position, text, *, font, size, font_path, fill, anchor="ls"):
+    """Draw ``text`` at ``position``, swapping in the CJK face per missing glyph.
+
+    Returns ``(right, top, bottom)``: the pen position after the final advance plus
+    the ink bbox of the whole line, so the caller can centre and frame-check with
+    the same segmentation the painter used.  The bbox unions one measurement per
+    face run, because ``textbbox`` with the primary face would collapse every
+    missing glyph to zero height and clip the CJK runs out of the box.
+    """
+    fallback = matching_fallback(font_path, size)
+    x, y = position
+    top = bottom = None
+    for run_face, segment in fallback_segments(text, font, fallback):
+        draw.text((x, y), segment, font=run_face, fill=fill, anchor=anchor)
+        x += draw.textlength(segment, font=run_face)
+        try:
+            run_top, run_bottom = draw.textbbox((x, y), segment, font=run_face,
+                                                anchor=anchor, length=0)[1::2]
+        except Exception:
+            ascent, descent = run_face.getmetrics()
+            run_top, run_bottom = y - ascent, y + descent
+        top = run_top if top is None else min(top, run_top)
+        bottom = run_bottom if bottom is None else max(bottom, run_bottom)
+    if top is None:
+        ascent, descent = font.getmetrics()
+        top, bottom = y - ascent, y + descent
+    return x, int(top), int(bottom)
+
+
+
 # --------------------------------------------------------------- measurement
 
 
@@ -120,7 +241,11 @@ def measure_draw():
 
 
 def load_font(path, size):
-    """Load one font face per thread, so concurrent measuring cannot share state."""
+    """Load one font face per thread, so concurrent measuring cannot share state.
+
+    A ``.ttc`` collection resolves to its first face; the page fonts never need a
+    named sub-face beyond that.
+    """
     cache = getattr(_LOCAL, "fonts", None)
     if cache is None:
         cache = _LOCAL.fonts = {}
@@ -132,10 +257,22 @@ def load_font(path, size):
     return font
 
 
+def measure_length(draw, text, font, fallback=None):
+    """Advance of ``text`` exactly as the painter will draw it.
+
+    With a ``fallback`` face, characters the primary face cannot draw are measured
+    in the CJK face, so the planner and the renderer agree on every width.
+    """
+    if fallback is None:
+        return draw.textlength(text, font=font)
+    return fallback_textlength(draw, text, font=font, fallback=fallback)
+
+
 @lru_cache(maxsize=8192)
 def _wrapped_lines(font_path: str, size: int, width: int, text: str):
     """Immutable measurement result: safe to cache and to share between threads."""
-    return tuple(wrap_lines(measure_draw(), text, load_font(font_path, size), width))
+    primary, fallback = _fallback_pair(str(font_path), int(size))
+    return tuple(wrap_lines(measure_draw(), text, primary, width, fallback=fallback))
 
 
 def measure_text(text, style=DEFAULT_STYLE, *, font_path=None, size=None, width=None):
@@ -145,8 +282,13 @@ def measure_text(text, style=DEFAULT_STYLE, *, font_path=None, size=None, width=
     return list(_wrapped_lines(str(font_path or font_paths()[0]), size, width, text))
 
 
-def wrap_lines(draw, text, font, width):
-    """Visual wrapping retains all characters; paragraph/line breaks stay explicit."""
+def wrap_lines(draw, text, font, width, fallback=None):
+    """Visual wrapping retains all characters; paragraph/line breaks stay explicit.
+
+    ``fallback`` is the CJK face for characters ``font`` cannot draw; every width
+    below is measured with the same faces the painter will use, so wrapping can
+    never disagree with the drawn page.
+    """
     lines = []
     for paragraph in text.split("\n"):
         if not paragraph:
@@ -154,13 +296,13 @@ def wrap_lines(draw, text, font, width):
             continue
         remaining = paragraph
         while remaining:
-            if draw.textlength(remaining, font=font) <= width:
+            if measure_length(draw, remaining, font, fallback) <= width:
                 lines.append(remaining)
                 break
             lo, hi = 1, len(remaining)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
-                if draw.textlength(remaining[:mid], font=font) <= width:
+                if measure_length(draw, remaining[:mid], font, fallback) <= width:
                     lo = mid
                 else:
                     hi = mid - 1
@@ -170,7 +312,7 @@ def wrap_lines(draw, text, font, width):
                 cut = whitespace[-1]
             while cut > 0 and cut < len(remaining) and unicodedata.combining(remaining[cut]):
                 cut -= 1
-            if cut <= 0 or draw.textlength(remaining[:cut], font=font) > width:
+            if cut <= 0 or measure_length(draw, remaining[:cut], font, fallback) > width:
                 raise VideoValidationError("A glyph cannot fit inside the page")
             lines.append(remaining[:cut])
             remaining = remaining[cut:]
@@ -216,13 +358,16 @@ def fit_lines(draw, text, path, maximum, minimum, width, height, spacing, gap=1.
     paragraph spacing.  Only a page that overflows at every size compresses its
     blank-paragraph advance — never below ``gap_floor``, and never below
     ``minimum`` px — before it is reported as unfittable.
+
+    Widths are measured with the CJK fallback faces, exactly like the painter.
     """
     needed = 0
     count = len(text.split("\n"))
     for candidate in gap_ladder(gap, gap_floor):
         for size in range(maximum, minimum - 1, -1):
             font = load_font(path, size)
-            lines = wrap_lines(draw, text, font, width)
+            fallback = _fallback_pair(str(path), size)[1]
+            lines = wrap_lines(draw, text, font, width, fallback=fallback)
             step = line_height(font, size, spacing)
             needed = block_height(lines, step, candidate)
             if needed <= height:
@@ -244,10 +389,12 @@ def fit_body(draw, text, path, style, width, height):
     the renderer never re-chunks and never shrinks the font to rescue a bad chunk.
 
     This is the same acceptance rule :class:`LayoutBudget` applies while planning, so
-    a chunk Step 3 accepted always renders here.
+    a chunk Step 3 accepted always renders here.  Widths are measured with the CJK
+    fallback faces, exactly like the painter.
     """
     font = load_font(path, style.body_size)
-    lines = wrap_lines(draw, text, font, width)
+    fallback = _fallback_pair(str(path), style.body_size)[1]
+    lines = wrap_lines(draw, text, font, width, fallback=fallback)
     visible = sum(1 for line in lines if line.strip())
     step = line_height(font, style.body_size, style.line_spacing)
     if visible > style.body_max_lines:
@@ -511,10 +658,13 @@ def layout_identity(style=DEFAULT_STYLE, *, font_path=None) -> dict:
     """Identity of every layout input that can move a chunk boundary.
 
     Stored with the chunk plan, so a style, font or band change invalidates an old
-    plan instead of silently keeping chunks that no longer fit the page.
+    plan instead of silently keeping chunks that no longer fit the page.  The CJK
+    fallback faces are part of the identity: they change both what the renderer
+    draws and how wide the wrapped lines measure.
     """
     path = str(font_path or font_paths()[0])
     return {"style_version": style.version, "font_identity": font_identity(path),
+            "fallback_identities": [font_identity(str(p)) for p in fallback_font_paths()],
             "font_size": int(style.min_body_size), "body_width": int(style.body_width),
             "max_visible_lines": int(style.body_max_lines), "body_band": int(page_band(style)),
             "line_spacing": float(style.line_spacing), "paragraph_gap": float(style.paragraph_gap),
