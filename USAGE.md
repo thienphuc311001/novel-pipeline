@@ -96,7 +96,8 @@ All groups appear unchecked. Highlight a group and click **Select Image for
 Highlighted Group** to choose its own image and create a 1280×720 `thumbnail.jpg`
 labeled with its group range (for example `Chương 1-20`). The cover stays sharp and full-bleed (never blurred or
 dimmed) while the still reuses the Step 4 video-style neon frame and title/chapter
-typography, with the labels in a dark band across the bottom 20%. Repeat for each
+typography — the group range is drawn in the same bold face as the title — with the
+labels in a dark band across the bottom 20%. Repeat for each
 group; checklist selections control the TTS batch. Highlight a group to inspect its canonical paths, exact first
 chapter, thumbnail, and failure details.
 
@@ -107,7 +108,7 @@ and remain excluded when restoring matching groups. Existing files are kept;
 reports the affected file and fails independently while other batch jobs continue.
 
 **Start TTS** processes groups sequentially. Inside each group, Step 3 cleans a
-working copy and creates chapter-safe 700-character chunks in `tts_chunks.json`.
+working copy and creates chapter-safe layout-aware chunks in `tts_chunks.json`.
 `final.txt`/`final.json` remain unchanged. Numbered audio and the resume manifest
 live in `audio_chunks/`; the final file is `<group-name>_audiobook.mp3`.
 Current-group and overall progress stay visible. **Cancel** stops queued groups
@@ -140,6 +141,13 @@ the group range. Valid current videos are verified and skipped. The image is pre
 without stretching, FFmpeg progress and speed remain visible, and **Cancel**
 stops only the partial render. The completed file is saved automatically as
 `<title>_<chapter>.mp4` in the current job folder.
+
+Body text renders at a fixed 36px inside a fixed 1150px column, so Step 3 grows
+each chunk until the page reaches roughly 90–98% of its measured body band while
+the frame keeps the full 90% of the picture. A chunk that would need more than the
+available band is reported with its measured height, so it can be re-split in Step 3; short chapter headings and
+chapter tails simply show fewer lines, and paragraph gaps only compress for custom
+styles that allow a larger line budget.
 
 ## Stage 5: YouTube Upload
 
@@ -196,7 +204,7 @@ Settings are auto-saved to:
 
 **Key settings:**
 - Chapter prefix format: `Chương {n}`, `Chapter {n}`, etc.
-- TTS chunk target: 700 characters
+- TTS chunk planning: layout-aware pages measured against the real page band (96% fill target, 90% normal minimum); the 700-character value is only the initial search estimate
 - Encoding chain: Order of encoding attempts
 - TTS cleaning rules: What to remove/convert
 - Edge-TTS: voice, concurrency, timeout, and retry counts

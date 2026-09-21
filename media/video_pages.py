@@ -4,45 +4,30 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import tempfile
-import unicodedata
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import Event
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from media.artifacts import atomic_write_json, atomic_write_text, sha256_file, sha256_text
+from media.text_layout import (DEFAULT_STYLE, FONT_DIR, LAYOUT_FILL_MIN, LAYOUT_FILL_TARGET, PageStyle,
+                               block_height, fit_body, fit_lines, font_paths, gap_ladder, header_reserve,
+                               justify_block, layout_identity, line_height, page_band, renderer_budget,
+                               scaled_style, wrap_lines)
 from media.video import VideoValidationError, probe_audio, audio_rounding_tolerance
 
-
-@dataclass(frozen=True)
-class PageStyle:
-    # v2 labels every page with its own chapter instead of the whole group range.
-    version: str = "minimal-neon-theater-v2"
-    width: int = 1920
-    height: int = 1080
-    frame: tuple[int, int, int, int] = (192, 108, 1728, 972)
-    radius: int = 36
-    padding: int = 72
-    blur: int = 42
-    brightness: float = 0.68
-    title_size: int = 54
-    chapter_size: int = 32
-    body_size: int = 30
-    # The body font searches from body_size downwards, so every page that fits keeps
-    # the largest size; only overflowing pages shrink, and never below this floor.
-    min_body_size: int = 26
-    # Blank lines between paragraphs advance half a step: enough for the eye to read
-    # the break without spending a whole line on it, which keeps paragraph-heavy
-    # chunks inside the readable band instead of failing Step 4.
-    paragraph_gap: float = 0.5
-    line_spacing: float = 1.15
-
-
-DEFAULT_STYLE = PageStyle()
-FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+# The text-layout module owns fonts, wrapping and the body band; importing the names
+# here keeps the existing ``media.video_pages`` API (used by thumbnails and tests)
+# working while both sides measure text through one implementation.
+__all__ = [
+    "DEFAULT_STYLE", "FONT_DIR", "PageStyle", "block_height", "fit_body", "fit_lines", "font_paths",
+    "gap_ladder", "line_height", "wrap_lines", "BODY_COLOR", "CHAPTER_COLOR", "DIVIDER_COLOR",
+    "PANEL_COLOR", "PANEL_OUTLINE", "TITLE_COLOR", "draw_frame", "render_page", "scaled_style",
+    "page_chapter_label", "load_narration", "prepare_video_timeline", "source_fingerprint",
+    "validate_page_layout", "validate_timeline_timestamps", "visual_settings", "VideoPage", "VideoTimeline",
+]
 
 # One palette shared by every rendered surface (video pages and thumbnails).
 PANEL_COLOR = (8, 10, 23, 220)
@@ -55,10 +40,6 @@ GLOW_COLORS = (((76, 221, 245, 75), -1), ((154, 112, 224, 65), 1))
 FRAME_GLOW = 12
 FRAME_GLOW_WIDTH = 5
 FRAME_OUTLINE_WIDTH = 2
-
-
-def font_paths():
-    return FONT_DIR / "LiberationSerif-Regular.ttf", FONT_DIR / "LiberationSerif-Bold.ttf"
 
 
 def visual_settings(style=DEFAULT_STYLE):
@@ -129,6 +110,48 @@ def load_narration(media):
             raise VideoValidationError(f"Resume/regenerate Step 3 before rendering: {error}") from error
 
 
+def _stored_chunk_plan(media):
+    """The Step 3 plan of this job, or ``None`` when no plan file is readable."""
+    try:
+        return json.loads((Path(media.output_dir) / "tts_chunks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def validate_page_layout(media, records, *, style=DEFAULT_STYLE):
+    """Fail closed when a saved chunk plan no longer matches the current pages.
+
+    Step 3 finalized every chunk against a measured band (the real title and chapter
+    labels of the job).  If the pages would now offer less room — a longer title, a
+    changed font, a changed band or a changed fill policy — the plan is stale, and
+    rendering must stop with a clear fingerprint mismatch instead of silently
+    re-chunking, truncating or shrinking the font.  Returns the page budget used.
+
+    A job without a readable plan keeps the historical behaviour: the renderer's own
+    ``fit_body`` guard still rejects any chunk that does not fit.
+    """
+    plan = _stored_chunk_plan(media)
+    if not plan:
+        return renderer_budget(style, title=media.title, chapter_labels=[])
+    planned = dict(plan.get("config", {}).get("layout") or {})
+    current = layout_identity(style)
+    labels = [page_chapter_label(record.get("chapter"), media.chapter) for record in records]
+    budget = renderer_budget(style, title=media.title, chapter_labels=[*labels, media.chapter])
+    for key in ("style_version", "font_identity", "font_size", "body_width", "line_spacing",
+                "paragraph_gap", "paragraph_gap_floor", "max_visible_lines", "fill_target",
+                "fill_min", "fill_max"):
+        if planned.get(key) is not None and planned[key] != current[key]:
+            raise VideoValidationError(
+                f"Layout fingerprint mismatch: the saved chunk plan was built with {key}="
+                f"{planned[key]!r} but the current page layout uses {current[key]!r}. "
+                "Regenerate the Step 3 chunks before rendering; the renderer never re-chunks.")
+    if int(planned.get("body_band", 0)) > int(budget.body_height):
+        raise VideoValidationError(
+            f"Stale chunk plan: pages now offer {budget.body_height}px of body band but the plan was "
+            f"measured against {planned['body_band']}px. Regenerate the Step 3 chunks before rendering.")
+    return budget
+
+
 def source_fingerprint(media):
     records = load_narration(media)
     timeline_path = Path(media.output_dir) / "video_timeline.json"
@@ -167,71 +190,6 @@ def _input_paths(media, records):
             *(folder / name for name in ('tts_chunks.json', 'tts_overrides.json') if (folder / name).exists())]
 
 
-def wrap_lines(draw, text, font, width):
-    """Visual wrapping retains all characters; paragraph/line breaks stay explicit."""
-    lines = []
-    for paragraph in text.split("\n"):
-        if not paragraph:
-            lines.append("")
-            continue
-        remaining = paragraph
-        while remaining:
-            if draw.textlength(remaining, font=font) <= width:
-                lines.append(remaining)
-                break
-            lo, hi = 1, len(remaining)
-            while lo < hi:
-                mid = (lo + hi + 1) // 2
-                if draw.textlength(remaining[:mid], font=font) <= width:
-                    lo = mid
-                else:
-                    hi = mid - 1
-            cut = lo
-            whitespace = [m.end() for m in re.finditer(r"\s+", remaining[:cut])]
-            if whitespace:
-                cut = whitespace[-1]
-            while cut > 0 and cut < len(remaining) and unicodedata.combining(remaining[cut]):
-                cut -= 1
-            if cut <= 0 or draw.textlength(remaining[:cut], font=font) > width:
-                raise VideoValidationError("A glyph cannot fit inside the page")
-            lines.append(remaining[:cut])
-            remaining = remaining[cut:]
-    return lines
-
-
-def line_height(font, size, spacing):
-    ascent, descent = font.getmetrics()
-    return max(ascent + descent, math.ceil(size * spacing))
-
-
-def block_height(lines, step, gap=1.0):
-    """Advance of a wrapped block; blank paragraph lines take a fraction of one step."""
-    blank = max(1, round(step * gap))
-    return sum(blank if not line else step for line in lines)
-
-
-def fit_lines(draw, text, path, maximum, minimum, width, height, spacing, gap=1.0):
-    for size in range(maximum, minimum - 1, -1):
-        font = ImageFont.truetype(str(path), size)
-        lines = wrap_lines(draw, text, font, width)
-        step = line_height(font, size, spacing)
-        if block_height(lines, step, gap) <= height:
-            return font, lines, step
-    raise VideoValidationError(f"Text cannot fit at readable minimum {minimum}px; correct the chunk in Step 3")
-
-
-def scaled_style(width, height, style=DEFAULT_STYLE):
-    """Return the same page style rescaled onto another canvas size."""
-    ratio = width / style.width
-    left, top, right, bottom = style.frame
-    return replace(style, width=int(width), height=int(height),
-                   frame=(round(left * ratio), round(top * ratio), round(right * ratio), round(bottom * ratio)),
-                   radius=max(1, round(style.radius * ratio)), padding=max(1, round(style.padding * ratio)),
-                   blur=max(1, round(style.blur * ratio)), title_size=max(1, round(style.title_size * ratio)),
-                   chapter_size=max(1, round(style.chapter_size * ratio)),
-                   body_size=max(1, round(style.body_size * ratio)),
-                   min_body_size=max(1, round(style.min_body_size * ratio)))
-
 
 def draw_frame(canvas, frame, *, radius, glow=FRAME_GLOW, glow_width=FRAME_GLOW_WIDTH,
                outline_width=FRAME_OUTLINE_WIDTH, fill=PANEL_COLOR):
@@ -256,15 +214,20 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     draw = ImageDraw.Draw(canvas)
     regular, bold = font_paths()
     left, top, right, bottom = style.frame
-    x, y = left + style.padding, top + 42
+    x, y = left + style.padding, top + style.title_top_offset
     width = right - left - style.padding * 2
-    title_font, title_lines, title_h = fit_lines(draw, title, bold, style.title_size, 36, width, 156, 1.12)
-    chapter_font, chapter_lines, chapter_h = fit_lines(draw, chapter, regular, style.chapter_size, 24, width, 84, 1.2)
+    title_font, title_lines, title_h, _ = fit_lines(draw, title, bold, style.title_size, 36, width,
+                                                    style.title_max_height, 1.12)
+    chapter_font, chapter_lines, chapter_h, _ = fit_lines(draw, chapter, regular, style.chapter_size, 24, width,
+                                                          style.chapter_max_height, 1.2)
     bounds = []
-    def paint(lines, font, step, y, color, centered=False, gap=1.0):
+    def paint(lines, font, step, y, color, centered=False, gap=1.0, origin=None):
         blank_step = max(1, round(step * gap))
         for line in lines:
-            tx = (style.width - draw.textlength(line, font=font)) / 2 if centered else x
+            if centered:
+                tx = (style.width - draw.textlength(line, font=font)) / 2
+            else:
+                tx = x if origin is None else origin
             ascent, _ = font.getmetrics()
             bbox = draw.textbbox((tx, y + ascent), line, font=font, anchor="ls")
             if line:
@@ -282,14 +245,31 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
                 line, font=title_font, fill=(255, 255, 255, 65))
     canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(5)))
     draw = ImageDraw.Draw(canvas)
-    y = paint(title_lines, title_font, title_h, y, TITLE_COLOR, True) + 12
-    y = paint(chapter_lines, chapter_font, chapter_h, y, CHAPTER_COLOR, True) + 24
-    draw.line((x, y, right - style.padding, y), fill=DIVIDER_COLOR, width=1)
-    body_top, body_bottom = y + 30, bottom - 44
-    font, lines, line_step = fit_lines(draw, text, regular, style.body_size, style.min_body_size,
-                                       width, body_bottom - body_top, style.line_spacing, style.paragraph_gap)
-    body_y = body_top + (body_bottom - body_top - block_height(lines, line_step, style.paragraph_gap)) / 2
-    paint(lines, font, line_step, body_y, BODY_COLOR, gap=style.paragraph_gap)
+    title_advance = paint(title_lines, title_font, title_h, y, TITLE_COLOR, True) - y
+    y += title_advance + style.title_gap
+    chapter_advance = paint(chapter_lines, chapter_font, chapter_h, y, CHAPTER_COLOR, True) - y
+    y += chapter_advance + style.chapter_gap
+    # The body runs in its own readable column, and the divider marks that column so
+    # the narrower block reads as a deliberate page grid instead of an accident.
+    column = min(width, style.body_width)
+    column_x = (style.width - column) // 2
+    draw.line((column_x, y, column_x + column, y), fill=DIVIDER_COLOR, width=1)
+    body_top = y + style.body_top_gap
+    body_bottom = bottom - style.body_bottom_margin
+    # body_bottom - body_top equals page_band with the real fitted title/chapter
+    # advances, and the chunk planner validates the same measured band through
+    # header_reserve/renderer_budget, so a chunk planned for this job always fits.
+    band = body_bottom - body_top
+    font, lines, line_step, line_gap, visible_lines = fit_body(
+        draw, text, regular, style, column, band)
+    fitted_gap = line_gap
+    measured = block_height(lines, line_step, line_gap)
+    # Minor leftover space is distributed across the existing gaps — never the font.
+    # Whatever the subtle spacing limits cannot spend stays as bottom whitespace.
+    line_step, line_gap, _leftover = justify_block(lines, line_step, line_gap, band)
+    justified = block_height(lines, line_step, line_gap)
+    body_y = body_top + (band - justified) / 2
+    paint(lines, font, line_step, body_y, BODY_COLOR, gap=line_gap, origin=column_x)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".page_", suffix=".png", dir=output.parent)
@@ -299,7 +279,14 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
         os.replace(name, output)
     finally:
         Path(name).unlink(missing_ok=True)
-    return {"font_size": font.size, "text_bounds": bounds}
+    return {"font_size": font.size, "paragraph_gap": line_gap, "paragraph_gap_base": fitted_gap,
+            "lines": visible_lines, "line_step": line_step,
+            "body_height": band, "measured_height": measured,
+            "fill_ratio": round(measured / band, 4) if band > 0 else 0.0,
+            "fill_min": LAYOUT_FILL_MIN, "fill_target": LAYOUT_FILL_TARGET,
+            "spacing_compensation": justified - measured,
+            "title_height": title_h * len(title_lines), "chapter_height": chapter_h * len(chapter_lines),
+            "text_bounds": bounds}
 
 
 @dataclass
@@ -348,6 +335,7 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
             raise VideoValidationError("Video preparation cancelled")
     check()
     records = load_narration(media)
+    validate_page_layout(media, records, style=style)
     initial_files = file_states(_input_paths(media, records))
     audio = probe_audio(Path(media.audiobook_path), ffprobe_path)
     probes = []

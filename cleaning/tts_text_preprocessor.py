@@ -404,14 +404,22 @@ def preprocess_for_tts(text: str, config: TTSPreprocessConfig | None = None) -> 
     return preprocess_with_diagnostics(text, config).text
 
 
-def preprocessing_identity(settings):
+def preprocessing_identity(settings, layout=None):
+    """Identity of every input that can move a chunk boundary.
+
+    ``layout`` defaults to the renderer's own layout identity, so a style/font/band
+    change invalidates saved TTS plans instead of keeping chunks that no longer fit
+    the page.
+    """
     from .tts_boundaries import CHUNKER_VERSION
     from .textclean import CleaningOptions
-    from chunking.splitter import TTS_CHUNK_TARGET
+    from chunking.splitter import TTS_CHUNK_SOFT_TARGET
+    from media.text_layout import layout_identity
     return {"preprocessor_version": PREPROCESSOR_VERSION,
             "chunker_version": CHUNKER_VERSION,
             "preprocessing": asdict(TTSPreprocessConfig.from_settings(settings)),
             "clean_profile": "safe-tts-v1",
             "cleaning": asdict(CleaningOptions.for_tts(settings)),
-            "chunk_limit": TTS_CHUNK_TARGET,
-            "min_chunk_chars": settings.min_chunk_chars}
+            "chunk_soft_target": TTS_CHUNK_SOFT_TARGET,
+            "min_chunk_chars": settings.min_chunk_chars,
+            "layout": dict(layout_identity() if layout is None else layout)}

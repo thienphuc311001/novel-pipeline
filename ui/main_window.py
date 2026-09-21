@@ -1412,8 +1412,8 @@ class MainWindow(QMainWindow):
 
             bundle = self.document.require_step3_artifacts()
             data = load_bundle_json(bundle)
-            from cleaning.tts_text_preprocessor import preprocessing_identity
-            if data.get("tts_preparation") != preprocessing_identity(self.settings):
+            from media.groups import job_preprocessing_identity
+            if data.get("tts_preparation") != job_preprocessing_identity(self.document, self.settings):
                 self.document.require_grouping_input()
                 self._tts_generate_after_prepare = True
                 if not self._on_clean_chunk():
@@ -1421,7 +1421,7 @@ class MainWindow(QMainWindow):
                 self._tts_generate_after_prepare = False
                 bundle = self.document.require_step3_artifacts()
                 data = load_bundle_json(bundle)
-                if data.get("tts_preparation") != preprocessing_identity(self.settings):
+                if data.get("tts_preparation") != job_preprocessing_identity(self.document, self.settings):
                     raise PipelineStateError("Run clean/chunk again before TTS; preparation is outdated.")
             chunks = [
                 TtsChunk(

@@ -5,8 +5,10 @@ from chapters import build_patterns
 from chapters.detector import detect_chapters
 from cleaning.tts_prepare import prepare_chapter
 from cleaning.tts_text_preprocessor import preprocessing_identity
-from chunking.splitter import split_chapters, clamp_chunk_size, TTS_CHUNK_TARGET
-from media.artifacts import require_artifact_root, write_step3_artifacts
+from chunking.splitter import (TTS_CHUNK_SOFT_TARGET, layout_statistics, split_chapters,
+                               verify_chunk_integrity)
+from media.artifacts import require_artifact_root, sha256_text, write_step3_artifacts
+from media.groups import job_layout_budget, plan_page_summary
 from pipeline.document import (Chapter, PipelineStateError, derive_chapters_from_text,
                                render_chapters_text)
 
@@ -35,14 +37,24 @@ def prepare_legacy_bundle(document, settings, *, cancel_event=None):
             statistics[key] = statistics.get(key, 0) + value
         warnings.extend(f'Chapter {chapter.number}: {m}' for m in messages)
     check_cancel()
-    minimum = min(TTS_CHUNK_TARGET, max(50, int(settings.min_chunk_chars or 200)))
-    limit = TTS_CHUNK_TARGET
-    identity = preprocessing_identity(settings)
-    chunks, _, diagnostics = split_chapters(prepared_chapters, limit, include_header=True,
-                                             min_chunk=minimum,
-                                             abbreviations=identity['preprocessing']['abbreviations'])
+    minimum = min(TTS_CHUNK_SOFT_TARGET, max(50, int(settings.min_chunk_chars or 200)))
+    # The soft target only seeds the boundary search; the measured page height of this
+    # job's own band decides every chunk boundary before any TTS request.
+    limit = TTS_CHUNK_SOFT_TARGET
+    budget = job_layout_budget(document)
+    identity = preprocessing_identity(settings, layout=budget.identity())
+    chunks, layout_plan, diagnostics = split_chapters(prepared_chapters, limit, include_header=True,
+                                                     min_chunk=minimum,
+                                                     abbreviations=identity['preprocessing']['abbreviations'],
+                                                     layout=budget)
     if not chunks:
         raise PipelineStateError('No speakable text after TTS preprocessing.')
+    # Hard safety: the finalized chunks must reproduce the prepared text exactly.
+    verify_chunk_integrity(render_chapters_text(prepared_chapters), layout_plan)
+    statistics.update(layout_statistics(layout_plan))
+    base = [{"order": c.order, "chapter": c.chapter, "text": c.text, "text_sha256": sha256_text(c.text),
+             "layout": dict(c.layout)} for c in chunks]
+    warnings.append(plan_page_summary(document.job_chapter or document.job_title, base, statistics, budget))
     document.chapters = prepared_chapters
     document.set_cleaned_output(render_chapters_text(prepared_chapters))
     document.chunks = chunks

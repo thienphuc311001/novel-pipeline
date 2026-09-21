@@ -15,10 +15,11 @@ from unittest.mock import patch
 from PIL import Image
 
 from media.artifacts import atomic_write_json, sha256_file
+from media.text_layout import JUSTIFY_MAX_GAP_GAIN, renderer_budget
 from media.tts import TtsChunk, TtsProcessor
 from media.video import (AudioProbe, EncoderCandidate, VideoValidationError, build_video_command,
                          probe_audio, validate_rendered_video, verify_vfr_encoder)
-from media.video_pages import (DEFAULT_STYLE, load_narration, page_chapter_label, prepare_video_timeline,
+from media.video_pages import (DEFAULT_STYLE, gap_ladder, load_narration, page_chapter_label, prepare_video_timeline,
                                render_page, source_fingerprint, validate_timeline_timestamps)
 from tests.support import create_narration_fixture
 
@@ -168,37 +169,100 @@ class VideoPageTests(unittest.TestCase):
                 self.timeline()
         self.assertEqual((self.root / 'video_timeline.json').read_bytes(), previous)
 
-    def test_readable_layout_bounds_and_overflow(self):
-        for i, text in enumerate(['Ngắn.', ('Ánh sáng tràn qua cửa sổ. ' * 30)[:700],
-                                  'Đoạn đầu.\n\nĐoạn giữa.\n\nĐoạn cuối.', 'a' * 700]):
+    def test_readable_layout_bounds_and_line_budget(self):
+        cases = [('Ngắn.', 1), (('Ánh sáng tràn qua cửa sổ. ' * 30)[:700], 9),
+                 ('Đoạn đầu.\n\nĐoạn giữa.\n\nĐoạn cuối.', 3), ('a' * 700, 10)]
+        title = 'Một tựa truyện dài và thanh lịch trong ánh sáng hoàng hôn'
+        chapter = 'Chương 601–620'
+        budget = renderer_budget(title=title, chapter_labels=[chapter])
+        column = DEFAULT_STYLE.body_width
+        column_x = (DEFAULT_STYLE.width - column) // 2
+        for i, (text, expected_lines) in enumerate(cases):
             layout = render_page(self.media.thumbnail_path, self.root / f'layout{i}.png',
-                                 title='Một tựa truyện dài và thanh lịch trong ánh sáng hoàng hôn',
-                                 chapter='Chương 601–620', text=text)
-            # Every page stays inside the 26–30px readable band.
-            self.assertGreaterEqual(layout['font_size'], DEFAULT_STYLE.min_body_size)
-            self.assertLessEqual(layout['font_size'], DEFAULT_STYLE.body_size)
+                                 title=title, chapter=chapter, text=text)
+            # One fixed body font for every page: no shrinking to rescue a chunk.
+            self.assertEqual(layout['font_size'], DEFAULT_STYLE.body_size)
+            self.assertEqual(layout['lines'], expected_lines)
+            self.assertEqual(layout['lines'], budget.measure(text).visible_lines)
+            self.assertLessEqual(layout['measured_height'], layout['body_height'])
+            # The fitted gap never exceeds the requested one; the drawn gap may only
+            # grow by the explicit, subtle compensation limit.
+            self.assertLessEqual(layout['paragraph_gap_base'], DEFAULT_STYLE.paragraph_gap)
+            self.assertGreaterEqual(layout['paragraph_gap_base'], DEFAULT_STYLE.paragraph_gap_floor)
+            self.assertLessEqual(layout['paragraph_gap'],
+                                 DEFAULT_STYLE.paragraph_gap * (1 + JUSTIFY_MAX_GAP_GAIN))
+            self.assertGreaterEqual(layout['spacing_compensation'], 0)
+            self.assertLessEqual(layout['title_height'], DEFAULT_STYLE.title_max_height)
             for left, top, right, bottom in layout['text_bounds']:
-                self.assertTrue(192 <= left <= right <= 1728)
-                self.assertTrue(108 <= top <= bottom <= 972)
-        with self.assertRaisesRegex(VideoValidationError, 'readable minimum'):
+                self.assertTrue(96 <= left <= right <= 1824)
+                self.assertTrue(54 <= top <= bottom <= 1026)
+        # The body block lives inside the fixed 1150px column; the centered header can
+        # reach past it, so the column check uses a page with short labels.
+        column_layout = render_page(self.media.thumbnail_path, self.root / 'column.png', title='Truyện',
+                                    chapter='Chương 1', text=('Ánh sáng tràn qua cửa sổ. ' * 30)[:700])
+        self.assertEqual(column_layout['lines'], 9)
+        for left, _, right, _ in column_layout['text_bounds']:
+            self.assertTrue(column_x <= left and right <= column_x + column)
+        # A text that overflows the measured band is reported for a Step 3 re-split.
+        over_budget = '\n\n'.join(['Một dòng.'] * 20)
+        with self.assertRaisesRegex(VideoValidationError, 'body band'):
+            render_page(self.media.thumbnail_path, self.root / 'overflow.png', title='Truyện',
+                        chapter='Chương 1', text=over_budget)
+        self.assertFalse((self.root / 'overflow.png').exists())
+        # The line guard still reports pathological input, whatever the band.
+        with self.assertRaisesRegex(VideoValidationError, 'sanity guard'):
             render_page(self.media.thumbnail_path, self.root / 'overflow.png', title='Truyện',
                         chapter='Chương 1', text='Một dòng.\n' * 80)
         self.assertFalse((self.root / 'overflow.png').exists())
+        # A band that cannot hold even one line fails loudly instead of clipping.
+        with self.assertRaisesRegex(VideoValidationError, 'body band'):
+            render_page(self.media.thumbnail_path, self.root / 'overflow.png', title='Truyện',
+                        chapter='Chương 1', text='Một dòng.\n' * 20,
+                        style=replace(DEFAULT_STYLE, body_bottom_margin=1000))
+        self.assertFalse((self.root / 'overflow.png').exists())
 
-    def test_paragraph_breaks_cost_half_a_line(self):
-        """Half-line paragraph gaps keep paragraph-heavy chunks inside the readable band."""
-        text = 'Dòng ngắn.\n\n' * 12
-        with self.assertRaisesRegex(VideoValidationError, 'readable minimum'):
-            render_page(self.media.thumbnail_path, self.root / 'full-gap.png', title='Truyện', chapter='Chương 1',
-                        text=text, style=replace(DEFAULT_STYLE, paragraph_gap=1.0))
-        self.assertFalse((self.root / 'full-gap.png').exists())
-        layout = render_page(self.media.thumbnail_path, self.root / 'half-gap.png', title='Truyện',
+    def test_paragraph_breaks_compress_before_a_page_fails(self):
+        """A crowded page compresses its paragraph gaps instead of failing Step 4."""
+        text = 'Dòng ngắn.\n\n' * 12 + 'Dòng ngắn.'
+        # The crowded page still fits the band, so its gaps compress instead.
+        layout = render_page(self.media.thumbnail_path, self.root / 'compressed.png', title='Truyện',
                              chapter='Chương 1', text=text)
-        self.assertGreaterEqual(layout['font_size'], DEFAULT_STYLE.min_body_size)
-        self.assertLessEqual(layout['font_size'], DEFAULT_STYLE.body_size)
+        self.assertEqual(layout['font_size'], DEFAULT_STYLE.body_size)
+        self.assertLess(layout['paragraph_gap'], DEFAULT_STYLE.paragraph_gap)
+        self.assertGreaterEqual(layout['paragraph_gap'], DEFAULT_STYLE.paragraph_gap_floor)
+        self.assertLessEqual(layout['measured_height'], layout['body_height'])
         for left, top, right, bottom in layout['text_bounds']:
-            self.assertTrue(192 <= left <= right <= 1728)
-            self.assertTrue(108 <= top <= bottom <= 972)
+            self.assertTrue(96 <= left <= right <= 1824)
+            self.assertTrue(54 <= top <= bottom <= 1026)
+        # A style without compression rungs reports the same page instead of clipping.
+        fixed_gap = replace(DEFAULT_STYLE, paragraph_gap=1.0, paragraph_gap_floor=1.0)
+        with self.assertRaisesRegex(VideoValidationError, 'body band'):
+            render_page(self.media.thumbnail_path, self.root / 'full-gap.png', title='Truyện',
+                        chapter='Chương 1', text=text, style=fixed_gap)
+        self.assertFalse((self.root / 'full-gap.png').exists())
+
+    def test_reclaimed_bottom_margin_absorbs_the_reported_three_pixel_overflow(self):
+        """Dialogue-heavy chunk shape of Chương 1-20 chunk 17: 14 text lines + 13 blank ones."""
+        text = 'Thoại ngắn.\n\n' * 13 + 'Thoại ngắn.'
+        # The reclaimed margin keeps this shape inside the band at the fixed font.
+        layout = render_page(self.media.thumbnail_path, self.root / 'reclaimed.png', title='Truyện',
+                             chapter='Chương 2', text=text)
+        self.assertEqual(layout['font_size'], DEFAULT_STYLE.body_size)
+        self.assertLess(layout['paragraph_gap'], DEFAULT_STYLE.paragraph_gap)
+        self.assertGreaterEqual(layout['paragraph_gap'], DEFAULT_STYLE.paragraph_gap_floor)
+        self.assertLessEqual(layout['measured_height'], layout['body_height'])
+        # The pre-reclaim margin drops 20px of the band and the page no longer fits.
+        v2 = replace(DEFAULT_STYLE, body_bottom_margin=44, paragraph_gap_floor=DEFAULT_STYLE.paragraph_gap)
+        with self.assertRaisesRegex(VideoValidationError, 'body band'):
+            render_page(self.media.thumbnail_path, self.root / 'v2-margin.png', title='Truyện',
+                        chapter='Chương 2', text=text, style=v2)
+        self.assertFalse((self.root / 'v2-margin.png').exists())
+
+    def test_gap_ladder_always_keeps_the_requested_gap_first(self):
+        self.assertEqual(gap_ladder(DEFAULT_STYLE.paragraph_gap, DEFAULT_STYLE.paragraph_gap_floor),
+                         [0.5, 0.4, 0.35, 0.3, 0.25, 0.2])
+        self.assertEqual(gap_ladder(1.0), [1.0])
+        self.assertEqual(gap_ladder(0.5, 0.5), [0.5])
 
     def test_nonfinite_audio_metadata_rejected(self):
         path = self.processor.audio_dir / 'chunk_00001.mp3'

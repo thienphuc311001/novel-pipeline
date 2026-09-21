@@ -22,7 +22,7 @@ TXT / Step 2 grouping source
 - Email giữ mặc định; hỗ trợ remove/keep/replace.
 - Không ghi đè source TXT, Step 2 hoặc canonical TXT/JSON của nhóm chương.
 - Không dùng AI/LLM, không thêm dependency mạng cho preprocessing.
-- Dùng target chunk TTS hiện tại là 700 ký tự; giá trị cấu hình cũ được giữ để tương thích nhưng không thay đổi target pipeline.
+- Dùng layout-aware chunking: boundary theo chiều cao render thật ở font 36px cố định (mục tiêu fill 96%, tối thiểu 90%); giá trị 700 ký tự chỉ là ước lượng tìm kiếm ban đầu, giá trị cấu hình cũ được giữ để tương thích nhưng không còn là quy tắc cuối.
 - Kiểm thử dùng unittest hiện có, không yêu cầu pytest hoặc Hypothesis.
 
 ## Hiện trạng trước triển khai

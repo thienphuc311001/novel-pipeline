@@ -15,7 +15,8 @@ from chapters.patterns import build_patterns, glued_head
 from chapters.numerals import parse_number_token
 from media.artifacts import (atomic_write_json, atomic_write_text, require_artifact_root, sha256_file,
                              sha256_text, slugify_job_name)
-from pipeline.document import Chapter, PipelineStateError, Step4MediaBundle, Step5UploadBundle
+from pipeline.document import (Chapter, PipelineStateError, Step4MediaBundle, Step5UploadBundle,
+                               render_chapters_text)
 
 GROUPING_METHOD_DETECTED = "detected_chapters"
 GROUPING_METHOD_NUMERIC = "numeric_boundaries"
@@ -529,24 +530,76 @@ def require_video(document, group_id):
     return Step5UploadBundle(group.title, group.label, group.output_dir, row["path"], media.thumbnail_path, fp, media.thumbnail_fingerprint)
 
 
+def job_layout_budget(document, *, style=None):
+    """Page budget of the current single-job preparation.
+
+    The band is measured from the real title and from every chapter label a page of
+    this job can draw, so the planner and the renderer share one band instead of the
+    worst-case reserve.  All ``Chương N`` labels are one line tall, so the identity
+    stays stable whether or not the chapter list has been derived yet.
+    """
+    from media.text_layout import DEFAULT_STYLE, renderer_budget
+    from media.video_pages import page_chapter_label
+    chapter = str(getattr(document, "job_chapter", "") or "")
+    labels = [page_chapter_label(getattr(item, "number", 0), chapter)
+              for item in list(getattr(document, "chapters", []) or [])]
+    return renderer_budget(style or DEFAULT_STYLE, title=str(getattr(document, "job_title", "") or ""),
+                           chapter_labels=[*labels, chapter])
+
+
+def job_preprocessing_identity(document, settings):
+    """Preparation identity of this job, including its own measured page band."""
+    from cleaning.tts_text_preprocessor import preprocessing_identity
+    return preprocessing_identity(settings, layout=job_layout_budget(document).identity())
+
+
+def plan_page_summary(label, base, statistics, budget):
+    """One-line page-fill summary for the job console.
+
+    Final pages and standalone headings are legitimate short pages and are counted
+    separately, so they never look like a planning failure.
+    """
+    from media.text_layout import LAYOUT_FILL_MIN, LAYOUT_FILL_TARGET
+    fills = [float(row["layout"].get("fill_ratio") or 0.0) for row in base if row.get("layout")]
+    average = sum(fills) / len(fills) if fills else 0.0
+    return (f"{label}: {len(base)} trang, fill trung bình {average:.1%}, thấp nhất "
+            f"{statistics['layout_fill_min']:.1%}, cao nhất {statistics['layout_fill_max']:.1%}, "
+            f"trang cuối ngắn {statistics['layout_final_underfilled_pages']}, dưới "
+            f"{LAYOUT_FILL_MIN:.0%} {statistics['layout_underfilled_pages']}, tràn trang "
+            f"{statistics['layout_overflow_pages']}; band {budget.body_height}px ở "
+            f"{budget.min_font_size}px, mục tiêu fill {LAYOUT_FILL_TARGET:.0%}")
+
+
 def prepare_tts(document, group_id, settings, *, cancel_event=None):
     """Cleaning/chunking lives exclusively in Step 3, never canonical files."""
     from cleaning.textclean import CleaningOptions
-    from chunking.splitter import split_chapters, clamp_chunk_size, TTS_CHUNK_TARGET
+    from chunking.splitter import (MAX_CHUNK, TTS_CHUNK_SOFT_TARGET, chunk_layout_metadata,
+                                   layout_statistics, split_chapters, verify_chunk_integrity)
     from media.tts import TtsChunk
     group = document.require_group_artifacts(group_id)
     source = validate_group(group, document.require_grouping_input())
     from cleaning.tts_prepare import prepare_chapter
     from cleaning.tts_text_preprocessor import preprocessing_identity
     from cleaning.tts_boundaries import meaningful_text
+    from media.text_layout import renderer_budget
+    from media.video_pages import page_chapter_label
+    # The chunk planner and every page of this job share one measured band: the real
+    # title plus every chapter label a page can carry replace the worst-case reserve.
+    budget = renderer_budget(title=group.title,
+                             chapter_labels=[page_chapter_label(row.get("number"), group.label)
+                                             for row in group.chapters] + [group.label])
     def check_cancel():
         if cancel_event is not None and cancel_event.is_set():
             raise PipelineStateError("Đã hủy chuẩn bị TTS; các MP3 đã có được giữ lại.")
     check_cancel()
     options = CleaningOptions.for_tts(settings)
-    minimum = min(TTS_CHUNK_TARGET, max(50, int(settings.min_chunk_chars or 200)))
-    limit = TTS_CHUNK_TARGET
-    config = {"cleaning": asdict(options), "limit": limit, "minimum": minimum, **preprocessing_identity(settings)}
+    minimum = min(TTS_CHUNK_SOFT_TARGET, max(50, int(settings.min_chunk_chars or 200)))
+    # The soft target only seeds the boundary search: the measured page height decides
+    # where each chunk really ends, so no chunk is capped at this character count.
+    limit = TTS_CHUNK_SOFT_TARGET
+    config = {"cleaning": asdict(options), "limit": limit, "minimum": minimum,
+              "hard_ceiling": MAX_CHUNK,
+              **preprocessing_identity(settings, layout=budget.identity())}
     identity = sha256_text(json.dumps({
         "source": group.text_sha256,
         "source_revision": document.normalized_revision,
@@ -581,12 +634,19 @@ def prepare_tts(document, group_id, settings, *, cancel_event=None):
                 statistics[key] = statistics.get(key, 0) + value
             warnings.extend(f"Chapter {chapter.number}: {message}" for message in messages)
         check_cancel()
-        chunks, _, diagnostics = split_chapters(chapters, limit, include_header=True, min_chunk=minimum,
-                                             abbreviations=config["preprocessing"]["abbreviations"])
+        chunks, layout_plan, diagnostics = split_chapters(
+            chapters, limit, include_header=True, min_chunk=minimum,
+            abbreviations=config["preprocessing"]["abbreviations"], layout=budget)
         warnings.extend(d.message for d in diagnostics)
-        base = [{"order": c.order, "chapter": c.chapter, "text": c.text, "text_sha256": sha256_text(c.text)} for c in chunks]
+        # Hard safety: the finalized chunks must reproduce the prepared source exactly
+        # (no dropped, duplicated or reordered character) before any TTS request.
+        verify_chunk_integrity(render_chapters_text(chapters), layout_plan)
+        base = [{"order": c.order, "chapter": c.chapter, "text": c.text, "text_sha256": sha256_text(c.text),
+                 "layout": dict(c.layout)} for c in chunks]
         if not base:
             raise PipelineStateError(f"{group.label}: no speakable text after cleaning.")
+        statistics.update(layout_statistics(layout_plan))
+        warnings.append(plan_page_summary(group.label, base, statistics, budget))
         plan = {"schema_version": 2, "group_id": group_id, "plan_id": identity,
                 "source_revision": document.normalized_revision, "config": config, "chunks": base,
                 "statistics": statistics, "warnings": warnings}
@@ -609,9 +669,20 @@ def prepare_tts(document, group_id, settings, *, cancel_event=None):
     effective = []
     for row in base:
         text = overrides.get(str(row["order"]), row["text"])
-        if not isinstance(text, str) or not meaningful_text(text) or len(text) > limit:
+        if not isinstance(text, str) or not meaningful_text(text) or len(text) > MAX_CHUNK:
             raise PipelineStateError("Invalid saved TTS override; correct the failed chunk text.")
-        effective.append(TtsChunk(row["order"], text, row["chapter"]))
+        layout = dict(row.get("layout") or {})
+        if text != row["text"]:
+            # A user-edited replacement must satisfy the same page budget before TTS.
+            measurement = budget.measure(text)
+            if not measurement.fits:
+                raise PipelineStateError(
+                    f"Đoạn {row['order']} sau khi sửa vẫn không vừa trang: chars={len(text)}, "
+                    f"visible_lines={measurement.visible_lines}, font_size={measurement.font_size}px, "
+                    f"body_width={measurement.body_width}px, body_height={measurement.body_height}px, "
+                    f"reason={measurement.reason}. Sửa ngắn hơn hoặc tách thành nhiều đoạn.")
+            layout = chunk_layout_metadata(budget, text, "override", "user_override")
+        effective.append(TtsChunk(row["order"], text, row["chapter"], layout=layout))
     check_cancel()
     group.state["tts_plan_id"] = identity
     return plan, effective
@@ -625,10 +696,25 @@ def edit_failed_chunk(document, group_id, settings, order, text):
     from cleaning.tts_text_preprocessor import TTSPreprocessConfig, preprocess_for_tts
     from cleaning.tts_boundaries import meaningful_text
     from cleaning.textclean import CleaningOptions, clean_text
+    from chunking.splitter import MAX_CHUNK
+    from media.text_layout import renderer_budget
+    from media.video_pages import page_chapter_label
     cleaned, _ = clean_text(text, CleaningOptions.for_tts(settings))
     text = preprocess_for_tts(cleaned, TTSPreprocessConfig.from_settings(settings))
-    if not meaningful_text(text) or len(text) > plan["config"]["limit"]:
-        raise PipelineStateError(f"Replacement must be non-empty and at most {plan['config']['limit']} characters.")
+    if not meaningful_text(text) or len(text) > MAX_CHUNK:
+        raise PipelineStateError(f"Replacement must be non-empty and at most {MAX_CHUNK} characters.")
+    # The edited text is measured against this job's own page band, exactly like the
+    # chunks the planner produced for it.
+    budget = renderer_budget(title=group.title,
+                             chapter_labels=[page_chapter_label(row.get("number"), group.label)
+                                             for row in group.chapters] + [group.label])
+    measurement = budget.measure(text)
+    if not measurement.fits:
+        raise PipelineStateError(
+            f"Replacement does not fit the page: chars={len(text)}, visible_lines={measurement.visible_lines}, "
+            f"font_size={measurement.font_size}px, body_width={measurement.body_width}px, "
+            f"body_height={measurement.body_height}px, reason={measurement.reason}. "
+            "Shorten the text or split it into several chapters' chunks.")
     path = Path(group.output_dir) / "tts_overrides.json"
     saved = {"schema_version": 1, "plan_id": plan["plan_id"], "overrides": {}}
     try:

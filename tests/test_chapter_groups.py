@@ -389,7 +389,7 @@ class ChapterGroupTests(unittest.TestCase):
         with self.assertRaises(PipelineStateError):
             edit_failed_chunk(doc, group.group_id, self.settings, 1, 'Fixed.')
         group.state['failures'] = [{'chunk_number': 1}]
-        for text in ('', ' ' * 10, 'a' * 1201):
+        for text in ('', ' ' * 10, 'a' * 2001, 'Thoại ngắn.\n\n' * 30):
             with self.assertRaises(PipelineStateError):
                 edit_failed_chunk(doc, group.group_id, self.settings, 1, text)
         original = Path(group.txt_path).read_bytes()

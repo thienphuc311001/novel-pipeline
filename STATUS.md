@@ -10,6 +10,20 @@ The application now uses a five-step desktop workflow:
 
 ## Recent changes
 
+- Step 4 pages use style `minimal-neon-theater-v5`: the neon frame covers 90% of
+  the 1920×1080 canvas and the body block runs in a fixed, centered 1150px column
+  at a fixed 36px, so each Step 3 chunk fills roughly 90–98% of its own measured
+  page band (the real title and chapter labels, not a worst-case reserve) instead
+  of stopping at a 700-character target. The measured pixel height decides every
+  chunk boundary and a 20-line sanity guard stays secondary; a chunk that would
+  need more than the band is reported for a Step 3 re-split, while short chapter
+  headings and chapter tails (which cannot be stretched) simply show fewer lines.
+  Rendered against a real multi-chapter novel, normal pages land near the 96%
+  fill target and never overflow; paragraph-gap compression remains a safety net,
+  with the same bold face as the title. The style change is part of the visual
+  fingerprint, so Step 4 repaints every cached page of a group once — regenerate a
+  group's thumbnail to pick up the bold chapter range; the old
+  `render_pages/page_*` files stay on disk and can be deleted safely.
 - Countdown/clock stamps such as `【4:59:50】` and `【12:09:57 — rương báu】` no
   longer match the plain numbered pattern: they stay in the chapter body
   instead of inventing `Chương 0`/`Chương 23` and splitting real chapters.

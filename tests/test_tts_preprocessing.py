@@ -362,7 +362,8 @@ class LegacyAndUiTests(unittest.TestCase):
         doc.job_chapter = 'Chương 1'
         prepared, stats, _ = prepare_legacy_bundle(doc.clone(), self.settings)
         data = load_bundle_json(prepared.step3_artifacts)
-        self.assertEqual(data['tts_preparation'], preprocessing_identity(self.settings))
+        from media.groups import job_preprocessing_identity
+        self.assertEqual(data['tts_preparation'], job_preprocessing_identity(prepared, self.settings))
         self.assertEqual(Path(data['resolved_output_dir']), self.root.resolve())
         self.assertIn('Lời đầu.', data['chunks'][0]['text'])
         self.assertIn('Ngươi là ai? Ta không biết…', prepared.cleaned_text)
@@ -397,7 +398,8 @@ class LegacyAndUiTests(unittest.TestCase):
             window._on_generate_audiobook()
         self.assertIn('Ngươi là ai? Ta không biết…', '\n'.join(seen))
         self.assertNotIn('biết.....', '\n'.join(seen))
-        self.assertEqual(load_bundle_json(window.document.step3_artifacts)['tts_preparation'], preprocessing_identity(self.settings))
+        self.assertEqual(load_bundle_json(window.document.step3_artifacts)['tts_preparation'],
+                         job_preprocessing_identity(window.document, self.settings))
         window._tts_thread = None
         window.close()
 
