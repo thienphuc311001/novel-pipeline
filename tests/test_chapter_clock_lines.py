@@ -1,0 +1,114 @@
+"""Regression tests for countdown/clock lines inside chapter bodies.
+
+Countdown stamps such as ``【4:59:50】`` or ``【12:09:57 — rương báu】`` are
+narrative content.  They used to match the plain numbered pattern and became
+phantom chapters (``Chương 0``, ``Chương 23``) while splitting the body of the
+chapter they belong to.
+"""
+
+from __future__ import annotations
+
+import unittest
+
+from chapters.detector import detect_chapters
+from chapters.normalizer import NormalizeOptions, normalize_chapters
+from chapters.patterns import DEFAULT_PATTERNS, PatternSet
+
+
+class ClockLineTests(unittest.TestCase):
+    def patterns(self) -> PatternSet:
+        return PatternSet(patterns=DEFAULT_PATTERNS)
+
+    def detect(self, text: str):
+        hits, _preamble, _notes = detect_chapters(text, self.patterns())
+        return hits
+
+    def normalize(self, text: str):
+        return normalize_chapters(text, self.patterns(), NormalizeOptions())
+
+    def test_decorated_countdown_lines_are_not_headers(self):
+        samples = (
+            "【4:59:50】",
+            "【4:52:03】",
+            "【00:18】",
+            "【0:15】",
+            "【23:59:59】",
+            "【12:09:57 — rương báu】",
+            "【1:56】",
+            "[4:59:50]",
+            "（00:18）",
+        )
+
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(self.detect(sample), [])
+
+    def test_undecorated_clock_line_is_not_a_header(self):
+        self.assertEqual(self.detect("10:30 sáng hôm đó trời mưa rất to."), [])
+
+    def test_countdown_line_stays_in_chapter_body(self):
+        text = (
+            "Chương 14: Trăng xanh\n\n"
+            "Đồng hồ đếm ngược hiện ra trước mắt.\n\n"
+            "【4:59:50】\n\n"
+            "Khâu Đồ im lặng vài giây rồi chậm rãi bật cười.\n"
+        )
+
+        chapters, _report, _diagnostics = self.normalize(text)
+
+        self.assertEqual([chapter.number for chapter in chapters], [14])
+        self.assertIn("【4:59:50】", chapters[0].text)
+        self.assertIn("Khâu Đồ im lặng vài giây", chapters[0].text)
+
+    def test_source_with_twenty_chapters_detects_twenty(self):
+        chapters, _report, _diagnostics = self.normalize(self.twenty_chapter_source())
+
+        self.assertEqual([chapter.number for chapter in chapters], list(range(1, 21)))
+        body = "\n".join(chapter.text for chapter in chapters)
+        self.assertIn("【23:59:59】", body)
+        self.assertIn("【12:09:57 — rương báu】", body)
+
+    def test_chapter_after_countdown_lines_keeps_the_rest_of_its_body(self):
+        chapters, _report, _diagnostics = self.normalize(self.twenty_chapter_source())
+
+        chapter = next(item for item in chapters if item.number == 14)
+        self.assertIn("rương có đồng hồ đếm ngược 24 giờ", chapter.text)
+        self.assertIn("Sáng hôm sau", chapter.text)
+        self.assertIn("Thân chương 14", chapter.text)
+
+    def test_plain_numbered_headers_are_still_detected(self):
+        for sample in ("12. Đêm đầu tiên", "12: Đêm đầu tiên", "12) Đêm đầu tiên"):
+            with self.subTest(sample=sample):
+                hits = self.detect(sample)
+                self.assertEqual(len(hits), 1)
+                self.assertEqual(hits[0].number, 12)
+
+    def test_vietnamese_header_with_numeric_title_is_kept(self):
+        hits = self.detect("Chương 12: 30 ngày đêm")
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].number, 12)
+        self.assertEqual(hits[0].title, "30 ngày đêm")
+
+    @staticmethod
+    def twenty_chapter_source() -> str:
+        parts = []
+        for number in range(1, 21):
+            parts.append(f"Chương {number}: Tiêu đề {number}\n\n")
+            if number == 4:
+                parts.append("【4:59:50】\n\n")
+            if number == 14:
+                parts.append(
+                    "Nhưng khác với chiếc rương lần trước, lần này rương có "
+                    "đồng hồ đếm ngược 24 giờ.\n\n"
+                    "【23:59:59】\n\n"
+                    "Khâu Đồ: ...\n\n"
+                    "【12:09:57 — rương báu】\n\n"
+                    "Sáng hôm sau, Khâu Đồ bị tiếng gõ cửa đánh thức.\n\n"
+                )
+            parts.append(f"Thân chương {number} vẫn còn nguyên vẹn.\n\n")
+        return "".join(parts)
+
+
+if __name__ == "__main__":
+    unittest.main()

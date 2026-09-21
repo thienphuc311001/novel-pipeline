@@ -38,6 +38,31 @@ CHINESE_SEPARATOR_CHARS = ":：-–—、,，"
 HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 LATIN_RE = re.compile(r"[A-Za-zÀ-ỹà-ỹ]")
 
+# Countdown/clock display lines such as 【4:59:50】, 【00:18】 or
+# 【12:09:57 — rương báu】 are narrative content, never chapter headers.
+MAX_CLOCK_LINE_CHARS = 40
+CLOCK_VALUE_RE = re.compile(
+    r"^[0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?(?:\s*[—–-]\s*\S.*)?$"
+)
+TIME_EXPRESSION_RE = re.compile(r"^[0-9]{1,3}:[0-9]{2}")
+DECORATIVE_TRIM_CHARS = " \t\u3000【】[]〔〕（）()《》〈〉「」『』★#*·・,.;:!?…–—-"
+
+
+def _is_clock_only_line(line: str) -> bool:
+    """Return whether *line* only displays a clock/countdown value.
+
+    Samples: ``【4:59:50】``, ``【00:18】``, ``【12:09:57 — rương báu】``.
+    Those lines are story content; reading them as headers invents chapters
+    and splits the body of the chapter they belong to.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > MAX_CLOCK_LINE_CHARS:
+        return False
+    core = stripped.strip(DECORATIVE_TRIM_CHARS).strip()
+    if not core or len(core) > MAX_CLOCK_LINE_CHARS:
+        return False
+    return bool(CLOCK_VALUE_RE.match(core))
+
 
 def _is_chinese_only_title(value: str) -> bool:
     """Return whether a same-line suffix is a Chinese-only chapter title."""
@@ -157,12 +182,23 @@ def _try_line_header(
     # Skip empty lines and overly long lines (likely prose, not headers)
     if not stripped or len(stripped) > MAX_HEADER_LINE_CHARS:
         return None
+
+    # A line that only shows a clock/countdown value is never a header.
+    if _is_clock_only_line(stripped):
+        return None
     
     for pattern in pattern_set.all():
         match = pattern.match(stripped)
         if not match:
             continue
         
+        # A plain numbered line whose number starts a clock value is prose,
+        # not a header ("10:30 sáng hôm đó…").
+        if pattern.name == "plain" and TIME_EXPRESSION_RE.match(
+            stripped[match.start("number"):]
+        ):
+            continue
+
         # Parse chapter number
         number = _parse_number(match.groupdict().get("number"))
         if number is None:
@@ -209,6 +245,10 @@ def _try_glued_header(
     stripped = line.strip()
     
     if not stripped or len(stripped) < 4:
+        return None
+
+    # A line that only shows a clock/countdown value is never a header.
+    if _is_clock_only_line(stripped):
         return None
     
     for pattern in pattern_set.all():

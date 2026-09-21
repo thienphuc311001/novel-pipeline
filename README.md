@@ -28,6 +28,7 @@ Raw TXT / ZIP
 - **JSON artifact unwrapping** - Detects and unwraps structured JSON artifacts
 - **Escaped newline restoration** - Converts literal `\n` to real line breaks
 - **Multilingual chapter detection** - Vietnamese, English, Chinese, plain numbered formats
+- **Countdown stamps ignored** - Clock lines such as `【4:59:50】`, `【00:18】` or `【12:09:57 — rương báu】` stay inside the chapter body instead of becoming phantom chapters
 - **Chinese numeral conversion** - Supports full range (零一二两...千万亿)
 - **Glued header splitting** - Separates headers from narrative when no line break
 - **Duplicate chapter detection** - Vietnamese over Chinese, longer over shorter

@@ -10,6 +10,9 @@ The application now uses a five-step desktop workflow:
 
 ## Recent changes
 
+- Countdown/clock stamps such as `【4:59:50】` and `【12:09:57 — rương báu】` no
+  longer match the plain numbered pattern: they stay in the chapter body
+  instead of inventing `Chương 0`/`Chương 23` and splitting real chapters.
 - Removed the legacy Chinese scanning/translation flow and its `chinese/` and
   `translation/` packages.
 - Step 2 consumes successful Step 1 `normalized_text` directly, with a safe
