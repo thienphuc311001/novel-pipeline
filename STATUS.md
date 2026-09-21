@@ -19,8 +19,12 @@ The application now uses a five-step desktop workflow:
 - Artifact, grouping, and TTS provenance now use `normalized_revision`.
 - Existing `Step3ArtifactBundle`/`step3_artifacts` names remain compatible with
   saved jobs.
-- Added reusable `Copy all` controls to generated read-only output, diagnostics,
-  group panels, result/capability views, failure dialogs, and YouTube results.
+- Replaced the bottom status/diagnostics panel with a shared modeless log
+  window opened from the toolbar **📋 Log** button or `Ctrl+L`; the log stays
+  available from every step and never interrupts a running job.
+- Added reusable `Copy all` controls to generated read-only output, the shared
+  log window, group panels, result/capability views, failure dialogs, and
+  YouTube results.
 - Removed dictionary/translation settings tabs and safely ignore those keys in
   legacy config files.
 
@@ -28,7 +32,8 @@ The application now uses a five-step desktop workflow:
 
 The test suite covers direct Chinese-text flow from normalization to grouping,
 five-tab ordering/navigation, legacy config loading, copy-to-clipboard output,
-group/media provenance, TTS preparation, video timing, and YouTube recovery.
+the shared log window, group/media provenance, TTS preparation, video timing,
+and YouTube recovery.
 
 Use:
 

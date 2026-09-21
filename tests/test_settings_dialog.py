@@ -116,20 +116,28 @@ class SettingsDialogTests(unittest.TestCase):
 
         self.assertEqual(window.settings_btn.text(), "⚙ Settings")
         self.assertEqual(window.font().pointSize(), 13)
-        self.assertEqual(window.status_text.document().maximumBlockCount(), 321)
+        self.assertEqual(window.log_dialog.log_text.document().maximumBlockCount(), 321)
+        self.assertIs(window.status_text, window.log_dialog.log_text)
         self.assertEqual(window._default_export_filename(), "novel_export.json")
 
-    def test_diagnostics_panel_is_large_and_resizable(self):
+    def test_log_window_is_detached_and_resizable(self):
         window = MainWindow(Settings())
         window.show()
         self.app.processEvents()
 
-        self.assertEqual(window.main_splitter.orientation().value, 2)
-        self.assertGreaterEqual(window.main_splitter.widget(1).minimumHeight(), 180)
-        self.assertGreaterEqual(window.main_splitter.sizes()[1], 180)
-        window.main_splitter.setSizes([500, 320])
+        self.assertFalse(hasattr(window, "main_splitter"))
+        self.assertFalse(window.log_dialog.isVisible())
+        self.assertIs(window.log_dialog.parent(), window)
+
+        window._show_log_dialog()
         self.app.processEvents()
-        self.assertGreaterEqual(window.main_splitter.sizes()[1], 300)
+        self.assertTrue(window.log_dialog.isVisible())
+        self.assertGreaterEqual(window.log_dialog.width(), 600)
+        self.assertGreaterEqual(window.log_dialog.height(), 300)
+
+        window.log_dialog.resize(1000, 700)
+        self.app.processEvents()
+        self.assertGreaterEqual(window.log_dialog.height(), 600)
         window.close()
 
     def test_cleaning_settings_affect_step3(self):

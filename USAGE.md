@@ -204,16 +204,21 @@ Settings are auto-saved to:
 
 ## Diagnostics
 
-The bottom status panel shows:
+**📋 Log** in the toolbar (or `Ctrl+L`) opens the shared log window:
 - Stage completion status
 - Warnings (missing chapters, duplicates)
 - Errors (encoding issues, parse failures)
 - Info (chapters detected, chunks created)
 
+The window is modeless and shared by all five steps: it keeps every line when
+you close it, reopen it, or switch steps, and it never blocks or interrupts a
+running job. `Auto-scroll` follows new lines, `Clear` empties the buffer, and
+the retained line count follows **Max log lines** in Settings.
+
 Read-only generated text panels, previews, group details, failure dialogs,
-YouTube results, and diagnostics include **Copy all**. The action copies the
-complete plain text with its original line breaks; editable title, description,
-JSON, and TTS fields remain ordinary editors.
+YouTube results, and the shared log window include **Copy all**. The action
+copies the complete plain text with its original line breaks; editable title,
+description, JSON, and TTS fields remain ordinary editors.
 
 **Example:**
 ```

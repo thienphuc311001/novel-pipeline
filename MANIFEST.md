@@ -28,8 +28,8 @@ bundle schema, not to a visible tab number.
   duplicate handling
 - `cleaning/` and `chunking/` — safe TTS preparation and sentence-aware chunks
 - `media/` — exact group artifacts, thumbnails, TTS, video, and YouTube state
-- `ui/` — five-step main window, group panels, settings, YouTube, and reusable
-  `Copy all` controls
+- `ui/` — five-step main window, group panels, settings, YouTube, reusable
+  `Copy all` controls, and the shared modeless log window (`ui/log_dialog.py`)
 - `exporters/` — JSON and text exports
 
 The former Chinese scanning and translation packages are intentionally absent.
@@ -45,10 +45,20 @@ never use a temporary folder, and creating groups refuses to run until an input
 folder is loaded. The test suite points `NOVEL_PIPELINE_CONFIG_DIR` at an
 isolated directory, so running tests never rewrites the user's `config.json`.
 
-Read-only generated text in the main window, diagnostics, group panels,
-failure dialogs, capability/result panels, and YouTube results exposes a
-`Copy all` button. It copies the complete plain text and preserves line breaks.
-Editable title, description, JSON, and TTS fields do not receive this control.
+Read-only generated text in the main window, the shared log window, group
+panels, failure dialogs, capability/result panels, and YouTube results exposes
+a `Copy all` button. It copies the complete plain text and preserves line
+breaks. Editable title, description, JSON, and TTS fields do not receive this
+control.
+
+## Log window
+
+The workspace uses the full window height: the former bottom status panel is
+gone. One `LogDialog` instance collects the status lines of every stage and is
+opened from the toolbar **📋 Log** button or `Ctrl+L`. It is modeless, shared
+by all five steps, keeps its lines across closing/reopening and step changes,
+and never changes the active step, disables a control, or interrupts a running
+job.
 
 ## Verification
 

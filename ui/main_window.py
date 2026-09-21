@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QProcess, QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,8 +25,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QFormLayout,
     QProgressBar,
-    QSizePolicy,
-    QSplitter,
     QSpinBox,
     QStackedWidget,
 )
@@ -40,6 +38,7 @@ from pipeline.document import (
     render_chapters_text,
 )
 from ui.copy_controls import add_copy_button, copy_text
+from ui.log_dialog import LogDialog
 
 
 class _TtsWorker(QObject):
@@ -480,6 +479,7 @@ class MainWindow(QMainWindow):
         self._video_media = None
         self._video_audio_probe = None
         self._video_render_session = None
+        self._log_unread = False
         
         self.setWindowTitle("Novel Pipeline v2")
         self.resize(1400, 900)
@@ -505,6 +505,11 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("⚙ Settings")
         self.settings_btn.clicked.connect(self._on_open_settings)
         toolbar.addWidget(self.settings_btn)
+
+        self.log_btn = QPushButton("📋 Log")
+        self.log_btn.setToolTip("Show the global status & diagnostics log (Ctrl+L)")
+        self.log_btn.clicked.connect(self._toggle_log_dialog)
+        toolbar.addWidget(self.log_btn)
         
         toolbar.addStretch()
         
@@ -562,26 +567,17 @@ class MainWindow(QMainWindow):
             panel.layout_main.addWidget(button)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         
-        # Pipeline workspace and diagnostics share a draggable vertical split.
-        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.setHandleWidth(8)
-        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.main_splitter.addWidget(self.tabs)
+        # The workspace keeps the full window height; the shared log lives in
+        # its own modeless window instead of a bottom diagnostics panel.
+        layout.addWidget(self.tabs, 1)
 
-        diagnostics_widget = QWidget()
-        diagnostics_widget.setMinimumHeight(180)
-        diagnostics_layout = QVBoxLayout(diagnostics_widget)
-        diagnostics_layout.setContentsMargins(0, 0, 0, 0)
-        self.status_text = QTextEdit()
-        self.status_text.setReadOnly(True)
-        diagnostics_layout.addWidget(QLabel("Status & Diagnostics:"))
-        add_copy_button(diagnostics_layout, self.status_text, button_attr="copy_btn")
-        self.main_splitter.addWidget(diagnostics_widget)
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 0)
-        self.main_splitter.setSizes([640, 260])
-        layout.addWidget(self.main_splitter, 1)
+        # One log instance is shared by every step, so the toolbar button or
+        # Ctrl+L can open it from any step without switching tabs and without
+        # interrupting a running job.
+        self.log_dialog = LogDialog(self)
+        self._log_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        self._log_shortcut.activated.connect(self._toggle_log_dialog)
+        self._refresh_log_button()
 
     def _create_stage1_tab(self) -> QWidget:
         """Input loading and chapter normalization."""
@@ -1881,6 +1877,9 @@ class MainWindow(QMainWindow):
             self._log("Please wait for the active encoder check to finish before closing.")
             event.ignore()
             return
+        # The log window is a child of this window; hide it so the application
+        # can quit when the main window closes.
+        self.log_dialog.hide()
         super().closeEvent(event)
 
     def _on_video_progress(self, update: dict) -> None:
@@ -2011,9 +2010,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setFont(font)
         self.setFont(font)
-        self.status_text.document().setMaximumBlockCount(
-            max(100, int(self.settings.max_log_lines or 2000))
-        )
+        self.log_dialog.set_max_lines(self.settings.max_log_lines)
 
     def _default_export_filename(self) -> str:
         try:
@@ -2023,8 +2020,36 @@ class MainWindow(QMainWindow):
         name = (name or "novel_export").strip()
         return name if name.lower().endswith(".json") else f"{name}.json"
     
+    @property
+    def status_text(self) -> QTextEdit:
+        """Compatibility alias for the shared log editor."""
+        return self.log_dialog.log_text
+
     def _log(self, message: str):
-        self.status_text.append(message)
+        self.log_dialog.append_line(message)
+        if not self.log_dialog.isVisible():
+            self._log_unread = True
+            self._refresh_log_button()
+
+    def _toggle_log_dialog(self) -> None:
+        """Show or hide the shared log without touching the active step."""
+        if self.log_dialog.isVisible():
+            self.log_dialog.hide()
+            return
+        self._show_log_dialog()
+
+    def _show_log_dialog(self) -> None:
+        """Open the shared log; a running job keeps going untouched."""
+        self._log_unread = False
+        self._refresh_log_button()
+        self.log_dialog.open_window()
+
+    def _refresh_log_button(self) -> None:
+        self.log_btn.setText("📋 Log ●" if self._log_unread else "📋 Log")
+        self.log_btn.setToolTip(
+            "New log lines are available (Ctrl+L)" if self._log_unread
+            else "Show the global status & diagnostics log (Ctrl+L)"
+        )
     
     def _error(self, message: str):
         dialog = QMessageBox(QMessageBox.Icon.Critical, "Error", message, parent=self)

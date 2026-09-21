@@ -116,6 +116,10 @@ python app.py
 5. **Create Videos** - Render selected groups, automatically skipping valid completed MP4s
 6. **Start Uploads** - Connect your channel, review shared metadata/per-group titles, and upload selected groups
 
+Open the shared log at any time with **📋 Log** in the toolbar or `Ctrl+L`: it
+collects stage status, warnings, and errors for every step in one modeless
+window, without interrupting a running job.
+
 ### Configuration
 
 Settings are stored in `~/.config/novel-pipeline-v2/config.json` (or `XDG_CONFIG_HOME`).
