@@ -2,7 +2,8 @@
 
 from .numerals import chinese_to_int, parse_number_token
 from .patterns import ChapterPattern, build_patterns, validate_custom_regex
-from .detector import ChapterHit, detect_chapters, detect_headers_in_text
+from .detector import (ChapterHit, detect_chapters, detect_headers_in_text,
+                       is_clock_only_line, is_clock_value_match)
 from .duplicates import DuplicateReport, resolve_duplicates
 from .normalizer import NormalizeOptions, normalize_chapters
 
@@ -15,6 +16,8 @@ __all__ = [
     "ChapterHit",
     "detect_chapters",
     "detect_headers_in_text",
+    "is_clock_only_line",
+    "is_clock_value_match",
     "DuplicateReport",
     "resolve_duplicates",
     "NormalizeOptions",

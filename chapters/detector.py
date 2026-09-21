@@ -48,7 +48,7 @@ TIME_EXPRESSION_RE = re.compile(r"^[0-9]{1,3}:[0-9]{2}")
 DECORATIVE_TRIM_CHARS = " \t\u3000【】[]〔〕（）()《》〈〉「」『』★#*·・,.;:!?…–—-"
 
 
-def _is_clock_only_line(line: str) -> bool:
+def is_clock_only_line(line: str) -> bool:
     """Return whether *line* only displays a clock/countdown value.
 
     Samples: ``【4:59:50】``, ``【00:18】``, ``【12:09:57 — rương báu】``.
@@ -62,6 +62,22 @@ def _is_clock_only_line(line: str) -> bool:
     if not core or len(core) > MAX_CLOCK_LINE_CHARS:
         return False
     return bool(CLOCK_VALUE_RE.match(core))
+
+
+def is_clock_value_match(line: str, match: re.Match[str], pattern_name: str) -> bool:
+    """Return whether *match* on *line* is a clock/countdown value, not a header.
+
+    Covers a line that only displays a clock value (``【4:59:50】``,
+    ``【12:09:57 — rương báu】``) and a plain numbered line whose number starts a
+    clock value (``10:30 sáng hôm đó…``), which the plain pattern would
+    otherwise read as a chapter header.
+    """
+    stripped = line.strip()
+    if is_clock_only_line(stripped):
+        return True
+    if pattern_name != "plain":
+        return False
+    return bool(TIME_EXPRESSION_RE.match(stripped[match.start("number"):]))
 
 
 def _is_chinese_only_title(value: str) -> bool:
@@ -182,21 +198,14 @@ def _try_line_header(
     # Skip empty lines and overly long lines (likely prose, not headers)
     if not stripped or len(stripped) > MAX_HEADER_LINE_CHARS:
         return None
-
-    # A line that only shows a clock/countdown value is never a header.
-    if _is_clock_only_line(stripped):
-        return None
     
     for pattern in pattern_set.all():
         match = pattern.match(stripped)
         if not match:
             continue
         
-        # A plain numbered line whose number starts a clock value is prose,
-        # not a header ("10:30 sáng hôm đó…").
-        if pattern.name == "plain" and TIME_EXPRESSION_RE.match(
-            stripped[match.start("number"):]
-        ):
+        # Countdown/clock values are story content, never chapter headers.
+        if is_clock_value_match(stripped, match, pattern.name):
             continue
 
         # Parse chapter number
@@ -248,7 +257,7 @@ def _try_glued_header(
         return None
 
     # A line that only shows a clock/countdown value is never a header.
-    if _is_clock_only_line(stripped):
+    if is_clock_only_line(stripped):
         return None
     
     for pattern in pattern_set.all():

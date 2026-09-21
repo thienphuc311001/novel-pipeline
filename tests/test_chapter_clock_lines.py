@@ -13,6 +13,8 @@ import unittest
 from chapters.detector import detect_chapters
 from chapters.normalizer import NormalizeOptions, normalize_chapters
 from chapters.patterns import DEFAULT_PATTERNS, PatternSet
+from config.settings import Settings
+from media.groups import analyze_grouping, preview_groups, scan_headings
 
 
 class ClockLineTests(unittest.TestCase):
@@ -108,6 +110,30 @@ class ClockLineTests(unittest.TestCase):
                 )
             parts.append(f"Thân chương {number} vẫn còn nguyên vẹn.\n\n")
         return "".join(parts)
+
+
+    def test_step2_scanner_ignores_countdown_lines(self):
+        headings = scan_headings(self.twenty_chapter_source(), Settings())
+
+        self.assertEqual([heading.number for heading in headings], list(range(1, 21)))
+
+    def test_step2_analysis_reports_no_phantom_numbering(self):
+        analysis = analyze_grouping(self.twenty_chapter_source(), Settings(), 20)
+
+        self.assertEqual(analysis.expected_count, 20)
+        self.assertEqual(analysis.diagnostics, [])
+        self.assertFalse(analysis.requires_numeric_boundaries)
+
+    def test_step2_preview_groups_uses_only_real_chapters(self):
+        text = self.twenty_chapter_source()
+        headings, groups, diagnostics = preview_groups(text, Settings(), 20)
+
+        self.assertEqual(len(headings), 20)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["label"], "Chương 1-20")
+        self.assertEqual(len(groups[0]["chapters"]), 20)
+        self.assertEqual(diagnostics, [])
+        self.assertEqual("".join(text[group["start"]:group["end"]] for group in groups), text)
 
 
 if __name__ == "__main__":

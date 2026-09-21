@@ -39,6 +39,7 @@ Raw TXT / ZIP
 ### Stage 2: Detect Chapters & Group
 
 - Detects configured headings losslessly, including Chương, Chuong, Chapter, Hồi, and Quyển.
+- Uses the same clock/countdown guard as Stage 1, so stamps such as `【4:59:50】` never count as headings.
 - Shows count, exact first/last headings, numbering gaps/repetitions/resets, and all group ranges.
 - Groups consecutive entries by 10, 20 (default), 25, 50, or a custom count; never sorts/renumbers.
 - When missing numbers make heading-count groups unsafe, offers confirmed numeric ranges and splits only at verified group-start headings.

@@ -178,7 +178,7 @@ class ChapterGroupTests(unittest.TestCase):
         changed_patterns = Settings(detect_english=False)
         with self.assertRaises(PipelineStateError):
             restore_groups(document_for(text, self.root), changed_patterns, doc.job_title, 20)
-        with patch('media.groups.HEADING_SCANNER_VERSION', 'heading-scan-v2'):
+        with patch('media.groups.HEADING_SCANNER_VERSION', 'heading-scan-v3'):
             with self.assertRaises(PipelineStateError):
                 restore_groups(document_for(text, self.root), self.settings, doc.job_title, 20)
 

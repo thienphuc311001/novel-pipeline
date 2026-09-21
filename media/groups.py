@@ -10,6 +10,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from chapters.detector import is_clock_value_match
 from chapters.patterns import build_patterns, glued_head
 from chapters.numerals import parse_number_token
 from media.artifacts import (atomic_write_json, atomic_write_text, require_artifact_root, sha256_file,
@@ -20,7 +21,7 @@ GROUPING_METHOD_DETECTED = "detected_chapters"
 GROUPING_METHOD_NUMERIC = "numeric_boundaries"
 # Increment whenever heading detection or numeral parsing changes in a way that
 # can move a boundary. Numeric confirmations are intentionally fail-closed.
-HEADING_SCANNER_VERSION = "heading-scan-v1"
+HEADING_SCANNER_VERSION = "heading-scan-v2"
 
 
 @dataclass
@@ -86,6 +87,9 @@ def scan_headings(text, settings):
                 if candidate and (candidate.end() == len(line.strip()) or
                                   re.match(r"[\s:：.\-–—]", line.strip()[candidate.end():])):
                     match = candidate
+            # Countdown/clock values inside the story are not chapter headings.
+            if match is not None and is_clock_value_match(line, match, pattern.name):
+                match = None
             if match:
                 try:
                     number = parse_number_token(match.group("number"))
