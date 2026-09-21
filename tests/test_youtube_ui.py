@@ -57,7 +57,7 @@ class YouTubeUiTests(unittest.TestCase):
         fixture = pipeline_fixture.YouTubePipelineTests()
         fixture.root = self.root
         self.document = fixture.ready_document()
-        self.window = MainWindow(Settings(output_dir=str(self.root), youtube_client_secrets_path="fake.json"))
+        self.window = MainWindow(Settings(youtube_client_secrets_path="fake.json"))
         self.window.document = self.document
         self.tab = self.window.stage6_widget
         self.tab.auth_factory = FakeAuth

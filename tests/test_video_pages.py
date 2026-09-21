@@ -18,8 +18,8 @@ from media.artifacts import atomic_write_json, sha256_file
 from media.tts import TtsChunk, TtsProcessor
 from media.video import (AudioProbe, EncoderCandidate, VideoValidationError, build_video_command,
                          probe_audio, validate_rendered_video, verify_vfr_encoder)
-from media.video_pages import (DEFAULT_STYLE, load_narration, prepare_video_timeline, render_page,
-                               source_fingerprint, validate_timeline_timestamps)
+from media.video_pages import (DEFAULT_STYLE, load_narration, page_chapter_label, prepare_video_timeline,
+                               render_page, source_fingerprint, validate_timeline_timestamps)
 from tests.support import create_narration_fixture
 
 
@@ -97,10 +97,37 @@ class VideoPageTests(unittest.TestCase):
         with patch('media.video_pages.render_page', wraps=render_page) as render:
             self.timeline(style=replace(DEFAULT_STYLE, brightness=.6))
             self.assertEqual(render.call_count, 2)
+        # The thumbnail keeps the group range, so the group label no longer paints pages.
         self.media.chapter = 'Chương 1–20'
         with patch('media.video_pages.render_page', wraps=render_page) as render:
             self.timeline()
-            self.assertEqual(render.call_count, 2)
+            render.assert_not_called()
+
+    def test_each_page_names_only_its_own_chapter(self):
+        self.assertEqual(page_chapter_label(7, 'Chương 1–20'), 'Chương 7')
+        self.assertEqual(page_chapter_label('12', 'Chương 1–20'), 'Chương 12')
+        # A chunk without a usable number keeps the group caption instead of a blank label.
+        self.assertEqual(page_chapter_label(0, 'Chương 1–20'), 'Chương 1–20')
+        self.assertEqual(page_chapter_label(None, 'Chương 1–20'), 'Chương 1–20')
+        self.assertEqual(page_chapter_label('', ''), '')
+        self.assertNotEqual(self.chapter_page_bytes('Chương 7', 'label-7.png'),
+                            self.chapter_page_bytes('Chương 8', 'label-8.png'))
+
+        before = self.timeline()
+        self.chunks[0] = TtsChunk(1, self.texts[0], 7)
+        create_narration_fixture(self.root, self.chunks, self.audio)
+        with patch('media.video_pages.render_page', wraps=render_page) as render:
+            changed = self.timeline()
+            self.assertEqual(render.call_count, 1)
+            self.assertNotEqual(changed.pages[0].page_path, before.pages[0].page_path)
+            self.assertEqual(changed.pages[1].page_path, before.pages[1].page_path)
+
+    def chapter_page_bytes(self, chapter, name):
+        """Render one page with an explicit chapter label and return its pixels."""
+        layout = render_page(self.media.thumbnail_path, self.root / name, title='Truyện',
+                             chapter=chapter, text=self.texts[0])
+        self.assertGreaterEqual(layout['font_size'], DEFAULT_STYLE.min_body_size)
+        return (self.root / name).read_bytes()
 
     def test_invalid_audio_or_request_provenance_is_rejected(self):
         data = json.loads(self.processor.manifest_path.read_text())

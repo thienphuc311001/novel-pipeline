@@ -12,7 +12,8 @@ from pathlib import Path
 
 from chapters.patterns import build_patterns, glued_head
 from chapters.numerals import parse_number_token
-from media.artifacts import atomic_write_json, atomic_write_text, sha256_file, sha256_text, slugify_job_name
+from media.artifacts import (atomic_write_json, atomic_write_text, require_artifact_root, sha256_file,
+                             sha256_text, slugify_job_name)
 from pipeline.document import Chapter, PipelineStateError, Step4MediaBundle, Step5UploadBundle
 
 GROUPING_METHOD_DETECTED = "detected_chapters"
@@ -244,11 +245,11 @@ def _group_id(source_hash, title, size, item, method, numeric_fingerprint):
 
 
 def _manifest_path(document, settings, title):
-    """Resolve the manifest without abandoning a job when Settings changes."""
+    """Resolve the manifest beside the input without abandoning a recorded job."""
     remembered = Path(getattr(document, "group_manifest_path", "") or "").expanduser()
     if remembered.is_file():
         return remembered.resolve()
-    root = settings.resolved_output_dir(document.input_directory).resolve()
+    root = require_artifact_root(settings, document.input_directory)
     return root / slugify_job_name(title, "").rstrip("_") / "chapter_groups.json"
 
 
@@ -265,7 +266,7 @@ def write_groups(document, settings, title, size=20, *, method=GROUPING_METHOD_D
     if method == GROUPING_METHOD_NUMERIC and confirmation_fingerprint != analysis.numeric_identity_fingerprint:
         raise PipelineStateError("Numeric-boundary grouping requires a current user confirmation.")
     title_slug = slugify_job_name(title, "").rstrip("_")
-    output_root = settings.resolved_output_dir(document.input_directory).resolve()
+    output_root = require_artifact_root(settings, document.input_directory)
     novel_dir = output_root / title_slug
     source_hash = sha256_text(text)
     config = grouping_config(settings, size, method)

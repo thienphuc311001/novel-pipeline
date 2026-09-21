@@ -351,7 +351,7 @@ class LegacyAndUiTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.settings = Settings(output_dir=str(self.root))
+        self.settings = Settings()
 
     def test_legacy_bundle_client_and_old_provenance(self):
         from ui.main_window import MainWindow

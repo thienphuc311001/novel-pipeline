@@ -54,6 +54,18 @@ def artifact_paths(output_root: Path, title: str, chapter: str) -> Dict[str, Pat
     }
 
 
+def require_artifact_root(settings, input_directory) -> Path:
+    """Return the input-relative root that owns a new job's files.
+
+    Generated files always live beside the loaded Step 1 input; refusing to
+    guess keeps them out of temporary or unrelated folders.
+    """
+    try:
+        return settings.require_output_dir(input_directory).resolve()
+    except ValueError as error:
+        raise PipelineStateError(str(error)) from error
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)

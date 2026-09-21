@@ -94,7 +94,7 @@ It never discovers/regroups files by scanning folders.
 
 All groups appear unchecked. Highlight a group and click **Select Image for
 Highlighted Group** to choose its own image and create a 1280×720 `thumbnail.jpg`
-labeled with its range. The cover stays sharp and full-bleed (never blurred or
+labeled with its group range (for example `Chương 1-20`). The cover stays sharp and full-bleed (never blurred or
 dimmed) while the still reuses the Step 4 video-style neon frame and title/chapter
 typography, with the labels in a dark band across the bottom 20%. Repeat for each
 group; checklist selections control the TTS batch. Highlight a group to inspect its canonical paths, exact first
@@ -121,8 +121,8 @@ failed chunk, is non-empty and bounded by the chunk limit, and persists in
 Chunks** requires explicit confirmation and valid existing audio; excluded
 numbers are recorded and the result is labeled partial.
 
-Unless **Output folder override** is set in Settings, the Step 2 job folder is
-created beside the first TXT/ZIP selected in Step 1. Steps 3–5 continue to
+The Step 2 job folder is always created beside the first TXT/ZIP selected in
+Step 1; generated files never use a temporary folder. Steps 3–5 continue to
 use that same folder.
 
 ## Stage 4: Create Video
@@ -134,7 +134,9 @@ failed hardware encoder falls back to another verified option and finally to
 `libx264`.
 
 Select groups and click **Create Videos** to produce one 1920×1080 H.264 MP4
-per group sequentially. Valid current videos are verified and skipped. The image is preserved
+per group sequentially. Every page names only the chapter it narrates (for
+example `Chương 7`) instead of the whole group range; the Step 3 thumbnail keeps
+the group range. Valid current videos are verified and skipped. The image is preserved
 without stretching, FFmpeg progress and speed remain visible, and **Cancel**
 stops only the partial render. The completed file is saved automatically as
 `<title>_<chapter>.mp4` in the current job folder.
@@ -198,7 +200,7 @@ Settings are auto-saved to:
 - Encoding chain: Order of encoding attempts
 - TTS cleaning rules: What to remove/convert
 - Edge-TTS: voice, concurrency, timeout, and retry counts
-- Output folder override: leave blank to save beside the Step 1 input
+- Job location: always beside the Step 1 input file (not configurable)
 
 ## Diagnostics
 
@@ -315,7 +317,7 @@ Add replacement patterns in settings:
 
 **What's persistent:**
 - Settings (`config.json`)
-- Job artifacts and manifests in the configured output folder
+- Job artifacts and manifests in the input folder beside the loaded TXT/ZIP
 
 **What's temporary:**
 - Loaded text (in-memory only)

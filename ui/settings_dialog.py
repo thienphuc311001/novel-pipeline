@@ -130,7 +130,6 @@ class SettingsDialog(QDialog):
         self._int(form, "min_chunk_chars", "Minimum chunk characters", 50, 20000)
         self._int(form, "max_chunk_chars", "Maximum chunk characters", 50, 20000)
         self._bool(form, "chunk_by_chapters", "Keep chunks inside chapters")
-        self._path(form, "output_dir", "Output folder override (blank = input folder)")
         self._combo(form, "export_encoding", "Export encoding", {"UTF-8": "utf-8", "UTF-8 with BOM": "utf-8-sig", "UTF-16": "utf-16"})
         self._text(form, "filename_template", "Filename template")
         self._bool(form, "zip_include_manifest", "Include ZIP manifest")

@@ -19,7 +19,8 @@ from media.video import VideoValidationError, probe_audio, audio_rounding_tolera
 
 @dataclass(frozen=True)
 class PageStyle:
-    version: str = "minimal-neon-theater-v1"
+    # v2 labels every page with its own chapter instead of the whole group range.
+    version: str = "minimal-neon-theater-v2"
     width: int = 1920
     height: int = 1080
     frame: tuple[int, int, int, int] = (192, 108, 1728, 972)
@@ -69,6 +70,21 @@ def visual_settings(style=DEFAULT_STYLE):
 
 def _identity(value):
     return sha256_text(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
+def page_chapter_label(chapter_number, fallback=""):
+    """Label one page with its own chapter; the thumbnail keeps the group range.
+
+    Every TTS chunk belongs to exactly one chapter, so a page can always name
+    the chapter it narrates instead of repeating the whole group range.  A
+    missing/zero number falls back to the group label so a page never loses
+    its caption.
+    """
+    try:
+        number = int(chapter_number)
+    except (TypeError, ValueError):
+        number = 0
+    return f"Chương {number}" if number > 0 else str(fallback or "")
 
 
 def load_narration(media):
@@ -353,7 +369,9 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
     start = 0.0
     for record, probe in zip(records, probes):
         check()
-        key = _identity(dict(visual_source, text=record["text"]))
+        # Each page names only its own chapter; the group range stays on the thumbnail.
+        chapter_label = page_chapter_label(record.get("chapter"), media.chapter)
+        key = _identity(dict(visual_source, chapter=chapter_label, text=record["text"]))
         page_path = folder / "render_pages" / f"page_{record['order']:05d}_{key}.png"
         cache_path = page_path.with_suffix(".json")
         layout = None
@@ -368,7 +386,7 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
         if layout is None:
             try:
                 layout = render_page(media.thumbnail_path, page_path, title=media.title,
-                                     chapter=media.chapter, text=record["text"], style=style)
+                                     chapter=chapter_label, text=record["text"], style=style)
             except VideoValidationError as error:
                 raise VideoValidationError(f"Chunk {record['order']}: {error}") from error
             check()

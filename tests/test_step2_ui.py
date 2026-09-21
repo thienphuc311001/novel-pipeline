@@ -26,10 +26,10 @@ class Step2UiTests(unittest.TestCase):
 
     def make_window(self, text: str) -> tuple[MainWindow, tempfile.TemporaryDirectory]:
         temporary = tempfile.TemporaryDirectory()
-        settings = Settings(output_dir=temporary.name)
+        settings = Settings()
         window = MainWindow(settings)
         document = PipelineDocument()
-        document.load_original_input(text)
+        document.load_original_input(text, input_directory=temporary.name)
         document.normalized_text = text
         document.normalized_revision = 1
         document.stage(StageKey.NORMALIZE).touch("1 source", "1 chapter")

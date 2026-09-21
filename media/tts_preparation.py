@@ -6,7 +6,7 @@ from chapters.detector import detect_chapters
 from cleaning.tts_prepare import prepare_chapter
 from cleaning.tts_text_preprocessor import preprocessing_identity
 from chunking.splitter import split_chapters, clamp_chunk_size, TTS_CHUNK_TARGET
-from media.artifacts import write_step3_artifacts
+from media.artifacts import require_artifact_root, write_step3_artifacts
 from pipeline.document import (Chapter, PipelineStateError, derive_chapters_from_text,
                                render_chapters_text)
 
@@ -48,7 +48,7 @@ def prepare_legacy_bundle(document, settings, *, cancel_event=None):
     document.chunks = chunks
     document.diagnostics.extend(diagnostics)
     check_cancel()
-    bundle = write_step3_artifacts(document, settings.resolved_output_dir(document.input_directory),
+    bundle = write_step3_artifacts(document, require_artifact_root(settings, document.input_directory),
                                    title=document.job_title, chapter=document.job_chapter,
                                    chunk_limit=limit, tts_preparation=identity)
     document.set_step3_artifacts(bundle)

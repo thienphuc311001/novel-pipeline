@@ -33,7 +33,7 @@ class PipelineDataFlowTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.settings = Settings(output_dir=self.temp.name)
+        self.settings = Settings()
 
     def tearDown(self):
         self.temp.cleanup()

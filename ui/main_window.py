@@ -1116,6 +1116,8 @@ class MainWindow(QMainWindow):
             output_text = f"Effective output root: {output_root}"
             if job_dir is not None:
                 output_text += f"\nJob folder: {job_dir}"
+            if not self.document.input_directory:
+                output_text += "\nLoad input files in Step 1 so generated files stay beside them."
             if analysis.requires_numeric_boundaries:
                 self.stage3_detection_label.setText(
                     f"Expected range: Chương {headings[0].number}-{headings[-1].number}\n"
@@ -1967,15 +1969,12 @@ class MainWindow(QMainWindow):
         old_thumbnail = self.settings.thumbnail_jpeg_quality
         grouping_method = self.document.grouping_config.get("grouping_method", "detected_chapters")
         old_grouping = grouping_config(self.settings, self._selected_group_size(), grouping_method)
-        old_root = self.settings.resolved_output_dir(self.document.input_directory)
         for name in self.settings.__dataclass_fields__:
             setattr(self.settings, name, getattr(updated, name))
-        root_changed = old_root != self.settings.resolved_output_dir(self.document.input_directory)
-        # A live manifest is the resume authority. Changing the global output
-        # preference must not detach the current job from its recorded folder;
-        # the new preference applies to the next job instead.
-        if (old_grouping != grouping_config(self.settings, self._selected_group_size(), grouping_method) or
-                (root_changed and not self.document.group_manifest_path)):
+        # A live manifest is the resume authority and every job stays in its
+        # recorded folder beside the input, so only grouping changes invalidate
+        # files that are not yet grouped.
+        if old_grouping != grouping_config(self.settings, self._selected_group_size(), grouping_method):
             self.document._clear_step3_artifacts()
             self.stage3_continue_btn.setEnabled(False)
             self._refresh_group_preview()

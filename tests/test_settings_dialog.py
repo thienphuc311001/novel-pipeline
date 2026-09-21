@@ -135,10 +135,10 @@ class SettingsDialogTests(unittest.TestCase):
     def test_cleaning_settings_affect_step3(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        settings = Settings(output_dir=temporary.name, symbol_map={"%": " phần trăm "}, remove_html=True)
+        settings = Settings(symbol_map={"%": " phần trăm "}, remove_html=True)
         window = MainWindow(settings)
         raw = "Chương 1\n<p>Giá trị 10%</p>"
-        window.document.load_original_input(raw)
+        window.document.load_original_input(raw, input_directory=temporary.name)
         chapters, _report, diagnostics = normalize_chapters(
             raw,
             build_patterns(settings),

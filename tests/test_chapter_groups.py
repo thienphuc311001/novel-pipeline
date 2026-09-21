@@ -215,24 +215,37 @@ class ChapterGroupTests(unittest.TestCase):
             doc.require_step4_outputs()
         with self.assertRaises(PipelineStateError):
             doc.require_step5_outputs()
-        self.settings.output_dir = str(self.root / 'override')
-        group = write_groups(doc, self.settings, doc.job_title, 20)[0]
-        self.assertEqual(Path(group.output_dir).parent.parent, self.root / 'override')
 
-    def test_restore_uses_recorded_manifest_path_after_output_override_changes(self):
+    def test_job_files_always_stay_beside_the_input(self):
+        doc = document_for('Chương 1\nA.', self.root)
+        # A legacy output override in an old config cannot move the job folder.
+        legacy = Settings.from_dict({'output_dir': str(self.root / 'override')})
+        self.assertFalse(hasattr(legacy, 'output_dir'))
+        group = write_groups(doc, legacy, doc.job_title, 20)[0]
+        self.assertEqual(Path(group.output_dir).parent.parent, self.root)
+        self.assertFalse((self.root / 'override').exists())
+        manifest = json.loads(Path(doc.group_manifest_path).read_text(encoding='utf-8'))
+        self.assertEqual(Path(manifest['resolved_output_dir']), self.root.resolve())
+
+    def test_group_files_require_the_step1_input_folder(self):
+        doc = document_for('Chương 1\nA.', self.root)
+        doc.input_directory = ''
+        with self.assertRaisesRegex(PipelineStateError, 'Step 1'):
+            write_groups(doc, self.settings, doc.job_title, 20)
+
+    def test_restore_keeps_the_recorded_manifest_folder(self):
         text = 'Chương 1\nÂn Chính Mậu.'
         doc = document_for(text, self.root)
         groups = write_groups(doc, self.settings, doc.job_title, 20)
         recorded_manifest = Path(doc.group_manifest_path)
-        new_settings = Settings(output_dir=str(self.root / 'new-override'))
-        restored = document_for(text, self.root)
-        restored.group_manifest_path = str(recorded_manifest)
+        elsewhere = document_for(text, self.root / 'other-input')
+        elsewhere.group_manifest_path = str(recorded_manifest)
 
-        resumed = restore_groups(restored, new_settings, doc.job_title, 20)
+        resumed = restore_groups(elsewhere, self.settings, doc.job_title, 20)
 
         self.assertEqual([item.group_id for item in resumed], [item.group_id for item in groups])
         self.assertEqual(Path(resumed[0].output_dir).resolve(), Path(groups[0].output_dir).resolve())
-        self.assertEqual(Path(restored.group_manifest_path).resolve(), recorded_manifest.resolve())
+        self.assertEqual(Path(elsewhere.group_manifest_path).resolve(), recorded_manifest.resolve())
 
     def test_delete_damaged_groups_preserves_source_order_files_and_restore(self):
         text = ''.join(f'Chương {number}\nBody {number}.\n' for number in range(1, 5))

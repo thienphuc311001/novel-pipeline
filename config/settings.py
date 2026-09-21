@@ -149,7 +149,6 @@ class Settings:
     chunk_by_chapters: bool = True
 
     # --- export -----------------------------------------------------------
-    output_dir: str = ""
     export_encoding: str = "utf-8"
     filename_template: str = "novel_{tag}"
     zip_include_manifest: bool = True
@@ -234,15 +233,14 @@ class Settings:
 
     # ------------------------------------------------------------ helpers
     def resolved_output_dir(self, input_dir: str | Path | None = None) -> Path:
-        """Return the output root, preferring an explicit user override.
+        """Return the folder beside the Step 1 input that owns every artifact.
 
-        When no override is configured, artifacts belong beside the current
-        Step 1 input.  The historical home-directory fallback remains useful
-        for callers that do not yet have a loaded document.
+        Generated files always stay next to the loaded input.  There is no
+        output-folder override any more, so a temporary or unrelated location
+        can never silently collect a job.  The home-directory fallback only
+        serves callers that have not loaded an input yet, such as a save-dialog
+        default; every job-creating call site uses :meth:`require_output_dir`.
         """
-        configured = str(self.output_dir or "").strip()
-        if configured:
-            return Path(configured).expanduser()
         if input_dir:
             candidate = Path(input_dir).expanduser()
             # Callers normally pass Step 1's parent directory. Accepting a
@@ -251,6 +249,12 @@ class Settings:
             # selected file's parent-of-parent.
             return candidate.parent if candidate.is_file() else candidate
         return Path.home() / "novel-pipeline-output"
+
+    def require_output_dir(self, input_dir: str | Path | None = None) -> Path:
+        """Return the input-relative artifact root or refuse to guess."""
+        if not input_dir:
+            raise ValueError("Load input files in Step 1 so generated files stay beside them.")
+        return self.resolved_output_dir(input_dir)
 
     def resolved_input_dir(self) -> str:
         """Return the last usable input folder for a file picker."""

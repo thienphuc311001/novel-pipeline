@@ -34,19 +34,24 @@ class LastInputFolderTests(unittest.TestCase):
             input_dir.rmdir()
             self.assertEqual(loaded.resolved_input_dir(), "")
 
-    def test_output_folder_defaults_to_input_but_override_wins(self):
+    def test_output_folder_always_follows_the_input(self):
         with tempfile.TemporaryDirectory() as directory:
             input_dir = Path(directory) / "input"
-            override = Path(directory) / "override"
             input_dir.mkdir()
             input_file = input_dir / "input.txt"
             input_file.write_text("source", encoding="utf-8")
             settings = Settings()
             self.assertEqual(settings.resolved_output_dir(input_dir), input_dir)
             self.assertEqual(settings.resolved_output_dir(input_file), input_dir)
+            self.assertEqual(settings.require_output_dir(input_file), input_dir)
 
-            settings.output_dir = str(override)
-            self.assertEqual(settings.resolved_output_dir(input_dir), override)
+            # A legacy override key cannot redirect generated files anywhere.
+            legacy = Settings.from_dict({"output_dir": str(Path(directory) / "override")})
+            self.assertFalse(hasattr(legacy, "output_dir"))
+            self.assertEqual(legacy.resolved_output_dir(input_dir), input_dir)
+
+            with self.assertRaisesRegex(ValueError, "Step 1"):
+                settings.require_output_dir("")
 
     def test_file_picker_starts_at_and_updates_last_folder(self):
         with tempfile.TemporaryDirectory() as directory:

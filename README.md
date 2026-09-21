@@ -47,7 +47,7 @@ Raw TXT / ZIP
 
 ### Stage 3: Thumbnail & Audiobook
 
-- Unchecked TTS checklists; select an individual image for the highlighted group's `thumbnail.jpg` and exact first-chapter preview. The 1280×720 still reuses the video page's neon frame, panel palette, and title/chapter typography over an unblurred, full-bleed cover, with the labels in a dark band across the bottom 20%.
+- Unchecked TTS checklists; select an individual image for the highlighted group's `thumbnail.jpg` and exact first-chapter preview. The 1280×720 still reuses the video page's neon frame, panel palette, and title/chapter typography over an unblurred, full-bleed cover, with the labels in a dark band across the bottom 20%; it keeps the group range (for example `Chương 1-20`) while video pages name only their own chapter.
 - Delete any highlighted group from Steps 3–5, including missing/modified jobs; the manifest remembers deletions and existing files remain available.
 - Cleans only a TTS working copy, then writes separate ordered `tts_chunks.json` plans (700-character target, including existing jobs).
 - Sequential groups with existing bounded concurrency, full-chunk retries and fingerprinted resume inside each group.
@@ -62,10 +62,10 @@ Raw TXT / ZIP
 - **Automatic inputs** - Uses the current Step 3 thumbnail and audiobook without another upload
 - **Verified acceleration** - Detects the GPU and performs a real test encode before selecting VA-API, Quick Sync, NVENC, AMF, or VideoToolbox
 - **Reliable fallback** - Retries with the next verified encoder and always keeps `libx264` as the CPU fallback
-- **Exact text pages** - One 1920×1080 minimal neon-theater page per TTS chunk, with a centered 80% frame over the blurred thumbnail. Only the title, chapter label, divider, and exact spoken text appear.
+- **Exact text pages** - One 1920×1080 minimal neon-theater page per TTS chunk, with a centered 80% frame over the blurred thumbnail. Only the title, that page's own chapter label (for example `Chương 7`, never the whole group range), divider, and exact spoken text appear.
 - **Measured VFR timing** - FFprobe reads each MP3 duration; cached pages form a static-duration timeline muxed with the final audiobook. Partial audiobooks are blocked and unreadable overflow reports the affected chunk.
 - **YouTube-ready MP4** - Creates H.264 video with live progress, VFR timing validation, and clean cancellation
-- **Input-relative jobs** - By default the job folder is created beside the first Step 1 input; Settings can override the output root
+- **Input-relative jobs** - The job folder is always created beside the first Step 1 input; there is no output-folder override, so generated files never use a temporary folder
 - **Sequential groups** - Select a subset; validated current MP4s are skipped, failures remain isolated.
 
 ### Stage 5: YouTube Upload

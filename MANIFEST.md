@@ -38,6 +38,13 @@ old settings remain safe to load without restoring those features.
 
 ## Output and copy behavior
 
+Every generated file — canonical `final.txt`/`final.json`, `thumbnail.jpg`,
+`audio_chunks/`, audiobooks, `render_pages/`, and MP4s — is created inside the
+folder of the Step 1 input file. There is no output-folder override: job files
+never use a temporary folder, and creating groups refuses to run until an input
+folder is loaded. The test suite points `NOVEL_PIPELINE_CONFIG_DIR` at an
+isolated directory, so running tests never rewrites the user's `config.json`.
+
 Read-only generated text in the main window, diagnostics, group panels,
 failure dialogs, capability/result panels, and YouTube results exposes a
 `Copy all` button. It copies the complete plain text and preserves line breaks.

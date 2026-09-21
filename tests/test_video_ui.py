@@ -55,7 +55,7 @@ class VideoUiTests(unittest.TestCase):
     def test_step4_uses_current_step3_paths_without_upload_controls(self):
         with tempfile.TemporaryDirectory() as directory:
             document = self.make_ready_document(Path(directory))
-            window = MainWindow(Settings(output_dir=directory))
+            window = MainWindow(Settings())
             window.document = document
             window._refresh_stage4_ui()
             self.assertTrue(window.stage4_continue_btn.isEnabled())
@@ -73,7 +73,7 @@ class VideoUiTests(unittest.TestCase):
     def test_step5_progress_is_visible_and_video_state_invalidates(self):
         with tempfile.TemporaryDirectory() as directory:
             document = self.make_ready_document(Path(directory))
-            window = MainWindow(Settings(output_dir=directory))
+            window = MainWindow(Settings())
             window.document = document
             media = document.require_step4_outputs()
             candidate = EncoderCandidate("libx264", "CPU", hardware=False, verified=True)
