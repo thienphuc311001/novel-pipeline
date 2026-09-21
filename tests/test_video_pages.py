@@ -147,7 +147,7 @@ class VideoPageTests(unittest.TestCase):
             layout = render_page(self.media.thumbnail_path, self.root / f'layout{i}.png',
                                  title='Một tựa truyện dài và thanh lịch trong ánh sáng hoàng hôn',
                                  chapter='Chương 601–620', text=text)
-            self.assertGreaterEqual(layout['font_size'], 28)
+            self.assertGreaterEqual(layout['font_size'], 28)  # Relaxing the floor keeps pages that already fit.
             for left, top, right, bottom in layout['text_bounds']:
                 self.assertTrue(192 <= left <= right <= 1728)
                 self.assertTrue(108 <= top <= bottom <= 972)
@@ -155,6 +155,21 @@ class VideoPageTests(unittest.TestCase):
             render_page(self.media.thumbnail_path, self.root / 'overflow.png', title='Truyện',
                         chapter='Chương 1', text='Một dòng.\n' * 80)
         self.assertFalse((self.root / 'overflow.png').exists())
+
+    def test_paragraph_heavy_chunk_renders_at_the_relaxed_minimum(self):
+        """A chunk too tall for 28px must still render instead of blocking Step 4."""
+        text = 'Dòng ngắn.\n\n' * 10
+        with self.assertRaisesRegex(VideoValidationError, 'readable minimum'):
+            render_page(self.media.thumbnail_path, self.root / 'old-floor.png', title='Truyện', chapter='Chương 1',
+                        text=text, style=replace(DEFAULT_STYLE, min_body_size=28))
+        self.assertFalse((self.root / 'old-floor.png').exists())
+        layout = render_page(self.media.thumbnail_path, self.root / 'relaxed-floor.png', title='Truyện',
+                             chapter='Chương 1', text=text)
+        self.assertLess(layout['font_size'], 28)
+        self.assertGreaterEqual(layout['font_size'], DEFAULT_STYLE.min_body_size)
+        for left, top, right, bottom in layout['text_bounds']:
+            self.assertTrue(192 <= left <= right <= 1728)
+            self.assertTrue(108 <= top <= bottom <= 972)
 
     def test_nonfinite_audio_metadata_rejected(self):
         path = self.processor.audio_dir / 'chunk_00001.mp3'

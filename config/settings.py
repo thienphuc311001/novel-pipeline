@@ -166,7 +166,6 @@ class Settings:
     tts_fallback_retry_count: int = 3  # Legacy config compatibility; full-chunk retries only.
 
     # --- thumbnail --------------------------------------------------------
-    thumbnail_bottom_height: int = 145
     thumbnail_jpeg_quality: int = 95
 
     # OAuth desktop client configuration only; tokens live in the OS keyring.

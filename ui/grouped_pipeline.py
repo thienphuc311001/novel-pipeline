@@ -408,7 +408,7 @@ class TtsBatchPanel(GroupBatchPanel):
             group = self.document_provider().require_group_artifacts(group_id)
             from media.thumbnail import generate_thumbnail
             result = generate_thumbnail(Path(path), Path(group.output_dir), title=group.title, chapter=group.label,
-                                        banner_height=self.settings.thumbnail_bottom_height, quality=self.settings.thumbnail_jpeg_quality)
+                                        quality=self.settings.thumbnail_jpeg_quality)
             target = Path(group.output_dir) / "thumbnail.jpg"
             Path(result).replace(target)
             group.state["thumbnail_source"] = path

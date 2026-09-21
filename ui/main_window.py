@@ -1395,7 +1395,6 @@ class MainWindow(QMainWindow):
             output = generate_thumbnail(
                 Path(path), Path(bundle.output_dir), title=bundle.title,
                 chapter=bundle.chapter,
-                banner_height=self.settings.thumbnail_bottom_height,
                 quality=self.settings.thumbnail_jpeg_quality,
             )
             self.document.set_thumbnail_output(str(output))
@@ -1965,7 +1964,7 @@ class MainWindow(QMainWindow):
         from cleaning.tts_text_preprocessor import preprocessing_identity
         audio_config = lambda values: (asdict(CleaningOptions.for_tts(values)), preprocessing_identity(values), values.max_chunk_chars, values.min_chunk_chars, values.tts_voice)
         old_audio = audio_config(self.settings)
-        old_thumbnail = (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality)
+        old_thumbnail = self.settings.thumbnail_jpeg_quality
         grouping_method = self.document.grouping_config.get("grouping_method", "detected_chapters")
         old_grouping = grouping_config(self.settings, self._selected_group_size(), grouping_method)
         old_root = self.settings.resolved_output_dir(self.document.input_directory)
@@ -1993,7 +1992,7 @@ class MainWindow(QMainWindow):
                     group.state.pop("audiobook", None)
                     group.state.pop("video", None)
                     changed = True
-                if old_thumbnail != (self.settings.thumbnail_bottom_height, self.settings.thumbnail_jpeg_quality):
+                if old_thumbnail != self.settings.thumbnail_jpeg_quality:
                     group.state.pop("thumbnail", None)
                     group.state.pop("video", None)
                     changed = True

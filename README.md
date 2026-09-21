@@ -47,7 +47,7 @@ Raw TXT / ZIP
 
 ### Stage 3: Thumbnail & Audiobook
 
-- Unchecked TTS checklists; select an individual image for the highlighted group's `thumbnail.jpg` and exact first-chapter preview.
+- Unchecked TTS checklists; select an individual image for the highlighted group's `thumbnail.jpg` and exact first-chapter preview. The 1280×720 still reuses the video page's neon frame, panel palette, and title/chapter typography over an unblurred, full-bleed cover, with the labels in a dark band across the bottom 20%.
 - Delete any highlighted group from Steps 3–5, including missing/modified jobs; the manifest remembers deletions and existing files remain available.
 - Cleans only a TTS working copy, then writes separate ordered `tts_chunks.json` plans (700-character target, including existing jobs).
 - Sequential groups with existing bounded concurrency, full-chunk retries and fingerprinted resume inside each group.

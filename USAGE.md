@@ -94,8 +94,10 @@ It never discovers/regroups files by scanning folders.
 
 All groups appear unchecked. Highlight a group and click **Select Image for
 Highlighted Group** to choose its own image and create a 1280×720 `thumbnail.jpg`
-labeled with its range. Repeat for each group; checklist selections control
-the TTS batch. Highlight a group to inspect its canonical paths, exact first
+labeled with its range. The cover stays sharp and full-bleed (never blurred or
+dimmed) while the still reuses the Step 4 video-style neon frame and title/chapter
+typography, with the labels in a dark band across the bottom 20%. Repeat for each
+group; checklist selections control the TTS batch. Highlight a group to inspect its canonical paths, exact first
 chapter, thumbnail, and failure details.
 
 **Delete Highlighted Group** removes that job from Steps 3–5, even if its

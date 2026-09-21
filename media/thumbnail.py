@@ -1,91 +1,45 @@
-"""Deterministic YouTube thumbnail rendering for Step 3."""
+"""Deterministic YouTube thumbnail rendering for Step 3.
+
+The still image reuses the Step 4 neon-theater page style — the same glowing
+rounded frame, panel palette, and Liberation Serif title/chapter typography — so
+thumbnail and video share one visual identity. Unlike a video page, the cover is
+never blurred or dimmed: it fills all 1280×720 pixels, and the labels sit in a
+dark band across the bottom 20% of the picture.
+"""
 
 from __future__ import annotations
 
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import List
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+
+from media.video_pages import (CHAPTER_COLOR, DEFAULT_STYLE, DIVIDER_COLOR, FRAME_GLOW, FRAME_GLOW_WIDTH,
+                               PANEL_COLOR, TITLE_COLOR, draw_frame, font_paths, line_height, scaled_style,
+                               wrap_lines)
 
 
 WIDTH = 1280
 HEIGHT = 720
-DEFAULT_BANNER_HEIGHT = 145
+CAPTION_RATIO = 0.20                       # labels over the bottom fifth of the picture
+CAPTION_HEIGHT = round(HEIGHT * CAPTION_RATIO)
+FRAME_INSET = 40                           # the neon frame hugs the picture edge
+MINIMUM_TITLE_SIZE = 20
+MINIMUM_CHAPTER_SIZE = 14
+TITLE_SPACING = 1.12
+CHAPTER_SPACING = 1.2
+CAPTION_GAP = 10
+TITLE_GLOW_COLOR = (255, 255, 255, 65)
 
-
-def bundled_font_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
-
-
-def _font(size: int) -> ImageFont.FreeTypeFont:
-    candidates: Iterable[str | Path] = (
-        bundled_font_path(),
-        "DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    )
-    for candidate in candidates:
-        try:
-            return ImageFont.truetype(str(candidate), size)
-        except OSError:
-            continue
-    raise RuntimeError("Không tìm thấy phông DejaVu Sans Bold đi kèm ứng dụng.")
-
-
-def _wrap_title(draw: ImageDraw.ImageDraw, title: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
-    words = (title or "").split()
-    if not words:
-        return [""]
-    lines: List[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if current and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
-            lines.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    if len(lines) <= 2:
-        return lines
-    # Rebalance a long heading into exactly two lines; font fitting will reduce
-    # size until each line fits rather than discarding title text.
-    midpoint = max(1, len(words) // 2)
-    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
-
-
-def _fit_text(
-    draw: ImageDraw.ImageDraw,
-    title: str,
-    chapter: str,
-    banner_height: int,
-    *,
-    max_width: int,
-) -> Tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont, List[str], int]:
-    available_height = banner_height - 22
-    for title_size in range(52, 15, -1):
-        chapter_size = max(16, int(title_size * 0.70))
-        title_font = _font(title_size)
-        chapter_font = _font(chapter_size)
-        title_lines = _wrap_title(draw, title, title_font, max_width)
-        if len(title_lines) > 2:
-            continue
-        title_height = sum(
-            draw.textbbox((0, 0), line or " ", font=title_font)[3]
-            for line in title_lines
-        )
-        chapter_box = draw.textbbox((0, 0), chapter or " ", font=chapter_font)
-        widest = max(
-            [draw.textbbox((0, 0), line or " ", font=title_font)[2] for line in title_lines]
-            + [chapter_box[2]]
-        )
-        if widest <= max_width and title_height + chapter_box[3] + 10 <= available_height:
-            return title_font, chapter_font, title_lines, title_height
-    # A minimum-size rendition is still preferable to a silent truncation.
-    return _font(16), _font(16), _wrap_title(draw, title, _font(16), max_width), 16
+_GEOMETRY = scaled_style(WIDTH, HEIGHT)    # same frame style, thumbnail-sized canvas
+FRAME_RADIUS = _GEOMETRY.radius
+CAPTION_PADDING = _GEOMETRY.padding
+_SCALE = WIDTH / DEFAULT_STYLE.width
+GLOW_BLUR = max(1, round(FRAME_GLOW * _SCALE))
+GLOW_WIDTH = max(2, round(FRAME_GLOW_WIDTH * _SCALE))
+TITLE_GLOW_BLUR = max(1, round(5 * _SCALE))
 
 
 def _atomic_save_jpeg(image: Image.Image, path: Path, *, quality: int) -> None:
@@ -105,55 +59,101 @@ def _atomic_save_jpeg(image: Image.Image, path: Path, *, quality: int) -> None:
         raise
 
 
+def _wrap_title(draw: ImageDraw.ImageDraw, title: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    """Word-wrap a heading into at most two lines without discarding any text."""
+    words = (title or "").split()
+    if not words:
+        return [""]
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) <= 2:
+        return lines
+    # Rebalance a long heading into exactly two lines; size fitting then shrinks
+    # the font until both lines fit instead of discarding title text.
+    midpoint = max(1, len(words) // 2)
+    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+
+def _fit_caption(draw, title, chapter, bold, regular, width, height):
+    """Shrink the video-sized title/chapter pair until both fit the caption band."""
+    for title_size in range(DEFAULT_STYLE.title_size, MINIMUM_TITLE_SIZE - 1, -1):
+        chapter_size = max(MINIMUM_CHAPTER_SIZE,
+                           round(title_size * DEFAULT_STYLE.chapter_size / DEFAULT_STYLE.title_size))
+        title_font = ImageFont.truetype(str(bold), title_size)
+        chapter_font = ImageFont.truetype(str(regular), chapter_size)
+        title_lines = _wrap_title(draw, title, title_font, width)
+        if len(title_lines) > 2 or any(draw.textlength(line, font=title_font) > width for line in title_lines):
+            continue
+        chapter_lines = wrap_lines(draw, chapter, chapter_font, width)
+        title_step = line_height(title_font, title_size, TITLE_SPACING)
+        chapter_step = line_height(chapter_font, chapter_size, CHAPTER_SPACING)
+        if len(title_lines) * title_step + CAPTION_GAP + len(chapter_lines) * chapter_step <= height:
+            return title_font, title_lines, title_step, chapter_font, chapter_lines, chapter_step
+    raise RuntimeError("Tiêu đề và số chương quá dài để vừa dải thumbnail 20%.")
+
+
+def _paint_centered(draw, lines, font, step, y, fill):
+    """Draw the video page's centered baseline-aligned text block."""
+    ascent, _ = font.getmetrics()
+    for line in lines:
+        draw.text(((WIDTH - draw.textlength(line, font=font)) / 2, y + ascent), line,
+                  font=font, fill=fill, anchor="ls")
+        y += step
+    return y
+
+
 def generate_thumbnail(
     image_path: Path,
     output_dir: Path,
     *,
     title: str,
     chapter: str,
-    banner_height: int = DEFAULT_BANNER_HEIGHT,
     quality: int = 95,
 ) -> Path:
     """Create a 1280×720 thumbnail and return its saved JPEG path."""
     image_path = Path(image_path)
     if not image_path.is_file():
         raise FileNotFoundError(f"Không tìm thấy ảnh: {image_path}")
-    banner_height = max(100, min(int(banner_height), HEIGHT - 100))
-    top_height = HEIGHT - banner_height
     with Image.open(image_path) as source:
-        source = ImageOps.exif_transpose(source).convert("RGB")
-        top = ImageOps.fit(
-            source,
-            (WIDTH, top_height),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
-        )
-    canvas = Image.new("RGB", (WIDTH, HEIGHT), "black")
-    canvas.paste(top, (0, 0))
+        cover = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (WIDTH, HEIGHT),
+                             method=Image.Resampling.LANCZOS)
+    canvas = cover.convert("RGBA")
+    frame = (FRAME_INSET, FRAME_INSET, WIDTH - FRAME_INSET - 1, HEIGHT - FRAME_INSET - 1)
+    band_top = frame[3] - CAPTION_HEIGHT + 1
+    band = Image.new("L", canvas.size, 0)
+    ImageDraw.Draw(band).rounded_rectangle(frame, radius=FRAME_RADIUS, fill=255)
+    ImageDraw.Draw(band).rectangle((0, 0, WIDTH - 1, band_top - 1), fill=0)
+    canvas = Image.alpha_composite(canvas, Image.composite(
+        Image.new("RGBA", canvas.size, PANEL_COLOR), Image.new("RGBA", canvas.size, (0, 0, 0, 0)), band))
+    canvas = draw_frame(canvas, frame, radius=FRAME_RADIUS, glow=GLOW_BLUR, glow_width=GLOW_WIDTH, fill=None)
     draw = ImageDraw.Draw(canvas)
-    title_font, chapter_font, title_lines, title_height = _fit_text(
-        draw, title, chapter, banner_height, max_width=WIDTH - 80
-    )
-    title_line_heights = [
-        draw.textbbox((0, 0), line or " ", font=title_font)[3] for line in title_lines
-    ]
-    chapter_height = draw.textbbox((0, 0), chapter or " ", font=chapter_font)[3]
-    used_height = sum(title_line_heights) + chapter_height + 10
-    y = top_height + max(8, (banner_height - used_height) // 2)
-    shadow = (0, 0, 0)
-    for line, line_height in zip(title_lines, title_line_heights):
-        box = draw.textbbox((0, 0), line or " ", font=title_font)
-        x = (WIDTH - (box[2] - box[0])) // 2
-        draw.text((x + 2, y + 2), line, font=title_font, fill=shadow)
-        draw.text((x, y), line, font=title_font, fill="white")
-        y += line_height
-    y += 10
-    chapter_box = draw.textbbox((0, 0), chapter or " ", font=chapter_font)
-    chapter_x = (WIDTH - (chapter_box[2] - chapter_box[0])) // 2
-    draw.text((chapter_x + 2, y + 2), chapter, font=chapter_font, fill=shadow)
-    draw.text((chapter_x, y), chapter, font=chapter_font, fill="white")
-
-    name = f"{image_path.stem}_youtube.jpg"
-    output_path = Path(output_dir) / name
-    _atomic_save_jpeg(canvas, output_path, quality=quality)
+    regular, bold = font_paths()
+    text_width = frame[2] - frame[0] - CAPTION_PADDING * 2
+    title_font, title_lines, title_step, chapter_font, chapter_lines, chapter_step = _fit_caption(
+        draw, title, chapter, bold, regular, text_width, CAPTION_HEIGHT)
+    used = len(title_lines) * title_step + CAPTION_GAP + len(chapter_lines) * chapter_step
+    y = band_top + max(CAPTION_GAP, (CAPTION_HEIGHT - used) // 2)
+    draw.line((frame[0] + CAPTION_PADDING, band_top, frame[2] - CAPTION_PADDING, band_top),
+              fill=DIVIDER_COLOR, width=1)
+    # A soft title glow contains no additional visual content.
+    glow = Image.new("RGBA", canvas.size)
+    glow_draw = ImageDraw.Draw(glow)
+    for index, line in enumerate(title_lines):
+        glow_draw.text(((WIDTH - glow_draw.textlength(line, font=title_font)) / 2, y + index * title_step),
+                       line, font=title_font, fill=TITLE_GLOW_COLOR)
+    canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(TITLE_GLOW_BLUR)))
+    draw = ImageDraw.Draw(canvas)
+    y = _paint_centered(draw, title_lines, title_font, title_step, y, TITLE_COLOR) + CAPTION_GAP
+    _paint_centered(draw, chapter_lines, chapter_font, chapter_step, y, CHAPTER_COLOR)
+    output_path = Path(output_dir) / f"{image_path.stem}_youtube.jpg"
+    _atomic_save_jpeg(canvas.convert("RGB"), output_path, quality=quality)
     return output_path

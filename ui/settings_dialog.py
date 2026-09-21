@@ -144,7 +144,6 @@ class SettingsDialog(QDialog):
         self._int(form, "tts_timeout_seconds", "Chunk timeout (seconds)", 10, 600)
         self._int(form, "tts_retry_count", "Attempts per chunk", 1, 10)
         form.addRow("Step 3 chunk target", QLabel("700 characters · full-chunk retries"))
-        self._int(form, "thumbnail_bottom_height", "Thumbnail black band (pixels)", 100, 300)
         self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
         self._int(form, "font_size", "Application font size", 7, 32)
         self._int(form, "max_log_lines", "Maximum diagnostic lines", 100, 100000)

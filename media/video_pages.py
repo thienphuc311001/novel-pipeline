@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import unicodedata
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import Event
 
@@ -30,12 +30,28 @@ class PageStyle:
     title_size: int = 64
     chapter_size: int = 32
     body_size: int = 40
-    min_body_size: int = 28
+    # Temporary unblock (was 28): long Step 3 chunks contain many paragraph breaks,
+    # so 26px still stalled 162 of 1706 chunks of the current job and the longest
+    # one needs 19px. The search runs from body_size downwards, so every page that
+    # already fit keeps its size; only the overflowing pages shrink.
+    min_body_size: int = 19
     line_spacing: float = 1.3
 
 
 DEFAULT_STYLE = PageStyle()
 FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+
+# One palette shared by every rendered surface (video pages and thumbnails).
+PANEL_COLOR = (8, 10, 23, 220)
+PANEL_OUTLINE = (159, 176, 213, 100)
+DIVIDER_COLOR = (174, 179, 210, 100)
+TITLE_COLOR = (250, 250, 255)
+CHAPTER_COLOR = (201, 183, 235)
+BODY_COLOR = (244, 244, 250)
+GLOW_COLORS = (((76, 221, 245, 75), -1), ((154, 112, 224, 65), 1))
+FRAME_GLOW = 12
+FRAME_GLOW_WIDTH = 5
+FRAME_OUTLINE_WIDTH = 2
 
 
 def font_paths():
@@ -133,7 +149,7 @@ def _input_paths(media, records):
             *(folder / name for name in ('tts_chunks.json', 'tts_overrides.json') if (folder / name).exists())]
 
 
-def _wrap(draw, text, font, width):
+def wrap_lines(draw, text, font, width):
     """Visual wrapping retains all characters; paragraph/line breaks stay explicit."""
     lines = []
     for paragraph in text.split("\n"):
@@ -165,15 +181,46 @@ def _wrap(draw, text, font, width):
     return lines
 
 
-def _fit(draw, text, path, maximum, minimum, width, height, spacing):
+def line_height(font, size, spacing):
+    ascent, descent = font.getmetrics()
+    return max(ascent + descent, math.ceil(size * spacing))
+
+
+def fit_lines(draw, text, path, maximum, minimum, width, height, spacing):
     for size in range(maximum, minimum - 1, -1):
         font = ImageFont.truetype(str(path), size)
-        lines = _wrap(draw, text, font, width)
-        ascent, descent = font.getmetrics()
-        line_height = max(ascent + descent, math.ceil(size * spacing))
-        if len(lines) * line_height <= height:
-            return font, lines, line_height
+        lines = wrap_lines(draw, text, font, width)
+        step = line_height(font, size, spacing)
+        if len(lines) * step <= height:
+            return font, lines, step
     raise VideoValidationError(f"Text cannot fit at readable minimum {minimum}px; correct the chunk in Step 3")
+
+
+def scaled_style(width, height, style=DEFAULT_STYLE):
+    """Return the same page style rescaled onto another canvas size."""
+    ratio = width / style.width
+    left, top, right, bottom = style.frame
+    return replace(style, width=int(width), height=int(height),
+                   frame=(round(left * ratio), round(top * ratio), round(right * ratio), round(bottom * ratio)),
+                   radius=max(1, round(style.radius * ratio)), padding=max(1, round(style.padding * ratio)),
+                   blur=max(1, round(style.blur * ratio)), title_size=max(1, round(style.title_size * ratio)),
+                   chapter_size=max(1, round(style.chapter_size * ratio)),
+                   body_size=max(1, round(style.body_size * ratio)),
+                   min_body_size=max(1, round(style.min_body_size * ratio)))
+
+
+def draw_frame(canvas, frame, *, radius, glow=FRAME_GLOW, glow_width=FRAME_GLOW_WIDTH,
+               outline_width=FRAME_OUTLINE_WIDTH, fill=PANEL_COLOR):
+    """Composite the neon rounded frame (glow layers, panel, outline) onto an RGBA canvas."""
+    edges = (frame[0], frame[1], frame[2] - 1, frame[3] - 1)
+    for color, offset in GLOW_COLORS:
+        layer = Image.new("RGBA", canvas.size)
+        ImageDraw.Draw(layer).rounded_rectangle(edges, radius=radius, outline=color, width=glow_width)
+        canvas = Image.alpha_composite(canvas, layer.filter(ImageFilter.GaussianBlur(glow + offset)))
+    panel = Image.new("RGBA", canvas.size)
+    ImageDraw.Draw(panel).rounded_rectangle(edges, radius=radius, fill=fill, outline=PANEL_OUTLINE,
+                                            width=outline_width)
+    return Image.alpha_composite(canvas, panel)
 
 
 def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE):
@@ -181,23 +228,14 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
         background = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"),
                                   (style.width, style.height), method=Image.Resampling.LANCZOS)
     background = ImageEnhance.Brightness(background.filter(ImageFilter.GaussianBlur(style.blur))).enhance(style.brightness)
-    canvas = background.convert("RGBA")
-    frame = (style.frame[0], style.frame[1], style.frame[2] - 1, style.frame[3] - 1)
-    for color, offset in (((76, 221, 245, 75), -1), ((154, 112, 224, 65), 1)):
-        glow = Image.new("RGBA", canvas.size)
-        ImageDraw.Draw(glow).rounded_rectangle(frame, radius=style.radius, outline=color, width=5)
-        canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(12 + offset)))
-    panel = Image.new("RGBA", canvas.size)
-    ImageDraw.Draw(panel).rounded_rectangle(frame, radius=style.radius, fill=(8, 10, 23, 220),
-                                            outline=(159, 176, 213, 100), width=2)
-    canvas = Image.alpha_composite(canvas, panel)
+    canvas = draw_frame(background.convert("RGBA"), style.frame, radius=style.radius)
     draw = ImageDraw.Draw(canvas)
     regular, bold = font_paths()
     left, top, right, bottom = style.frame
     x, y = left + style.padding, top + 42
     width = right - left - style.padding * 2
-    title_font, title_lines, title_h = _fit(draw, title, bold, style.title_size, 36, width, 156, 1.12)
-    chapter_font, chapter_lines, chapter_h = _fit(draw, chapter, regular, style.chapter_size, 24, width, 84, 1.2)
+    title_font, title_lines, title_h = fit_lines(draw, title, bold, style.title_size, 36, width, 156, 1.12)
+    chapter_font, chapter_lines, chapter_h = fit_lines(draw, chapter, regular, style.chapter_size, 24, width, 84, 1.2)
     bounds = []
     def paint(lines, font, line_height, y, color, centered=False):
         for line in lines:
@@ -219,14 +257,14 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
                 line, font=title_font, fill=(255, 255, 255, 65))
     canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(5)))
     draw = ImageDraw.Draw(canvas)
-    y = paint(title_lines, title_font, title_h, y, (250, 250, 255), True) + 12
-    y = paint(chapter_lines, chapter_font, chapter_h, y, (201, 183, 235), True) + 24
-    draw.line((x, y, right - style.padding, y), fill=(174, 179, 210, 100), width=1)
+    y = paint(title_lines, title_font, title_h, y, TITLE_COLOR, True) + 12
+    y = paint(chapter_lines, chapter_font, chapter_h, y, CHAPTER_COLOR, True) + 24
+    draw.line((x, y, right - style.padding, y), fill=DIVIDER_COLOR, width=1)
     body_top, body_bottom = y + 30, bottom - 44
-    font, lines, line_height = _fit(draw, text, regular, style.body_size, style.min_body_size,
-                                  width, body_bottom - body_top, style.line_spacing)
-    body_y = body_top + (body_bottom - body_top - len(lines) * line_height) / 2
-    paint(lines, font, line_height, body_y, (244, 244, 250))
+    font, lines, line_step = fit_lines(draw, text, regular, style.body_size, style.min_body_size,
+                                       width, body_bottom - body_top, style.line_spacing)
+    body_y = body_top + (body_bottom - body_top - len(lines) * line_step) / 2
+    paint(lines, font, line_step, body_y, BODY_COLOR)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".page_", suffix=".png", dir=output.parent)
