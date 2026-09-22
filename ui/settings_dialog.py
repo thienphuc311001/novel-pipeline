@@ -105,7 +105,7 @@ class SettingsDialog(QDialog):
         self._bool(form, "detect_vietnamese", "Detect Vietnamese headers")
         self._bool(form, "detect_english", "Detect English headers")
         self._bool(form, "detect_chinese", "Detect Chinese headers")
-        self._bool(form, "detect_plain_numbered", "Detect plain numbered headers")
+        self._bool(form, "detect_plain_numbered", "Detect plain numbered headers (only if file has no Chương/Chapter prefix, e.g. bare '1.')")
         self._bool(form, "use_custom_chapter_regex", "Enable custom chapter regex")
         self._text(form, "custom_chapter_regex", "Custom regex")
         self._bool(form, "dedupe_chapters", "Remove duplicate chapters")

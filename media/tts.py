@@ -37,6 +37,10 @@ class TtsChunk:
     text: str
     chapter: int = 0
     text_sha256: str = ""
+    # Rendered-layout facts measured before TTS (visible lines, validation font size
+    # and body width, planning reason).  Metadata for diagnostics and manifests only;
+    # audio resumability still depends on ``text_sha256``.
+    layout: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.text_sha256:
@@ -324,6 +328,7 @@ class TtsProcessor:
                 "chapter": chunk.chapter,
                 "text": chunk.text,
                 "text_sha256": chunk.text_sha256,
+                "layout": dict(chunk.layout),
                 "request_mode": "full_chunk",
                 "mp3_sha256": sha256_file(output),
                 "voice": self.voice,

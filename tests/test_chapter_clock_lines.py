@@ -12,14 +12,25 @@ import unittest
 
 from chapters.detector import detect_chapters
 from chapters.normalizer import NormalizeOptions, normalize_chapters
-from chapters.patterns import DEFAULT_PATTERNS, PatternSet
+from chapters.patterns import DEFAULT_PATTERNS, PatternSet, build_patterns
 from config.settings import Settings
 from media.groups import analyze_grouping, preview_groups, scan_headings
 
 
 class ClockLineTests(unittest.TestCase):
     def patterns(self) -> PatternSet:
-        return PatternSet(patterns=DEFAULT_PATTERNS)
+        # Default user-facing pattern set: plain numbered OFF so that
+        # in-body enumerated lists ("1. ...") are not phantom chapters.
+        return build_patterns(Settings())
+
+    def patterns_with_plain(self) -> PatternSet:
+        settings = Settings()
+        settings.detect_plain_numbered = True
+        return build_patterns(settings)
+
+    def detect_with_plain(self, text: str):
+        hits, _preamble, _notes = detect_chapters(text, self.patterns_with_plain())
+        return hits
 
     def detect(self, text: str):
         hits, _preamble, _notes = detect_chapters(text, self.patterns())
@@ -78,12 +89,55 @@ class ClockLineTests(unittest.TestCase):
         self.assertIn("Sáng hôm sau", chapter.text)
         self.assertIn("Thân chương 14", chapter.text)
 
-    def test_plain_numbered_headers_are_still_detected(self):
+    def test_plain_numbered_headers_are_still_detected_when_opted_in(self):
         for sample in ("12. Đêm đầu tiên", "12: Đêm đầu tiên", "12) Đêm đầu tiên"):
             with self.subTest(sample=sample):
-                hits = self.detect(sample)
+                hits = self.detect_with_plain(sample)
                 self.assertEqual(len(hits), 1)
                 self.assertEqual(hits[0].number, 12)
+
+    def test_plain_numbered_lines_are_ignored_by_default(self):
+        for sample in ("12. Đêm đầu tiên", "12: Đêm đầu tiên", "12) Đêm đầu tiên"):
+            with self.subTest(sample=sample):
+                self.assertEqual(self.detect(sample), [])
+
+    def test_enumerated_list_inside_chapter_body_is_not_split(self):
+        text = (
+            "Chương 36: Bí mật của nhà họ Tần\n\n"
+            "Manh mối Khâu Đồ nắm chủ yếu có bốn điểm:\n\n"
+            "1. Tần Chính Quang, nhị chi nhà họ Tần, có vấn đề chuyển lợi ích.\n\n"
+            "2. Tần Chính Quang vẫn luôn âm thầm hợp tác với Liên Trận.\n\n"
+            "3. Hai tháng trước, Tần Chính Quang tự ý thả một nhóm nghi phạm.\n\n"
+            "4. Tần Chính Quang vét thuốc từ chợ đen do mình khống chế.\n\n"
+            "Còn trong tay Lâm Tả là những manh mối khác.\n"
+        )
+
+        chapters, _report, _diagnostics = self.normalize(text)
+
+        self.assertEqual([chapter.number for chapter in chapters], [36])
+        body = chapters[0].text
+        for fragment in (
+            "1. Tần Chính Quang",
+            "2. Tần Chính Quang",
+            "3. Hai tháng trước",
+            "4. Tần Chính Quang",
+        ):
+            self.assertIn(fragment, body)
+
+    def test_enumerated_list_becomes_chapters_only_when_plain_opted_in(self):
+        text = (
+            "Chương 36: Bí mật của nhà họ Tần\n\n"
+            "Manh mối Khâu Đồ nắm chủ yếu có bốn điểm:\n\n"
+            "1. Tần Chính Quang, nhị chi nhà họ Tần, có vấn đề chuyển lợi ích.\n\n"
+            "2. Tần Chính Quang vẫn luôn âm thầm hợp tác với Liên Trận.\n"
+        )
+
+        hits, _preamble, _notes = detect_chapters(text, self.patterns_with_plain())
+
+        self.assertEqual(
+            [(hit.number, hit.pattern_name) for hit in hits],
+            [(36, "vietnamese"), (1, "plain"), (2, "plain")],
+        )
 
     def test_vietnamese_header_with_numeric_title_is_kept(self):
         hits = self.detect("Chương 12: 30 ngày đêm")

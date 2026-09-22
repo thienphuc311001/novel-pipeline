@@ -65,6 +65,36 @@ class TtsTests(unittest.TestCase):
             ).run()
             self.assertEqual(resumed.skipped, [1, 2])
 
+    def test_changed_text_at_the_same_index_regenerates_audio(self):
+        calls = []
+
+        async def write(text, path):
+            calls.append(text)
+            path.write_bytes(b"mp3:" + text.encode())
+
+        chunks = [TtsChunk(1, "one"), TtsChunk(2, "two")]
+        with tempfile.TemporaryDirectory() as directory:
+            processor = TtsProcessor(
+                chunks, Path(directory), voice="vi-VN-HoaiMyNeural", client_factory=lambda text, _voice: _Client(text, write), ffmpeg_path="/bin/true"
+            )
+            self.assertEqual(processor.run().generated, [1, 2])
+            self.assertEqual(calls, ["one", "two"])
+            # Same index and same text still resumes the cached MP3.
+            resumed = TtsProcessor(
+                chunks, Path(directory), voice="vi-VN-HoaiMyNeural", client_factory=lambda text, _voice: _Client(text, write), ffmpeg_path="/bin/true"
+            ).run()
+            self.assertEqual(resumed.skipped, [1, 2])
+            self.assertEqual(len(calls), 2)
+            # Same index but changed text must not reuse the old MP3.
+            changed = [TtsChunk(1, "one"), TtsChunk(2, "two changed")]
+            regenerated = TtsProcessor(
+                changed, Path(directory), voice="vi-VN-HoaiMyNeural", client_factory=lambda text, _voice: _Client(text, write), ffmpeg_path="/bin/true"
+            ).run()
+            self.assertEqual(regenerated.skipped, [1])
+            self.assertEqual(regenerated.generated, [2])
+            self.assertEqual(calls, ["one", "two", "two changed"])
+
+
     def test_full_chunk_retry_and_numeric_merge_order(self):
         original = "one two three four"
         attempts = {original: 0}

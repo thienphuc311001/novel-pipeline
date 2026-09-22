@@ -58,6 +58,8 @@ DEFAULT_SYMBOL_MAP: Dict[str, str] = {
     "÷": " chia ",
     "→": " đến ",
     "←": " từ ",
+    "...": "chấm chấm chấm ",
+    "?": "chấm hỏi ",
 }
 
 DEFAULT_BRACKET_PAIRS: List[str] = [
@@ -122,7 +124,7 @@ class Settings:
     detect_vietnamese: bool = True
     detect_english: bool = True
     detect_chinese: bool = True
-    detect_plain_numbered: bool = True
+    detect_plain_numbered: bool = False
     use_custom_chapter_regex: bool = False
     custom_chapter_regex: str = ""
     dedupe_chapters: bool = True

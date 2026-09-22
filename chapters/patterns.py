@@ -5,12 +5,15 @@ Supports Vietnamese, English, Chinese with all variants including:
 - Vietnamese: Chương 1, CHƯƠNG 1, Hồi 1, Tập 1, Quyển 1, Phần 1
 - English: Chapter 1, Part 1, Book 1
 - Decorative brackets: 【第1章】, [第1章], （第1章）, ★第1章, #第1章
+- Plain numbered (opt-in only): 12., 12:, #12 — disabled by default because
+  numbered lists inside the body (e.g. "1. ...", "2. ...") look identical
+  and would otherwise become phantom chapters.
 
 Pattern precedence:
 1. Vietnamese - highest priority for duplicate resolution
 2. English
 3. Chinese
-4. Plain numbered
+4. Plain numbered (only when detect_plain_numbered=True)
 5. Custom regex (user-supplied)
 """
 
@@ -119,6 +122,9 @@ CHINESE = ChapterPattern(
 )
 
 # Plain numbered pattern: 12., 12:, #12, etc.
+# Opt-in only (detect_plain_numbered=True). A bare leading number is
+# indistinguishable from an in-body enumerated list ("1. ..."), so this
+# stays OFF by default for files that use Chương/Chapter/第 prefixes.
 PLAIN_NUMBERED = ChapterPattern(
     name="plain",
     language="vi",
@@ -202,7 +208,7 @@ def build_patterns(settings) -> PatternSet:
         patterns.append(ENGLISH)
     if getattr(settings, "detect_chinese", True):
         patterns.append(CHINESE)
-    if getattr(settings, "detect_plain_numbered", True):
+    if getattr(settings, "detect_plain_numbered", False):
         patterns.append(PLAIN_NUMBERED)
     
     custom = None

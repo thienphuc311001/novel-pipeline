@@ -312,7 +312,7 @@ settings = Settings(
     detect_vietnamese=True,
     detect_english=True,
     detect_chinese=True,
-    detect_plain_numbered=True,
+    detect_plain_numbered=False,  # opt-in only: bare "1." lines collide with in-body lists
     
     # Custom regex
     use_custom_chapter_regex=False,

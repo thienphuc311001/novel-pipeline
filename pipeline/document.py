@@ -143,6 +143,10 @@ class Chunk:
     hard_split: bool = False
     part: int = 1
     parts: int = 1
+    # Rendered-layout facts measured by the chunk planner (visible lines, validation
+    # font size/width, text hash, planning reason).  Metadata only: chunk identity is
+    # still the text, so ``chunk_fingerprint`` stays unchanged.
+    layout: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -154,6 +158,7 @@ class Chunk:
             "hard_split": self.hard_split,
             "part": self.part,
             "parts": self.parts,
+            "layout": dict(self.layout),
             "text": self.text,
         }
 
