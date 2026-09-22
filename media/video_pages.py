@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import Event
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from media.artifacts import atomic_write_json, atomic_write_text, sha256_file, sha256_text
 from media.text_layout import (DEFAULT_STYLE, FONT_DIR, LAYOUT_FILL_MIN, LAYOUT_FILL_TARGET, PageStyle,
@@ -30,7 +30,7 @@ __all__ = [
     "render_page", "scaled_style", "page_chapter_label", "load_narration", "prepare_video_timeline",
     "source_fingerprint", "validate_page_layout", "validate_timeline_timestamps", "visual_settings",
     "VideoPage", "VideoTimeline", "side_panel_boxes", "paste_side_image", "required_page_images",
-    "SIDE_PANEL_VERSION", "SIDE_PANEL_GAP", "SIDE_PANEL_MIN_SIZE", "SIDE_PANEL_QUIET_ZONE",
+    "SIDE_PANEL_VERSION", "SIDE_PANEL_GAP", "SIDE_PANEL_SIZE", "SIDE_PANEL_MIN_SIZE", "SIDE_PANEL_QUIET_ZONE",
     "SIDE_PANEL_BACKGROUND",
 ]
 
@@ -46,14 +46,15 @@ FRAME_GLOW = 12
 FRAME_GLOW_WIDTH = 5
 FRAME_OUTLINE_WIDTH = 2
 
-# Step 4 requires two page pictures: the 1:1 cover owns the left empty strip and
-# the QR picture owns the right one.  They are only resized — never cropped,
-# filtered, rounded or overprinted — inside the measured body band, so the text
-# grid (and therefore the Step 3 chunk plan) is untouched by this design.
-SIDE_PANEL_VERSION = "side-panels-v1"
-SIDE_PANEL_GAP = 16            # breathing room between a picture and the text column
+# Step 4 requires two page pictures: the 1:1 cover sits flush in the frame's top-left
+# corner and the QR picture flush in the top-right one, both with corners rounded
+# like the frame.  They are only resized — never cropped, filtered or overprinted —
+# so the text grid (and therefore the Step 3 chunk plan) is untouched by this design.
+SIDE_PANEL_VERSION = "header-panels-v3"
+SIDE_PANEL_SIZE = 305           # fixed 1:1 box for both pictures
+SIDE_PANEL_GAP = 5              # minimum gap between a picture and the body text column
 SIDE_PANEL_MIN_SIZE = 96       # below this a slot would be unreadable/unscannable
-SIDE_PANEL_QUIET_ZONE = 0.04   # white margin kept around the QR so scanners lock on
+SIDE_PANEL_QUIET_ZONE = 0.0    # no white card: QR keeps its own pixels, resized only
 SIDE_PANEL_BACKGROUND = (255, 255, 255, 255)
 
 
@@ -62,6 +63,7 @@ def visual_settings(style=DEFAULT_STYLE):
     settings = asdict(style)
     settings["frame"] = list(style.frame)  # Stable equality after JSON recovery.
     settings["side_panels"] = {"version": SIDE_PANEL_VERSION, "gap": SIDE_PANEL_GAP,
+                               "size": SIDE_PANEL_SIZE,
                                "min_size": SIDE_PANEL_MIN_SIZE, "quiet_zone": SIDE_PANEL_QUIET_ZONE,
                                "background": list(SIDE_PANEL_BACKGROUND)}
     return {"style": settings, "fonts": {p.name: sha256_file(p) for p in (regular, bold, *fallback_font_paths())}}
@@ -240,28 +242,29 @@ def draw_frame(canvas, frame, *, radius, glow=FRAME_GLOW, glow_width=FRAME_GLOW_
     return Image.alpha_composite(canvas, panel)
 
 
-def side_panel_boxes(style, body_top, body_bottom):
-    """Square slots for the two required pictures, beside the centered text column.
+def side_panel_boxes(style, body_top=None, body_bottom=None):
+    """Square slots for the two required pictures, flush in the frame top corners.
 
-    The text column keeps its configured width (so the Step 3 chunk plan stays
-    valid); only the empty strips between the frame padding and that column are
-    used.  Both slots are centered on the measured body band, so every page of a
-    job shows its pictures at the same place.
+    Both slots are fixed 1:1 ``SIDE_PANEL_SIZE`` squares (305x305 on the default
+    style), top edge flush with the frame top.  The body column, divider and body
+    band are untouched, so the Step 3 chunk plan stays valid.  ``body_top`` /
+    ``body_bottom`` are accepted for backward compatibility but no longer affect
+    the geometry.
     """
-    left, _top, right_frame, _bottom = style.frame
+    left, top_frame, right_frame, _bottom = style.frame
     content_left, content_right = left + style.padding, right_frame - style.padding
     column = min(style.body_width, max(1, content_right - content_left))
     column_x = (style.width - column) // 2
-    size = min(column_x - SIDE_PANEL_GAP - content_left,
-               content_right - (column_x + column) - SIDE_PANEL_GAP,
-               max(0, body_bottom - body_top))
+    available = min(column_x - SIDE_PANEL_GAP - left,
+                    right_frame - (column_x + column) - SIDE_PANEL_GAP)
+    size = min(SIDE_PANEL_SIZE, available)
     if size < SIDE_PANEL_MIN_SIZE:
         raise VideoValidationError(
-            f"Side image slots would be {size}px wide; the page needs at least {SIDE_PANEL_MIN_SIZE}px "
+            f"Header image slots would be {size}px wide; the page needs at least {SIDE_PANEL_MIN_SIZE}px "
             "for the required pictures. Use a smaller frame/padding or a narrower body column.")
-    top = (body_top + body_bottom) // 2 - size // 2
-    return ((content_left, top, content_left + size, top + size),
-            (content_right - size, top, content_right, top + size))
+    top = top_frame
+    return ((left, top, left + size, top + size),
+            (right_frame - size, top, right_frame, top + size))
 
 
 def _scaled_size(image, width, height):
@@ -270,13 +273,30 @@ def _scaled_size(image, width, height):
     return max(1, round(image.width * scale)), max(1, round(image.height * scale))
 
 
-def paste_side_image(canvas, path, box, *, quiet_zone=0.0, background=SIDE_PANEL_BACKGROUND):
+def _apply_corner_radius(sheet, radius):
+    """Round every corner of an RGBA ``sheet`` with ``radius`` (frame-like curve).
+
+    The radius is clamped to half the sheet size so small letterboxed strips
+    stay valid.  Returns the same sheet with its alpha masked.
+    """
+    radius = max(0, min(int(radius), sheet.width // 2, sheet.height // 2))
+    if radius <= 0:
+        return sheet
+    mask = Image.new("L", sheet.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, sheet.width - 1, sheet.height - 1), radius=radius, fill=255)
+    sheet.putalpha(ImageChops.multiply(sheet.getchannel("A"), mask))
+    return sheet
+
+
+def paste_side_image(canvas, path, box, *, quiet_zone=0.0, background=SIDE_PANEL_BACKGROUND,
+                     radius=0):
     """Draw one unchanged picture inside ``box`` and return what was placed.
 
-    The picture is only resized (aspect preserved, LANCZOS) and centered.  A
-    ``quiet_zone`` fraction reserves the white margin a QR scan picture needs, and
-    transparency is composited over white so a transparent PNG never punches a
-    hole in the page panel.
+    The picture is only resized (aspect preserved, LANCZOS) and centered.
+    Transparency is composited over white so a transparent PNG never punches a
+    hole in the page panel.  A positive ``radius`` rounds the sheet corners with
+    the frame-like curve so a picture flush in a frame corner follows the frame.
     """
     path = Path(path)
     try:
@@ -292,18 +312,22 @@ def paste_side_image(canvas, path, box, *, quiet_zone=0.0, background=SIDE_PANEL
         scaled = image.resize(_scaled_size(image, inner, inner), Image.Resampling.LANCZOS)
         sheet = Image.new("RGBA", (card, card), background)
         sheet.paste(scaled, ((card - scaled.width) // 2, (card - scaled.height) // 2), scaled)
+        sheet = _apply_corner_radius(sheet, radius)
         origin = (box[0] + (width - card) // 2, box[1] + (height - card) // 2)
         canvas.paste(sheet, origin, sheet)
         return {"path": str(path), "box": list(box), "source": [image.width, image.height],
                 "drawn": [scaled.width, scaled.height], "quiet_zone": round(margin, 4),
+                "radius": int(radius),
                 "card": [origin[0], origin[1], origin[0] + card, origin[1] + card]}
     scaled = image.resize(_scaled_size(image, width, height), Image.Resampling.LANCZOS)
     sheet = Image.new("RGBA", scaled.size, background)
     sheet.paste(scaled, (0, 0), scaled)
+    sheet = _apply_corner_radius(sheet, radius)
     origin = (box[0] + (width - scaled.width) // 2, box[1] + (height - scaled.height) // 2)
     canvas.paste(sheet, origin, sheet)
     return {"path": str(path), "box": list(box), "source": [image.width, image.height],
-            "drawn": [scaled.width, scaled.height], "quiet_zone": 0.0, "card": None}
+            "drawn": [scaled.width, scaled.height], "quiet_zone": 0.0, "radius": int(radius),
+            "card": None}
 
 
 def required_page_images(media):
@@ -338,6 +362,25 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE,
     left, top, right_frame, bottom = style.frame
     x, y = left + style.padding, top + style.title_top_offset
     width = right_frame - left - style.padding * 2
+    # Body column geometry is style-only, so the header picture slots can be
+    # placed before any text is drawn: header text then paints over the pictures
+    # on overlap instead of being covered by them.  The body column itself never
+    # overlaps the slots horizontally (at least SIDE_PANEL_GAP each side).
+    column = min(width, style.body_width)
+    column_x = (style.width - column) // 2
+    # The two required pictures sit flush in the frame's top corners: fixed 1:1
+    # SIDE_PANEL_SIZE squares, corners rounded with the frame radius.  Only
+    # resized (aspect preserved); text grid, divider and chunk plan untouched.
+    side_images = {}
+    if left_image or right_image:
+        cover_box, qr_box = side_panel_boxes(style)
+        if left_image:
+            side_images["cover"] = paste_side_image(canvas, left_image, cover_box,
+                                                    radius=style.radius)
+        if right_image:
+            side_images["qr"] = paste_side_image(canvas, right_image, qr_box,
+                                                 radius=style.radius)
+        draw = ImageDraw.Draw(canvas)
     title_font, title_lines, title_h, _ = fit_lines(draw, title, bold, style.title_size, 36, width,
                                                     style.title_max_height, 1.12)
     chapter_font, chapter_lines, chapter_h, _ = fit_lines(draw, chapter, regular, style.chapter_size, 24, width,
@@ -382,22 +425,10 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE,
     y += chapter_advance + style.chapter_gap
     # The body runs in its own readable column, and the divider marks that column so
     # the narrower block reads as a deliberate page grid instead of an accident.
-    column = min(width, style.body_width)
-    column_x = (style.width - column) // 2
+    # (column/column_x already computed above for the header picture slots.)
     draw.line((column_x, y, column_x + column, y), fill=DIVIDER_COLOR, width=1)
     body_top = y + style.body_top_gap
     body_bottom = bottom - style.body_bottom_margin
-    # The two required pictures own the empty strips beside the text column: they
-    # are only resized (aspect preserved) inside the measured body band, so the
-    # text grid, the divider and the chunk plan are all untouched by them.
-    side_images = {}
-    if left_image or right_image:
-        cover_box, qr_box = side_panel_boxes(style, body_top, body_bottom)
-        if left_image:
-            side_images["cover"] = paste_side_image(canvas, left_image, cover_box)
-        if right_image:
-            side_images["qr"] = paste_side_image(canvas, right_image, qr_box,
-                                                 quiet_zone=SIDE_PANEL_QUIET_ZONE)
     # body_bottom - body_top equals page_band with the real fitted title/chapter
     # advances, and the chunk planner validates the same measured band through
     # header_reserve/renderer_budget, so a chunk planned for this job always fits.

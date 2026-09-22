@@ -1,4 +1,4 @@
-"""True page pixels with both required pictures in their side slots."""
+"""True page pixels with both required pictures in their header slots."""
 from __future__ import annotations
 
 import os
@@ -17,20 +17,30 @@ from tests.support import create_narration_fixture, create_visuals_fixture
 
 
 class SidePanelGeometryTests(unittest.TestCase):
-    def test_slots_use_the_empty_strips_beside_the_text_column(self):
-        column = min(DEFAULT_STYLE.body_width, 1824 - 96 - 72 * 2)
+    def test_slots_are_fixed_305_squares_flush_in_the_frame_corners(self):
+        from media.video_pages import SIDE_PANEL_SIZE
+        left_frame, top_frame, right_frame, bottom_frame = DEFAULT_STYLE.frame
+        column = min(DEFAULT_STYLE.body_width, right_frame - left_frame - 72 * 2)
         column_x = (1920 - column) // 2
         left, right = side_panel_boxes(DEFAULT_STYLE, 402, 1002)
-        # Strip 168..385, so with the 16px gap the square is 201px wide.
-        self.assertEqual(left[2] - left[0], 385 - SIDE_PANEL_GAP - 168)
+        self.assertEqual(SIDE_PANEL_SIZE, 305)
+        self.assertEqual(left[2] - left[0], 305)
+        self.assertEqual(left[2] - left[0], left[3] - left[1])  # 1:1
         self.assertEqual(right[2] - right[0], left[2] - left[0])
-        self.assertEqual(left[2], column_x - SIDE_PANEL_GAP)
-        self.assertEqual(right[0], column_x + column + SIDE_PANEL_GAP)
-        # Both slots are centered on the measured band and never leave the frame.
-        self.assertEqual((left[1] + left[3]) // 2, (402 + 1002) // 2)
+        self.assertEqual(right[3] - right[1], left[3] - left[1])
+        self.assertEqual(left[0], left_frame)
+        self.assertEqual(left[2], left_frame + 305)
+        self.assertEqual(right[0], right_frame - 305)
+        self.assertEqual(right[2], right_frame)
+        # Both slots sit flush in the frame top corners.
+        self.assertEqual(left[1], top_frame)
+        self.assertEqual(right[1], left[1])
         for box in (left, right):
-            self.assertTrue(96 + 72 <= box[0] and box[2] <= 1824 - 72)
-            self.assertTrue(54 + 72 <= box[1] and box[3] <= 1026 - 72)
+            self.assertTrue(left_frame <= box[0] and box[2] <= right_frame)
+            self.assertTrue(top_frame <= box[1] and box[3] <= bottom_frame)
+        # The measured body band no longer moves the slots (kept for compat).
+        self.assertEqual(side_panel_boxes(DEFAULT_STYLE),
+                         side_panel_boxes(DEFAULT_STYLE, 402, 1002))
 
 
 class SidePanelRenderTests(unittest.TestCase):
@@ -63,51 +73,61 @@ class SidePanelRenderTests(unittest.TestCase):
         arguments.update(kwargs)
         return render_page(self.thumbnail, self.root / output, **arguments)
 
-    def test_cover_keeps_its_aspect_and_the_qr_gets_a_white_card(self):
+    def test_cover_and_qr_keep_their_pixels_without_background(self):
         layout = self.render()
         cover, qr = layout["side_images"]["cover"], layout["side_images"]["qr"]
         self.assertEqual(cover["source"], [400, 400])
-        self.assertEqual(cover["drawn"], [201, 201])
+        self.assertEqual(cover["drawn"], [305, 305])
+        self.assertEqual(cover["radius"], DEFAULT_STYLE.radius)
         self.assertIsNone(cover["card"])
-        self.assertEqual(qr["card"][2] - qr["card"][0], qr["card"][3] - qr["card"][1])
-        self.assertGreater(qr["quiet_zone"], 0)
+        self.assertEqual(qr["drawn"], [305, 305])
+        self.assertEqual(qr["quiet_zone"], 0.0)
+        self.assertIsNone(qr["card"])
         with Image.open(self.root / "page.png") as page:
             page = page.convert("RGB")
-            self.assertEqual(page.getpixel((168 + 100, cover["box"][1] + 100)), (200, 30, 30))
-            self.assertGreater(page.getpixel((qr["card"][0] + 3, qr["card"][1] + 3))[0], 230)
-            center = ((qr["card"][0] + qr["card"][2]) // 2, (qr["card"][1] + qr["card"][3]) // 2)
+            self.assertEqual(page.getpixel((DEFAULT_STYLE.frame[0] + 100, cover["box"][1] + 100)), (200, 30, 30))
+            # Corners rounded like the frame: the box corner shows the panel, not the picture.
+            self.assertNotEqual(page.getpixel((cover["box"][0] + 2, cover["box"][1] + 2)), (200, 30, 30))
+            # QR keeps its own pixels: center stays dark, corner follows the frame curve.
+            center = ((qr["box"][0] + qr["box"][2]) // 2, (qr["box"][1] + qr["box"][3]) // 2)
             self.assertLess(sum(page.getpixel(center)), 300)
+            self.assertNotEqual(page.getpixel((qr["box"][0] + 2, qr["box"][1] + 2)), (255, 255, 255))
 
     def test_wide_cover_is_letterboxed_instead_of_cropped(self):
         wide = self.root / "wide.png"
         Image.new("RGB", (400, 200), (30, 150, 30)).save(wide)
         layout = self.render("wide.png", left_image=str(wide))
-        self.assertEqual(layout["side_images"]["cover"]["drawn"], [201, 100])
+        self.assertEqual(layout["side_images"]["cover"]["drawn"], [305, 152])
         with Image.open(self.root / "wide.png") as page:
             page = page.convert("RGB")
             box = layout["side_images"]["cover"]["box"]
-            self.assertEqual(page.getpixel((box[0] + 100, box[1] + 55)), (30, 150, 30))
-            margin = page.getpixel((box[0] + 5, box[1] + 5))
-            self.assertEqual(margin, page.getpixel((box[0] + 5, box[1] + 10)))
+            self.assertEqual(page.getpixel((box[0] + 100, box[1] + 140)), (30, 150, 30))
+            # Letterbox margin above the strip: flat panel, clear of the frame glow.
+            margin = page.getpixel((box[0] + 100, box[1] + 60))
+            self.assertEqual(margin, page.getpixel((box[0] + 105, box[1] + 60)))
             self.assertLess(sum(margin), 120)
 
-    def test_transparent_qr_becomes_a_white_card(self):
+    def test_transparent_qr_has_no_card_just_composited_pixels(self):
         alpha = self.root / "alpha.png"
         image = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
         ImageDraw.Draw(image).rectangle((20, 20, 230, 230), fill=(0, 0, 0, 255))
         image.save(alpha)
         layout = self.render("alpha.png", right_image=str(alpha))
-        card = layout["side_images"]["qr"]["card"]
+        qr = layout["side_images"]["qr"]
+        self.assertIsNone(qr["card"])
+        self.assertEqual(qr["drawn"], [305, 305])
         with Image.open(self.root / "alpha.png") as page:
             page = page.convert("RGB")
-            pixel = page.getpixel((card[0] + 130, card[1] + 130))
+            box = qr["box"]
+            self.assertLess(sum(page.getpixel(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))), 300)
     def test_pictures_never_intersect_the_text_column(self):
         layout = self.render()
         cover_box = layout["side_images"]["cover"]["box"]
         qr_box = layout["side_images"]["qr"]["box"]
-        column_x = (1920 - min(DEFAULT_STYLE.body_width, 1584)) // 2
+        content_width = DEFAULT_STYLE.frame[2] - DEFAULT_STYLE.frame[0] - DEFAULT_STYLE.padding * 2
+        column_x = (1920 - min(DEFAULT_STYLE.body_width, content_width)) // 2
         self.assertLessEqual(cover_box[2], column_x - SIDE_PANEL_GAP)
-        self.assertGreaterEqual(qr_box[0], column_x + min(DEFAULT_STYLE.body_width, 1584) + SIDE_PANEL_GAP)
+        self.assertGreaterEqual(qr_box[0], column_x + min(DEFAULT_STYLE.body_width, content_width) + SIDE_PANEL_GAP)
         for left, _top, right, _bottom in layout["text_bounds"]:
             self.assertGreaterEqual(left, column_x)
             self.assertLessEqual(right, column_x + 1150)

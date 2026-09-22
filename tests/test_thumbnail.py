@@ -80,7 +80,7 @@ class ThumbnailTests(unittest.TestCase):
 
     def test_thumbnail_reuses_video_page_style(self):
         style = scaled_style(WIDTH, HEIGHT)
-        self.assertEqual(style.frame, (64, 36, 1216, 684))
+        self.assertEqual(style.frame, (32, 18, 1248, 702))
         self.assertEqual((style.radius, style.padding), (FRAME_RADIUS, CAPTION_PADDING))
         self.assertEqual(scaled_style(DEFAULT_STYLE.width, DEFAULT_STYLE.height), DEFAULT_STYLE)
         self.assertEqual(CAPTION_HEIGHT, 144)

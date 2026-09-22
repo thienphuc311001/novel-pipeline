@@ -38,7 +38,7 @@ class PageStyle:
     version: str = "minimal-neon-theater-v5"
     width: int = 1920
     height: int = 1080
-    frame: tuple[int, int, int, int] = (96, 54, 1824, 1026)  # 90% of the canvas
+    frame: tuple[int, int, int, int] = (48, 27, 1872, 1053)  # 95% of the canvas
     radius: int = 36
     padding: int = 72
     blur: int = 42

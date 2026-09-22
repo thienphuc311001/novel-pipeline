@@ -787,16 +787,16 @@ class MainWindow(QMainWindow):
         inputs_form.addRow("Output", self.stage5_output_label)
         layout.addWidget(inputs_group)
 
-        visuals_group = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải)")
+        visuals_group = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải, góc trên frame)")
         visuals_layout = QVBoxLayout(visuals_group)
         self.stage5_inputs_status = QLabel("")
         self.stage5_inputs_status.setWordWrap(True)
         visuals_layout.addWidget(self.stage5_inputs_status)
         for role, button_text, tooltip in (
             ("cover", "🖼 Add ảnh 1:1 (bên trái)",
-             "Ảnh giữ nguyên nội dung, chỉ được resize vừa ô vuông bên trái của mỗi page video"),
+             "Ảnh giữ nguyên nội dung, chỉ resize vừa ô vuông góc trên-trái frame (bo cong theo frame)"),
             ("qr", "🔳 Add ảnh QR (bên phải)",
-             "Ảnh QR giữ nguyên nội dung, chỉ được resize vừa ô vuông bên phải của mỗi page video"),
+             "Ảnh QR giữ nguyên nội dung, chỉ resize vừa ô vuông góc trên-phải frame (bo cong theo frame)"),
         ):
             row = QHBoxLayout()
             button = QPushButton(button_text)

@@ -151,8 +151,8 @@ class VideoPageTests(unittest.TestCase):
         layout = render_page(self.media.thumbnail_path, self.root / 'brackets.png',
                              title='Truyện【Kiếm】', chapter='Chương 1', text=text)
         for left, top, right, bottom in layout['text_bounds']:
-            self.assertTrue(96 <= left <= right <= 1824)
-            self.assertTrue(54 <= top <= bottom <= 1026)
+            self.assertTrue(DEFAULT_STYLE.frame[0] <= left <= right <= DEFAULT_STYLE.frame[2])
+            self.assertTrue(DEFAULT_STYLE.frame[1] <= top <= bottom <= DEFAULT_STYLE.frame[3])
         with Image.open(self.root / 'brackets.png') as image:
             gray = image.convert('L')
 
@@ -256,8 +256,8 @@ class VideoPageTests(unittest.TestCase):
             self.assertGreaterEqual(layout['spacing_compensation'], 0)
             self.assertLessEqual(layout['title_height'], DEFAULT_STYLE.title_max_height)
             for left, top, right, bottom in layout['text_bounds']:
-                self.assertTrue(96 <= left <= right <= 1824)
-                self.assertTrue(54 <= top <= bottom <= 1026)
+                self.assertTrue(DEFAULT_STYLE.frame[0] <= left <= right <= DEFAULT_STYLE.frame[2])
+                self.assertTrue(DEFAULT_STYLE.frame[1] <= top <= bottom <= DEFAULT_STYLE.frame[3])
         # The body block lives inside the fixed 1150px column; the centered header can
         # reach past it, so the column check uses a page with short labels.
         column_layout = render_page(self.media.thumbnail_path, self.root / 'column.png', title='Truyện',
@@ -294,8 +294,8 @@ class VideoPageTests(unittest.TestCase):
         self.assertGreaterEqual(layout['paragraph_gap'], DEFAULT_STYLE.paragraph_gap_floor)
         self.assertLessEqual(layout['measured_height'], layout['body_height'])
         for left, top, right, bottom in layout['text_bounds']:
-            self.assertTrue(96 <= left <= right <= 1824)
-            self.assertTrue(54 <= top <= bottom <= 1026)
+            self.assertTrue(DEFAULT_STYLE.frame[0] <= left <= right <= DEFAULT_STYLE.frame[2])
+            self.assertTrue(DEFAULT_STYLE.frame[1] <= top <= bottom <= DEFAULT_STYLE.frame[3])
         # A style without compression rungs reports the same page instead of clipping.
         fixed_gap = replace(DEFAULT_STYLE, paragraph_gap=1.0, paragraph_gap_floor=1.0)
         with self.assertRaisesRegex(VideoValidationError, 'body band'):

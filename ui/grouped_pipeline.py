@@ -620,7 +620,7 @@ class VideoBatchPanel(GroupBatchPanel):
         add_copyable_label(capability_column, self.capability_label, self.capability_label.text)
         self.content_layout.addLayout(capability_column)
 
-        inputs = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải)")
+        inputs = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải, góc trên frame)")
         inputs_layout = QVBoxLayout(inputs)
         self.inputs_status = QLabel("")
         self.inputs_status.setWordWrap(True)
@@ -628,9 +628,9 @@ class VideoBatchPanel(GroupBatchPanel):
         inputs_layout.addWidget(self.inputs_status)
         for role, button_text, tooltip in (
             ("cover", "🖼 Add ảnh 1:1 (bên trái)",
-             "Ảnh giữ nguyên nội dung, chỉ được resize vừa ô vuông bên trái của mỗi page video"),
+             "Ảnh giữ nguyên nội dung, chỉ resize vừa ô vuông góc trên-trái frame (bo cong theo frame)"),
             ("qr", "🔳 Add ảnh QR (bên phải)",
-             "Ảnh QR giữ nguyên nội dung, chỉ được resize vừa ô vuông bên phải của mỗi page video"),
+             "Ảnh QR giữ nguyên nội dung, chỉ resize vừa ô vuông góc trên-phải frame (bo cong theo frame)"),
         ):
             row = QHBoxLayout()
             button = QPushButton(button_text)
@@ -678,8 +678,8 @@ class VideoBatchPanel(GroupBatchPanel):
             button.setEnabled(not self.busy)
         ready = all(Path(value).is_file() for value in (self.cover_image, self.qr_image))
         if ready:
-            self.inputs_status.setText("Đã đủ 2 ảnh input: mỗi page video sẽ có ảnh 1:1 bên trái và ảnh QR bên phải. "
-                                       "Chọn nhóm rồi bấm Create Videos.")
+            self.inputs_status.setText("Đã đủ 2 ảnh input: mỗi page video sẽ có ảnh 1:1 (góc trên-trái) và ảnh QR "
+                                       "(góc trên-phải), bo cong theo frame. Chọn nhóm rồi bấm Create Videos.")
         else:
             missing = [name for value, name in ((self.cover_image, "ảnh 1:1 (bên trái)"),
                                                 (self.qr_image, "ảnh QR (bên phải)"))

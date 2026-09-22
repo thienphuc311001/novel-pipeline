@@ -81,14 +81,14 @@ class LayoutBudgetTests(unittest.TestCase):
         self.job = page_budget()
 
     def test_budget_follows_the_renderer_configuration(self):
-        self.assertEqual(page_band(DEFAULT_STYLE), 600)
+        self.assertEqual(page_band(DEFAULT_STYLE), 654)
         self.assertEqual(self.budget.body_height, page_band(DEFAULT_STYLE))
         self.assertEqual(self.budget.min_font_size, DEFAULT_STYLE.min_body_size)
         self.assertEqual(self.budget.min_font_size, DEFAULT_STYLE.body_size)
         self.assertEqual(self.budget.body_width, DEFAULT_STYLE.body_width)
         self.assertEqual(self.budget.body_max_lines, DEFAULT_STYLE.body_max_lines)
         # Changing the page grid moves both the renderer and the validation budget.
-        self.assertEqual(page_band(replace(DEFAULT_STYLE, body_bottom_margin=94)), 530)
+        self.assertEqual(page_band(replace(DEFAULT_STYLE, body_bottom_margin=94)), 584)
         self.assertEqual(LayoutBudget.from_style(replace(DEFAULT_STYLE, body_max_lines=30)).body_max_lines, 30)
 
     def test_reserved_header_is_measured_not_the_style_maximum(self):
@@ -199,7 +199,7 @@ class AdaptiveChunkSizeTests(unittest.TestCase):
                 self.assertLessEqual(draw.textlength(line, font=font), DEFAULT_STYLE.body_width)
 
     def test_tight_pages_keep_full_paragraph_structure(self):
-        text = '\n\n'.join((SHORT_PARAGRAPHS * 6)[:16])
+        text = '\n\n'.join((SHORT_PARAGRAPHS * 6)[:20])
         plan = split_text_by_limit(text, 700, layout=self.budget)
         self.assertGreater(len(plan.chunks), 1)
         for chunk in plan.chunks:

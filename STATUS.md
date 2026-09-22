@@ -10,7 +10,7 @@ The application now uses a five-step desktop workflow:
 
 ## Recent changes
 
-- Step 4 pages use style `minimal-neon-theater-v5`: the neon frame covers 90% of
+- Step 4 pages use style `minimal-neon-theater-v5`: the neon frame covers 95% of
   the 1920×1080 canvas and the body block runs in a fixed, centered 1150px column
   at a fixed 36px, so each Step 3 chunk fills roughly 90–98% of its own measured
   page band (the real title and chapter labels, not a worst-case reserve) instead
