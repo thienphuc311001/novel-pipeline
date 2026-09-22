@@ -24,7 +24,7 @@ class VideoUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def make_ready_document(self, root: Path) -> PipelineDocument:
+    def make_ready_document(self, root: Path, *, with_visuals: bool = True) -> PipelineDocument:
         document = PipelineDocument()
         document.normalized_revision = 1
         document.chapters = [
@@ -42,8 +42,10 @@ class VideoUiTests(unittest.TestCase):
         audiobook = Path(bundle.output_dir) / f"{bundle.slug}_audiobook.mp3"
         thumbnail.write_bytes(b"jpeg")
         audiobook.write_bytes(b"mp3")
-        from tests.support import create_narration_fixture
+        from tests.support import create_narration_fixture, create_visuals_fixture
         processor = create_narration_fixture(Path(bundle.output_dir), document.chunks, audiobook)
+        if with_visuals:
+            create_visuals_fixture(Path(bundle.output_dir))
         document.set_thumbnail_output(str(thumbnail))
         document.set_tts_output(
             audio_chunks_dir=str(processor.audio_dir),
@@ -97,6 +99,27 @@ class VideoUiTests(unittest.TestCase):
             document.set_thumbnail_output(document.thumbnail_path)
             self.assertEqual(document.video_path, "")
             window.close()
+    def test_create_video_is_blocked_until_both_page_images_are_added(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = self.make_ready_document(Path(directory), with_visuals=False)
+            window = MainWindow(Settings())
+            window.document = document
+            media = document.require_step4_outputs()
+            window._video_media = media
+            candidate = EncoderCandidate("libx264", "CPU", hardware=False, verified=True)
+            window._video_capabilities = VideoCapabilities(
+                "ffmpeg", "ffprobe", "test", "Linux", candidates=[candidate])
+            window._video_audio_probe = AudioProbe(100.0, "mp3", 24000, 1)
+            window._refresh_stage5_ui()
+            self.assertFalse(window.stage5_create_btn.isEnabled())
+            self.assertIn("Bắt buộc Add đủ 2 ảnh", window.stage5_inputs_status.text())
+            with patch.object(window, "_error") as error:
+                window._on_create_video()
+            error.assert_called_once()
+            self.assertIn("Add both page images", str(error.call_args[0][0]))
+            self.assertIsNone(window._video_render_session)
+            window.close()
+
 
     def test_cancel_during_async_page_preparation_preserves_old_video(self):
         from threading import Event

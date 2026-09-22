@@ -144,7 +144,16 @@ stops only the partial render. The completed file is saved automatically as
 
 Body text renders at a fixed 36px inside a fixed 1150px column, so Step 3 grows
 each chunk until the page reaches roughly 90–98% of its measured body band while
-the frame keeps the full 90% of the picture. A chunk that would need more than the
+the frame keeps the full 90% of the picture. Before Step 4 renders anything, you must Add both
+page images: the 1:1 picture (left slot) and the QR scan picture (right slot). Each picture is
+copied byte-identically into `<job>/visuals/` with its sha256 recorded in `visuals.json`; pages
+draw it resized (aspect preserved, never cropped, filtered, rounded, or overprinted) inside
+a 201×201 square centered on the body band beside the text column (16px clear of the text),
+and the QR picture keeps a white card with a quiet zone so scanners lock on. Step 4 refuses to
+render without both pictures, and changing either picture invalidates cached pages and the recorded
+video (jobs built before this redesign are re-rendered the same way, without re-running Step 3).
+Use **👁 Preview full frame 1920×1080** to render the whole composed page with the exact pictures,
+title, chapter label, and first chunk text before creating any video. A chunk that would need more than the
 available band is reported with its measured height, so it can be re-split in Step 3; short chapter headings and
 chapter tails simply show fewer lines, and paragraph gaps only compress for custom
 styles that allow a larger line budget.

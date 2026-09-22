@@ -223,6 +223,10 @@ class Step4MediaBundle:
     audiobook_fingerprint: Dict[str, Any]
     tts_manifest_path: str = ""
     effective_text_sha256: str = ""
+    # The two required page pictures (1:1 cover and QR).  Step 4 renders nothing
+    # until both are recorded in the job folder.
+    cover_image_path: str = ""
+    qr_image_path: str = ""
 
 
 @dataclass
@@ -820,7 +824,42 @@ class PipelineDocument:
             audiobook_fingerprint=dict(self.audiobook_fingerprint),
             tts_manifest_path=self.tts_manifest_path,
             effective_text_sha256=self._effective_tts_hash(),
+            **self.video_visual_images(output_dir),
         )
+
+    def video_visual_images(self, job_dir: Optional[str] = None) -> Dict[str, str]:
+        """Lenient ``{"cover_image_path": …, "qr_image_path": …}`` for the job folder.
+
+        Nothing is invented here: the two pictures only exist after the video step
+        records them with Add image, and the renderer refuses to run without them.
+        """
+        from media.visuals import available_images
+
+        if job_dir is None:
+            try:
+                job_dir = self.require_step3_artifacts().output_dir
+            except PipelineStateError:
+                return {"cover_image_path": "", "qr_image_path": ""}
+        try:
+            images = available_images(job_dir)
+        except (OSError, ValueError):
+            images = {}
+        return {"cover_image_path": images.get("cover", ""), "qr_image_path": images.get("qr", "")}
+
+    def set_video_visuals(self, cover_image: str, qr_image: str) -> Dict[str, Any]:
+        """Copy both required page pictures into the current job folder.
+
+        The copy is byte-identical, so the recorded sha256 both keys the page cache
+        and proves which pictures a rendered video was made from.
+        """
+        from media.visuals import record_visuals
+
+        bundle = self.require_step3_artifacts()
+        record = record_visuals(Path(bundle.output_dir), cover_image, qr_image)
+        if self.video_path:
+            # The current MP4 was built without these pictures; Step 4 recreates it.
+            self._clear_video_output()
+        return record
 
     def require_step5_outputs(self, group_id: Optional[str] = None) -> Step5UploadBundle:
         """Fail closed unless the upload stage would use the current video."""

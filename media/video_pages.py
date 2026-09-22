@@ -29,7 +29,9 @@ __all__ = [
     "CHAPTER_COLOR", "DIVIDER_COLOR", "PANEL_COLOR", "PANEL_OUTLINE", "TITLE_COLOR", "draw_frame",
     "render_page", "scaled_style", "page_chapter_label", "load_narration", "prepare_video_timeline",
     "source_fingerprint", "validate_page_layout", "validate_timeline_timestamps", "visual_settings",
-    "VideoPage", "VideoTimeline",
+    "VideoPage", "VideoTimeline", "side_panel_boxes", "paste_side_image", "required_page_images",
+    "SIDE_PANEL_VERSION", "SIDE_PANEL_GAP", "SIDE_PANEL_MIN_SIZE", "SIDE_PANEL_QUIET_ZONE",
+    "SIDE_PANEL_BACKGROUND",
 ]
 
 # One palette shared by every rendered surface (video pages and thumbnails).
@@ -44,11 +46,24 @@ FRAME_GLOW = 12
 FRAME_GLOW_WIDTH = 5
 FRAME_OUTLINE_WIDTH = 2
 
+# Step 4 requires two page pictures: the 1:1 cover owns the left empty strip and
+# the QR picture owns the right one.  They are only resized — never cropped,
+# filtered, rounded or overprinted — inside the measured body band, so the text
+# grid (and therefore the Step 3 chunk plan) is untouched by this design.
+SIDE_PANEL_VERSION = "side-panels-v1"
+SIDE_PANEL_GAP = 16            # breathing room between a picture and the text column
+SIDE_PANEL_MIN_SIZE = 96       # below this a slot would be unreadable/unscannable
+SIDE_PANEL_QUIET_ZONE = 0.04   # white margin kept around the QR so scanners lock on
+SIDE_PANEL_BACKGROUND = (255, 255, 255, 255)
+
 
 def visual_settings(style=DEFAULT_STYLE):
     regular, bold = font_paths()
     settings = asdict(style)
     settings["frame"] = list(style.frame)  # Stable equality after JSON recovery.
+    settings["side_panels"] = {"version": SIDE_PANEL_VERSION, "gap": SIDE_PANEL_GAP,
+                               "min_size": SIDE_PANEL_MIN_SIZE, "quiet_zone": SIDE_PANEL_QUIET_ZONE,
+                               "background": list(SIDE_PANEL_BACKGROUND)}
     return {"style": settings, "fonts": {p.name: sha256_file(p) for p in (regular, bold, *fallback_font_paths())}}
 
 
@@ -155,6 +170,20 @@ def validate_page_layout(media, records, *, style=DEFAULT_STYLE):
     return budget
 
 
+def _side_image_fingerprint(media):
+    """Hashes of the two required page pictures (fail closed when one is unusable)."""
+    hashes = {}
+    for role in ("cover", "qr"):
+        value = str(getattr(media, f"{role}_image_path", "") or "")
+        if not value:
+            continue
+        try:
+            hashes[role] = sha256_file(Path(value))
+        except OSError as error:
+            raise VideoValidationError(f"Page image {role} disappeared: {value} ({error})") from error
+    return hashes
+
+
 def source_fingerprint(media):
     records = load_narration(media)
     timeline_path = Path(media.output_dir) / "video_timeline.json"
@@ -163,6 +192,7 @@ def source_fingerprint(media):
     return {"profile": visual_settings(), "title": media.title, "chapter": media.chapter,
             "thumbnail_sha256": sha256_file(Path(media.thumbnail_path)),
             "audiobook_sha256": sha256_file(Path(media.audiobook_path)),
+            "side_images": _side_image_fingerprint(media),
             "thumbnail": dict(getattr(media, "thumbnail_fingerprint", {})),
             "audio": dict(getattr(media, "audiobook_fingerprint", {})),
             "chunks": records,
@@ -188,7 +218,9 @@ def require_unchanged(states):
 
 def _input_paths(media, records):
     folder = Path(media.output_dir)
-    return [media.tts_manifest_path, media.audiobook_path, media.thumbnail_path, *font_paths(),
+    images = [Path(value) for value in (getattr(media, "cover_image_path", ""), getattr(media, "qr_image_path", ""))
+              if value]
+    return [media.tts_manifest_path, media.audiobook_path, media.thumbnail_path, *font_paths(), *images,
             *(r['mp3_path'] for r in records),
             *(folder / name for name in ('tts_chunks.json', 'tts_overrides.json') if (folder / name).exists())]
 
@@ -208,7 +240,94 @@ def draw_frame(canvas, frame, *, radius, glow=FRAME_GLOW, glow_width=FRAME_GLOW_
     return Image.alpha_composite(canvas, panel)
 
 
-def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE):
+def side_panel_boxes(style, body_top, body_bottom):
+    """Square slots for the two required pictures, beside the centered text column.
+
+    The text column keeps its configured width (so the Step 3 chunk plan stays
+    valid); only the empty strips between the frame padding and that column are
+    used.  Both slots are centered on the measured body band, so every page of a
+    job shows its pictures at the same place.
+    """
+    left, _top, right_frame, _bottom = style.frame
+    content_left, content_right = left + style.padding, right_frame - style.padding
+    column = min(style.body_width, max(1, content_right - content_left))
+    column_x = (style.width - column) // 2
+    size = min(column_x - SIDE_PANEL_GAP - content_left,
+               content_right - (column_x + column) - SIDE_PANEL_GAP,
+               max(0, body_bottom - body_top))
+    if size < SIDE_PANEL_MIN_SIZE:
+        raise VideoValidationError(
+            f"Side image slots would be {size}px wide; the page needs at least {SIDE_PANEL_MIN_SIZE}px "
+            "for the required pictures. Use a smaller frame/padding or a narrower body column.")
+    top = (body_top + body_bottom) // 2 - size // 2
+    return ((content_left, top, content_left + size, top + size),
+            (content_right - size, top, content_right, top + size))
+
+
+def _scaled_size(image, width, height):
+    """Aspect-preserving size that fits inside ``width×height`` (never crops)."""
+    scale = min(width / image.width, height / image.height)
+    return max(1, round(image.width * scale)), max(1, round(image.height * scale))
+
+
+def paste_side_image(canvas, path, box, *, quiet_zone=0.0, background=SIDE_PANEL_BACKGROUND):
+    """Draw one unchanged picture inside ``box`` and return what was placed.
+
+    The picture is only resized (aspect preserved, LANCZOS) and centered.  A
+    ``quiet_zone`` fraction reserves the white margin a QR scan picture needs, and
+    transparency is composited over white so a transparent PNG never punches a
+    hole in the page panel.
+    """
+    path = Path(path)
+    try:
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGBA")
+    except (OSError, ValueError) as error:
+        raise VideoValidationError(f"Cannot open page image {path}: {error}") from error
+    width, height = box[2] - box[0], box[3] - box[1]
+    margin = max(0.0, min(0.2, float(quiet_zone)))
+    card = min(width, height) if margin else None
+    if card:
+        inner = max(1, round(card * (1 - 2 * margin)))
+        scaled = image.resize(_scaled_size(image, inner, inner), Image.Resampling.LANCZOS)
+        sheet = Image.new("RGBA", (card, card), background)
+        sheet.paste(scaled, ((card - scaled.width) // 2, (card - scaled.height) // 2), scaled)
+        origin = (box[0] + (width - card) // 2, box[1] + (height - card) // 2)
+        canvas.paste(sheet, origin, sheet)
+        return {"path": str(path), "box": list(box), "source": [image.width, image.height],
+                "drawn": [scaled.width, scaled.height], "quiet_zone": round(margin, 4),
+                "card": [origin[0], origin[1], origin[0] + card, origin[1] + card]}
+    scaled = image.resize(_scaled_size(image, width, height), Image.Resampling.LANCZOS)
+    sheet = Image.new("RGBA", scaled.size, background)
+    sheet.paste(scaled, (0, 0), scaled)
+    origin = (box[0] + (width - scaled.width) // 2, box[1] + (height - scaled.height) // 2)
+    canvas.paste(sheet, origin, sheet)
+    return {"path": str(path), "box": list(box), "source": [image.width, image.height],
+            "drawn": [scaled.width, scaled.height], "quiet_zone": 0.0, "card": None}
+
+
+def required_page_images(media):
+    """Both Step 4 page pictures, or a message naming exactly what is missing.
+
+    The two pictures are a required input of the video step, not an optional
+    decoration: without them no page is rendered at all.
+    """
+    found, missing = {}, []
+    for role, label in (("cover", "the 1:1 (left) image"), ("qr", "the QR (right) image")):
+        value = str(getattr(media, f"{role}_image_path", "") or "")
+        if value and Path(value).is_file():
+            found[role] = value
+        else:
+            missing.append(label)
+    if missing:
+        raise VideoValidationError(
+            "Step 4 requires both page images before it renders: add " + " and ".join(missing)
+            + " in the Create Video step (Add image) and try again.")
+    return found["cover"], found["qr"]
+
+
+def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE,
+                left_image=None, right_image=None):
     with Image.open(thumbnail) as source:
         background = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"),
                                   (style.width, style.height), method=Image.Resampling.LANCZOS)
@@ -268,6 +387,17 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
     draw.line((column_x, y, column_x + column, y), fill=DIVIDER_COLOR, width=1)
     body_top = y + style.body_top_gap
     body_bottom = bottom - style.body_bottom_margin
+    # The two required pictures own the empty strips beside the text column: they
+    # are only resized (aspect preserved) inside the measured body band, so the
+    # text grid, the divider and the chunk plan are all untouched by them.
+    side_images = {}
+    if left_image or right_image:
+        cover_box, qr_box = side_panel_boxes(style, body_top, body_bottom)
+        if left_image:
+            side_images["cover"] = paste_side_image(canvas, left_image, cover_box)
+        if right_image:
+            side_images["qr"] = paste_side_image(canvas, right_image, qr_box,
+                                                 quiet_zone=SIDE_PANEL_QUIET_ZONE)
     # body_bottom - body_top equals page_band with the real fitted title/chapter
     # advances, and the chunk planner validates the same measured band through
     # header_reserve/renderer_budget, so a chunk planned for this job always fits.
@@ -299,7 +429,7 @@ def render_page(thumbnail, output, *, title, chapter, text, style=DEFAULT_STYLE)
             "fill_min": LAYOUT_FILL_MIN, "fill_target": LAYOUT_FILL_TARGET,
             "spacing_compensation": justified - measured,
             "title_height": title_h * len(title_lines), "chapter_height": chapter_h * len(chapter_lines),
-            "text_bounds": bounds}
+            "text_bounds": bounds, "side_images": side_images}
 
 
 @dataclass
@@ -348,6 +478,7 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
             raise VideoValidationError("Video preparation cancelled")
     check()
     records = load_narration(media)
+    cover_image, qr_image = required_page_images(media)
     validate_page_layout(media, records, style=style)
     initial_files = file_states(_input_paths(media, records))
     audio = probe_audio(Path(media.audiobook_path), ffprobe_path)
@@ -365,7 +496,9 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
     folder = Path(media.output_dir)
     settings = visual_settings(style)
     visual_source = {"settings": settings, "thumbnail": sha256_file(Path(media.thumbnail_path)),
-                     "title": media.title, "chapter": media.chapter}
+                     "title": media.title, "chapter": media.chapter,
+                     "side_images": {"cover": sha256_file(Path(cover_image)),
+                                     "qr": sha256_file(Path(qr_image))}}
     pages = []
     start = 0.0
     for record, probe in zip(records, probes):
@@ -387,7 +520,8 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
         if layout is None:
             try:
                 layout = render_page(media.thumbnail_path, page_path, title=media.title,
-                                     chapter=chapter_label, text=record["text"], style=style)
+                                     chapter=chapter_label, text=record["text"], style=style,
+                                     left_image=cover_image, right_image=qr_image)
             except VideoValidationError as error:
                 raise VideoValidationError(f"Chunk {record['order']}: {error}") from error
             check()

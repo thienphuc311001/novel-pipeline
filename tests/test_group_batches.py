@@ -429,11 +429,63 @@ class GroupBatchTests(unittest.TestCase):
         panel = VideoBatchPanel(lambda: self.doc, self.settings)
         panel.capabilities = VideoCapabilities('ffmpeg', 'ffprobe', 'test', 'Linux')
         panel.enter()
+        panel.cover_image, panel.qr_image = self.page_inputs()
         seen = []
         panel.process_group = lambda group: (seen.append(group.group_id), panel.group_done('Skipped — current verified MP4'))
         panel.start_batch([self.groups[1].group_id])
         self.wait_finished(panel)
         self.assertEqual(seen, [self.groups[1].group_id])
+
+    def page_inputs(self):
+        """One 1:1 cover and one QR picture on disk for the Step 4 inputs."""
+        from PIL import Image
+        cover = self.root / 'cover.png'
+        qr = self.root / 'qr.png'
+        Image.new('RGB', (400, 400), (200, 30, 30)).save(cover)
+        Image.new('RGB', (250, 250), (255, 255, 255)).save(qr)
+        return str(cover), str(qr)
+
+    def test_video_refuses_to_start_without_both_page_inputs(self):
+        from ui.grouped_pipeline import VideoBatchPanel as Panel
+        panel = Panel(lambda: self.doc, self.settings)
+        panel.capabilities = VideoCapabilities('ffmpeg', 'ffprobe', 'test', 'Linux')
+        panel.enter()
+        seen = []
+        panel.process_group = lambda group: seen.append(group.group_id)
+        panel.start_batch([self.groups[0].group_id])
+        page, qr = self.page_inputs()
+        with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', return_value=(page, '')):
+            panel.choose_image('cover')
+        panel.start_batch([self.groups[0].group_id])
+        self.assertEqual(seen, [])
+        self.assertFalse(panel.busy)
+        self.assertFalse(panel.start_btn.isEnabled())
+        self.assertIn('Bắt buộc Add đủ 2 ảnh', panel.inputs_status.text())
+        with patch('ui.grouped_pipeline.QFileDialog.getOpenFileName', return_value=(qr, '')):
+            panel.choose_image('qr')
+        self.assertTrue(panel.start_btn.isEnabled())
+        self.assertIn('Đã đủ 2 ảnh input', panel.inputs_status.text())
+
+    def test_video_process_group_refuses_without_inputs_and_records_them_after(self):
+        from media.groups import record_job_visuals
+        from media.visuals import available_images
+        panel = VideoBatchPanel(lambda: self.doc, self.settings)
+        panel.capabilities = VideoCapabilities('ffmpeg', 'ffprobe', 'test', 'Linux')
+        group = self.groups[0]
+        group.state['tts_status'] = 'Completed'
+        with self.assertRaisesRegex(PipelineStateError, 'page images'):
+            panel.process_group(group)
+        cover, qr = self.page_inputs()
+        record = record_job_visuals(group, cover, qr)
+        from media.artifacts import sha256_file
+        self.assertEqual(Path(record['cover']['file']).name, 'cover.png')
+        self.assertEqual(record['cover']['sha256'], sha256_file(Path(group.output_dir) / record['cover']['file']))
+        self.assertTrue(Path(group.output_dir, 'visuals.json').is_file())
+        images = available_images(Path(group.output_dir))
+        self.assertEqual(Path(images['cover']).read_bytes(), Path(cover).read_bytes())
+        self.assertEqual(Path(images['qr']).read_bytes(), Path(qr).read_bytes())
+        self.assertEqual(group.state['visuals']['sources'],
+                         {'cover': str(Path(cover).resolve()), 'qr': str(Path(qr).resolve())})
 
 
 class VideoMetadataUpdateTests(unittest.TestCase):

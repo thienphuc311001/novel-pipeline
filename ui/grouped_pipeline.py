@@ -10,12 +10,14 @@ from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
                             QLabel, QPushButton, QProgressBar, QTextEdit, QFileDialog,
-                            QDialog, QDialogButtonBox, QMessageBox, QLineEdit)
+                            QDialog, QDialogButtonBox, QMessageBox, QLineEdit, QGroupBox)
 
 from media.groups import (prepare_tts, record_media, save_job_state, edit_failed_chunk, delete_group,
                          record_video, record_tts_provenance)
+from media.visuals import available_images, image_summary, recorded_sources
 from pipeline.document import PipelineStateError
 from ui.copy_controls import add_copy_button, add_copyable_label
+from ui.video_preview import VideoPreviewDialog, build_page_preview, first_page_text
 
 
 class ActionWorker(QObject):
@@ -595,22 +597,207 @@ class TtsBatchPanel(GroupBatchPanel):
 
 
 class VideoBatchPanel(GroupBatchPanel):
+    """Step 4: two required page pictures, a full-frame preview, then the video.
+
+    Nothing is rendered until both pictures are added: the checklist, the queue and
+    the renderer itself all refuse to run without them.
+    """
+
+    IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.webp *.bmp)"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.start_btn.setText("Create Videos")
         self.capabilities = None
         self.session = None
+        self.cover_image = ""
+        self.qr_image = ""
+        self._picked_by_user = False
+        self.preview = VideoPreviewDialog(self)
         self.capability_label = QLabel("GPU/FFmpeg: detection starts when Step 4 opens.")
         self.capability_label.setWordWrap(True)
         capability_column = QVBoxLayout()
         add_copyable_label(capability_column, self.capability_label, self.capability_label.text)
         self.content_layout.addLayout(capability_column)
 
+        inputs = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải)")
+        inputs_layout = QVBoxLayout(inputs)
+        self.inputs_status = QLabel("")
+        self.inputs_status.setWordWrap(True)
+        self.inputs_status.setTextFormat(Qt.TextFormat.PlainText)
+        inputs_layout.addWidget(self.inputs_status)
+        for role, button_text, tooltip in (
+            ("cover", "🖼 Add ảnh 1:1 (bên trái)",
+             "Ảnh giữ nguyên nội dung, chỉ được resize vừa ô vuông bên trái của mỗi page video"),
+            ("qr", "🔳 Add ảnh QR (bên phải)",
+             "Ảnh QR giữ nguyên nội dung, chỉ được resize vừa ô vuông bên phải của mỗi page video"),
+        ):
+            row = QHBoxLayout()
+            button = QPushButton(button_text)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _checked=False, target=role: self.choose_image(target))
+            label = QLabel("Not selected")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            setattr(self, f"{role}_btn", button)
+            setattr(self, f"{role}_label", label)
+            row.addWidget(button)
+            row.addWidget(label, 1)
+            inputs_layout.addLayout(row)
+        extras = QHBoxLayout()
+        self.step3_cover_btn = QPushButton("Dùng ảnh cover của Step 3")
+        self.step3_cover_btn.setToolTip("Lấy ảnh gốc đã chọn cho thumbnail của nhóm đang highlight")
+        self.step3_cover_btn.clicked.connect(self.use_step3_cover)
+        extras.addWidget(self.step3_cover_btn)
+        self.preview_btn = QPushButton("👁 Preview full frame 1920×1080")
+        self.preview_btn.setToolTip("Render toàn bộ frame với đúng 2 ảnh input như video sẽ ghi")
+        self.preview_btn.clicked.connect(self.preview_video_page)
+        extras.addWidget(self.preview_btn)
+        extras.addStretch()
+        inputs_layout.addLayout(extras)
+        self.content_layout.addWidget(inputs)
+        self._refresh_visual_inputs()
+
     def status_for(self, group):
         return group.state.get("video", {}).get("status", "Video not created") + (" (partial audio)" if group.state.get("tts_status") == "Partial" else "")
 
+    # ------------------------------------------------------- required inputs
+    def set_busy(self, busy):
+        super().set_busy(busy)
+        self._refresh_visual_inputs()
+
+    def _refresh_visual_inputs(self):
+        """Show both pictures, the blocking note, and gate Create Videos on them."""
+        for role in ("cover", "qr"):
+            label = getattr(self, f"{role}_label", None)
+            button = getattr(self, f"{role}_btn", None)
+            if label is None or button is None:
+                continue
+            value = self.cover_image if role == "cover" else self.qr_image
+            label.setText(image_summary(value))
+            button.setEnabled(not self.busy)
+        ready = all(Path(value).is_file() for value in (self.cover_image, self.qr_image))
+        if ready:
+            self.inputs_status.setText("Đã đủ 2 ảnh input: mỗi page video sẽ có ảnh 1:1 bên trái và ảnh QR bên phải. "
+                                       "Chọn nhóm rồi bấm Create Videos.")
+        else:
+            missing = [name for value, name in ((self.cover_image, "ảnh 1:1 (bên trái)"),
+                                                (self.qr_image, "ảnh QR (bên phải)"))
+                       if not Path(value).is_file()]
+            self.inputs_status.setText("Bắt buộc Add đủ 2 ảnh trước khi tạo video. Còn thiếu: "
+                                       + ", ".join(missing) + ".")
+        if hasattr(self, "step3_cover_btn"):
+            self.step3_cover_btn.setEnabled(not self.busy)
+            self.preview_btn.setEnabled(not self.busy)
+        if hasattr(self, "start_btn"):
+            self.start_btn.setEnabled(bool(ready and not self.busy))
+        return ready
+
+    def _dialog_start(self, role):
+        current = self.cover_image if role == "cover" else self.qr_image
+        if current and Path(current).is_file():
+            return current
+        if role == "qr":
+            suggestion = str(getattr(self.settings, "qr_image_path", "") or "")
+            if suggestion and Path(suggestion).is_file():
+                return suggestion
+        return self.settings.resolved_input_dir()
+
+    def choose_image(self, role):
+        """Add one of the two required pictures (the file itself is never edited)."""
+        if self.busy:
+            return
+        title = "Chọn ảnh 1:1 (bên trái)" if role == "cover" else "Chọn ảnh QR (bên phải)"
+        path, _ = QFileDialog.getOpenFileName(self, title, self._dialog_start(role), self.IMAGE_FILTER)
+        if not path:
+            return
+        if role == "cover":
+            self.cover_image = path
+        else:
+            self.qr_image = path
+        self._picked_by_user = True
+        self._refresh_visual_inputs()
+        self.status.setText(f"{title}: {path}")
+
+    def use_step3_cover(self):
+        if self.busy:
+            return
+        group_id = self.selected_id()
+        if not group_id:
+            self.status.setText("Highlight a chapter group before reusing its Step 3 cover.")
+            return
+        try:
+            group = self.document_provider().require_group_artifacts(group_id)
+        except Exception as error:
+            self.status.setText(str(error))
+            return
+        source = str(group.state.get("thumbnail_source", "") or "")
+        if not source or not Path(source).is_file():
+            self.status.setText("Nhóm này chưa có ảnh cover ở Step 3; chọn ảnh ở Step 3 hoặc bấm Add ảnh 1:1.")
+            return
+        self.cover_image = source
+        self._picked_by_user = True
+        self._refresh_visual_inputs()
+        self.status.setText(f"Ảnh 1:1 lấy từ cover Step 3 của {group.label}: {source}")
+
+    def _group_visuals(self, group):
+        """Recorded pictures of one group: the copied file, or its original source."""
+        if group is None:
+            return {"cover": "", "qr": ""}
+        folder = Path(group.output_dir)
+        sources, images = recorded_sources(folder), available_images(folder)
+        return {role: (sources[role] or images[role]) for role in ("cover", "qr")}
+
+    def _prefill_from_group(self, group):
+        """Reopen a group's own recorded pictures; a user's current pick always wins."""
+        if group is None or self._picked_by_user:
+            return
+        for role, value in self._group_visuals(group).items():
+            if value and Path(value).is_file():
+                if role == "cover":
+                    self.cover_image = value
+                else:
+                    self.qr_image = value
+
+    def start_batch(self, ids=None):
+        if self.busy:
+            return
+        if not self._refresh_visual_inputs():
+            self.status.setText("Bắt buộc Add đủ 2 ảnh input (1:1 bên trái + QR bên phải) trước khi tạo video.")
+            return
+        super().start_batch(ids)
+
+    # ------------------------------------------------------------- preview
+    def preview_video_page(self):
+        """Render the whole page (both pictures included) for the current group."""
+        if not self._refresh_visual_inputs():
+            self.status.setText("Add đủ 2 ảnh input rồi mới xem được preview toàn frame.")
+            return
+        self.preview.open_for(self._preview_payload)
+
+    def _preview_payload(self):
+        group_id = self.selected_id() or next(iter(self.checked_ids()), None)
+        if not group_id:
+            raise PipelineStateError("Highlight a chapter group to preview its video page.")
+        document = self.document_provider()
+        group = document.require_group_artifacts(group_id)
+        media = document.require_step4_outputs(group_id)
+        chapter, text, source_note = first_page_text(group.output_dir)
+        path, note = build_page_preview(self.preview.work_dir(), thumbnail=media.thumbnail_path,
+                                        title=media.title, chapter=chapter or group.label, text=text,
+                                        cover_image=self.cover_image, qr_image=self.qr_image)
+        caption = "\n".join([
+            f"Nhóm: {group.label}",
+            f"Thumbnail: {media.thumbnail_path}",
+            f"Ảnh 1:1 (trái): {image_summary(self.cover_image)}",
+            f"Ảnh QR (phải): {image_summary(self.qr_image)}",
+            f"Chữ preview: {source_note}" + (f" — {note}" if note else ""),
+        ])
+        return path, caption
+
     def enter(self):
         super().enter()
+        self._refresh_visual_inputs()
         if self.capabilities is None and self.thread is None:
             from media.video import detect_video_capabilities
             self.running = True
@@ -645,20 +832,34 @@ class VideoBatchPanel(GroupBatchPanel):
 
     def show_selected(self, *_):
         super().show_selected()
-        if not self.selected_id():
+        group_id = self.selected_id()
+        try:
+            if group_id:
+                group = self.document_provider().require_group_artifacts(group_id)
+                self._prefill_from_group(group)
+        except Exception as error:
+            self.diagnostic.emit(str(error))
+        self._refresh_visual_inputs()
+        if not group_id:
             return
         try:
-            media = self.document_provider().require_step4_outputs(self.selected_id())
+            media = self.document_provider().require_step4_outputs(group_id)
             self.details.append(f"Thumbnail: {media.thumbnail_path}\nAudio: {media.audiobook_path}\nOutput: {media.video_path}\nResolution: 1920×1080")
         except Exception as error:
             self.details.append(str(error))
 
     def process_group(self, group):
+        from media.groups import record_job_visuals
         from media.video import probe_audio, mp3_copy_is_safe, validate_rendered_video
         if self.capabilities is None:
             raise PipelineStateError("Wait for verified encoder detection before starting.")
         if group.state.get("tts_status") != "Completed":
             raise PipelineStateError("Complete every TTS chunk in Step 3 before creating a video; partial audiobooks are unsupported.")
+        # The two required pictures are copied into this job before the bundle is
+        # read, so the page cache and the Step 5 gate see exactly these bytes.
+        if not (Path(self.cover_image).is_file() and Path(self.qr_image).is_file()):
+            raise PipelineStateError("Add both page images (1:1 left + QR right) before creating a video.")
+        record_job_visuals(group, self.cover_image, self.qr_image)
         media = self.document_provider().require_step4_outputs(group.group_id)
         caps = self.capabilities
         def prepare(worker):

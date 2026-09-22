@@ -135,7 +135,7 @@ class SettingsDialog(QDialog):
         self._bool(form, "zip_include_manifest", "Include ZIP manifest")
         self._bool(form, "zip_folder_per_range", "Folder per ZIP range")
 
-        form = self._tab("TTS & UI")
+        form = self._tab("TTS, Thumbnail & UI")
         form.addRow("TTS engine", QLabel("Edge-TTS (online)"))
         self._tts_preprocessing(form)
         self._text(form, "tts_voice", "TTS voice")
@@ -144,6 +144,8 @@ class SettingsDialog(QDialog):
         self._int(form, "tts_retry_count", "Attempts per chunk", 1, 10)
         form.addRow("Step 3 chunk target", QLabel("700 characters · full-chunk retries"))
         self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
+        self._file_path(form, "qr_image_path", "Suggested QR image (Create Video step)",
+                        "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         self._int(form, "font_size", "Application font size", 7, 32)
         self._int(form, "max_log_lines", "Maximum diagnostic lines", 100, 100000)
 
@@ -266,6 +268,30 @@ class SettingsDialog(QDialog):
     def _browse_directory(self, editor: QLineEdit, label: str) -> None:
         current = Path(editor.text()).expanduser() if editor.text().strip() else Path.home()
         selected = QFileDialog.getExistingDirectory(self, label, str(current))
+        if selected:
+            editor.setText(selected)
+
+    def _file_path(self, form: QFormLayout, name: str, label: str, file_filter: str) -> None:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        editor = QLineEdit()
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(lambda: self._browse_file(editor, label, file_filter))
+        row.addWidget(editor)
+        row.addWidget(browse)
+        self._register(
+            form,
+            name,
+            label,
+            container,
+            editor.text,
+            lambda value: editor.setText(str(value or "")),
+        )
+
+    def _browse_file(self, editor: QLineEdit, label: str, file_filter: str) -> None:
+        current = Path(editor.text()).expanduser() if editor.text().strip() else Path.home()
+        selected, _ = QFileDialog.getOpenFileName(self, label, str(current), file_filter)
         if selected:
             editor.setText(selected)
 

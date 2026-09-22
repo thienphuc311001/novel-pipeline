@@ -39,6 +39,7 @@ from pipeline.document import (
 )
 from ui.copy_controls import add_copy_button, copy_text
 from ui.log_dialog import LogDialog
+from ui.video_preview import VideoPreviewDialog, build_page_preview, first_page_text
 
 
 class _TtsWorker(QObject):
@@ -785,6 +786,41 @@ class MainWindow(QMainWindow):
         inputs_form.addRow("Audio", self.stage5_audio_label)
         inputs_form.addRow("Output", self.stage5_output_label)
         layout.addWidget(inputs_group)
+
+        visuals_group = QGroupBox("Video page inputs (bắt buộc — 1:1 bên trái + QR bên phải)")
+        visuals_layout = QVBoxLayout(visuals_group)
+        self.stage5_inputs_status = QLabel("")
+        self.stage5_inputs_status.setWordWrap(True)
+        visuals_layout.addWidget(self.stage5_inputs_status)
+        for role, button_text, tooltip in (
+            ("cover", "🖼 Add ảnh 1:1 (bên trái)",
+             "Ảnh giữ nguyên nội dung, chỉ được resize vừa ô vuông bên trái của mỗi page video"),
+            ("qr", "🔳 Add ảnh QR (bên phải)",
+             "Ảnh QR giữ nguyên nội dung, chỉ được resize vừa ô vuông bên phải của mỗi page video"),
+        ):
+            row = QHBoxLayout()
+            button = QPushButton(button_text)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _checked=False, target=role: self._on_add_page_image(target))
+            label = QLabel("Not selected")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            setattr(self, f"stage5_{role}_btn", button)
+            setattr(self, f"stage5_{role}_label", label)
+            row.addWidget(button)
+            row.addWidget(label, 1)
+            visuals_layout.addLayout(row)
+        preview_row = QHBoxLayout()
+        self.stage5_preview_btn = QPushButton("👁 Preview full frame 1920×1080")
+        self.stage5_preview_btn.setToolTip("Render toàn bộ frame với đúng 2 ảnh input như video sẽ ghi")
+        self.stage5_preview_btn.clicked.connect(self._on_preview_video_page)
+        preview_row.addWidget(self.stage5_preview_btn)
+        preview_row.addStretch()
+        visuals_layout.addLayout(preview_row)
+        layout.addWidget(visuals_group)
+        self.stage5_preview_dialog = VideoPreviewDialog(self)
+        self._stage5_cover = ""
+        self._stage5_qr = ""
 
         capabilities_group = QGroupBox("GPU & FFmpeg Detection")
         capabilities_layout = QVBoxLayout(capabilities_group)
@@ -1770,7 +1806,8 @@ class MainWindow(QMainWindow):
             and self._video_capabilities.selected is not None
             and self._video_audio_probe is not None
         )
-        self.stage5_create_btn.setEnabled(bool(ready and not running))
+        visuals_ready = self._refresh_video_page_inputs()
+        self.stage5_create_btn.setEnabled(bool(ready and visuals_ready and not running))
         self.stage5_cancel_btn.setEnabled(running)
         try:
             self.document.require_step5_outputs()
@@ -1789,11 +1826,108 @@ class MainWindow(QMainWindow):
                 f"Saved to: {self.document.video_path}"
             )
 
+    # ------------------------------------------- required video page inputs
+    def _video_page_images(self):
+        """The two required pictures: this session's picks, else the job's record."""
+        recorded = self.document.video_visual_images()
+        if not (self._stage5_cover and Path(self._stage5_cover).is_file()):
+            self._stage5_cover = recorded.get("cover_image_path", "")
+        if not (self._stage5_qr and Path(self._stage5_qr).is_file()):
+            self._stage5_qr = recorded.get("qr_image_path", "")
+        return self._stage5_cover, self._stage5_qr
+
+    def _refresh_video_page_inputs(self):
+        """Show both pictures and report whether Create Video may run."""
+        from media.visuals import image_summary
+
+        cover, qr = self._video_page_images()
+        self.stage5_cover_label.setText(image_summary(cover))
+        self.stage5_qr_label.setText(image_summary(qr))
+        ready = all(Path(value).is_file() for value in (cover, qr))
+        if ready:
+            self.stage5_inputs_status.setText(
+                "Đã đủ 2 ảnh input: mỗi page video sẽ có ảnh 1:1 bên trái và ảnh QR bên phải.")
+        else:
+            missing = [name for value, name in ((cover, "ảnh 1:1 (bên trái)"),
+                                                (qr, "ảnh QR (bên phải)"))
+                       if not Path(value).is_file()]
+            self.stage5_inputs_status.setText(
+                "Bắt buộc Add đủ 2 ảnh trước khi tạo video. Còn thiếu: " + ", ".join(missing) + ".")
+        return ready
+
+    def _on_add_page_image(self, role: str) -> None:
+        """Add one of the two required page pictures (the file is never edited)."""
+        from media.visuals import image_summary
+
+        if self._video_render_session is not None:
+            return
+        title = "Chọn ảnh 1:1 (bên trái)" if role == "cover" else "Chọn ảnh QR (bên phải)"
+        current = self._stage5_cover if role == "cover" else self._stage5_qr
+        start = current if current and Path(current).is_file() else ""
+        if not start and role == "qr":
+            suggestion = str(getattr(self.settings, "qr_image_path", "") or "")
+            start = suggestion if suggestion and Path(suggestion).is_file() else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, title, start or self.settings.resolved_input_dir(),
+            "Images (*.jpg *.jpeg *.png *.webp *.bmp);;All Files (*)")
+        if not path:
+            return
+        if role == "cover":
+            self._stage5_cover = path
+        else:
+            self._stage5_qr = path
+        try:
+            if Path(self._stage5_cover).is_file() and Path(self._stage5_qr).is_file():
+                self.document.set_video_visuals(self._stage5_cover, self._stage5_qr)
+                self._log(f"✓ Đã lưu 2 ảnh input: {image_summary(self._stage5_cover)} · {image_summary(self._stage5_qr)}")
+            else:
+                self._log(f"✓ {title}: {path} (cần thêm ảnh còn lại trước khi tạo video)")
+        except (OSError, ValueError, RuntimeError) as error:
+            self._error(f"Cannot store the two page images: {error}")
+        self._refresh_stage5_ui()
+
+    def _on_preview_video_page(self) -> None:
+        """Render the whole frame (both pictures included) before creating the video."""
+        from media.visuals import image_summary
+
+        try:
+            bundle = self.document.require_step3_artifacts()
+        except PipelineStateError as error:
+            self._error(str(error))
+            return
+        if not self._refresh_video_page_inputs():
+            self._error("Add both page images (1:1 left + QR right) before previewing the frame.")
+            return
+        thumbnail = self.document.thumbnail_path or ""
+        if not Path(thumbnail).is_file():
+            self._error("Generate the Step 3 thumbnail before previewing the frame.")
+            return
+
+        def payload():
+            chapter, text, source_note = first_page_text(bundle.output_dir)
+            path, note = build_page_preview(
+                self.stage5_preview_dialog.work_dir(), thumbnail=thumbnail, title=bundle.title,
+                chapter=chapter or bundle.chapter, text=text, cover_image=self._stage5_cover,
+                qr_image=self._stage5_qr)
+            caption = "\n".join([
+                f"Job: {bundle.title} — {bundle.chapter}",
+                f"Thumbnail: {thumbnail}",
+                f"Ảnh 1:1 (trái): {image_summary(self._stage5_cover)}",
+                f"Ảnh QR (phải): {image_summary(self._stage5_qr)}",
+                f"Chữ preview: {source_note}" + (f" — {note}" if note else ""),
+            ])
+            return path, caption
+
+        self.stage5_preview_dialog.open_for(payload)
+
     def _on_create_video(self) -> None:
         try:
             from media.video import mp3_copy_is_safe, probe_audio
 
             media = self.document.require_step4_outputs()
+            if not (Path(media.cover_image_path).is_file() and Path(media.qr_image_path).is_file()):
+                raise PipelineStateError(
+                    "Add both page images (1:1 left + QR right) before creating a video.")
             capabilities = self._video_capabilities
             if capabilities is None or capabilities.selected is None:
                 raise PipelineStateError("Video encoder detection has not completed successfully.")
@@ -1831,6 +1965,8 @@ class MainWindow(QMainWindow):
     def _set_video_busy(self, busy: bool) -> None:
         self.load_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
+        for button in (self.stage5_cover_btn, self.stage5_qr_btn, self.stage5_preview_btn):
+            button.setEnabled(not busy)
         for index in range(min(4, self.tabs.count())):
             self.tabs.setTabEnabled(index, not busy)
         if self.tabs.count() > 4:

@@ -166,8 +166,11 @@ class Settings:
     tts_retry_count: int = 5
     tts_fallback_retry_count: int = 3  # Legacy config compatibility; full-chunk retries only.
 
-    # --- thumbnail --------------------------------------------------------
+    # --- thumbnail / video pages ------------------------------------------
     thumbnail_jpeg_quality: int = 95
+    # Suggested picture for the Create Video step's "Add QR image" dialog.  The
+    # picture itself is always copied into the job folder when it is added.
+    qr_image_path: str = ""
 
     # OAuth desktop client configuration only; tokens live in the OS keyring.
     youtube_client_secrets_path: str = ""

@@ -22,7 +22,7 @@ from media.video import (AudioProbe, EncoderCandidate, VideoValidationError, bui
                          probe_audio, validate_rendered_video, verify_vfr_encoder)
 from media.video_pages import (DEFAULT_STYLE, gap_ladder, load_narration, page_chapter_label, prepare_video_timeline,
                                render_page, source_fingerprint, validate_timeline_timestamps)
-from tests.support import create_narration_fixture
+from tests.support import create_narration_fixture, create_visuals_fixture
 
 
 class VideoPageTests(unittest.TestCase):
@@ -36,9 +36,12 @@ class VideoPageTests(unittest.TestCase):
         self.processor = create_narration_fixture(self.root, self.chunks, self.audio)
         thumb = self.root / 'thumbnail.jpg'
         Image.new('RGB', (1280, 720), (70, 100, 140)).save(thumb)
+        self.visuals = create_visuals_fixture(self.root)
         self.media = SimpleNamespace(output_dir=str(self.root), title='Đường về cố đô', chapter='Chương 1',
                                      thumbnail_path=str(thumb), audiobook_path=str(self.audio),
-                                     tts_manifest_path=str(self.processor.manifest_path))
+                                     tts_manifest_path=str(self.processor.manifest_path),
+                                     cover_image_path=self.visuals['cover'],
+                                     qr_image_path=self.visuals['qr'])
 
     def probe(self, path, *args):
         duration = {'chunk_00001.mp3': .737, 'chunk_00002.mp3': 1.213, 'audiobook.mp3': 1.950}[Path(path).name]
@@ -368,9 +371,11 @@ class RealVfrTests(unittest.TestCase):
             processor.merge(result, root / 'audiobook.mp3')
             thumb = root / 'thumbnail.jpg'
             Image.new('RGB', (1280, 720), (60, 80, 110)).save(thumb)
+            visuals = create_visuals_fixture(root)
             media = SimpleNamespace(output_dir=str(root), title='Truyện thử nghiệm', chapter='Chương 1',
                 thumbnail_path=str(thumb), audiobook_path=str(root / 'audiobook.mp3'),
-                tts_manifest_path=str(processor.manifest_path))
+                tts_manifest_path=str(processor.manifest_path),
+                cover_image_path=visuals['cover'], qr_image_path=visuals['qr'])
             timeline = prepare_video_timeline(media, 'ffprobe')
             self.assertEqual(len(timeline.pages), 3)
             self.assertEqual([p.text for p in timeline.pages], texts)
@@ -459,9 +464,11 @@ class RealVfrTests(unittest.TestCase):
             processor.merge(processor.run(), root / 'audiobook.mp3')
             thumb = root / 'thumbnail.jpg'
             Image.new('RGB', (1280, 720), (60, 80, 110)).save(thumb)
+            visuals = create_visuals_fixture(root)
             media = SimpleNamespace(output_dir=str(root), title='Truyện', chapter='Chương 1',
                 thumbnail_path=str(thumb), audiobook_path=str(root / 'audiobook.mp3'),
-                tts_manifest_path=str(processor.manifest_path))
+                tts_manifest_path=str(processor.manifest_path),
+                cover_image_path=visuals['cover'], qr_image_path=visuals['qr'])
             timeline = prepare_video_timeline(media, 'ffprobe')
             self.assertEqual(len(timeline.pages), 1)
             self.assertAlmostEqual(timeline.pages[0].duration, actual_duration, places=10)

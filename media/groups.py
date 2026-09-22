@@ -461,6 +461,21 @@ def record_media(group, kind, path):
     save_job_state(group)
 
 
+def record_job_visuals(group, cover_image, qr_image):
+    """Copy the two required Step 4 pictures into this group's job folder.
+
+    Called when the Create Video step starts a group: the byte-identical copy is
+    what the renderer hashes, so the page cache and the Step 5 gate can never
+    disagree with what the user picked.
+    """
+    from media.visuals import record_visuals
+    record = record_visuals(Path(group.output_dir), cover_image, qr_image)
+    group.state["visuals"] = {"sources": {role: record[role]["source"] for role in ("cover", "qr")},
+                              "sha256": {role: record[role]["sha256"] for role in ("cover", "qr")}}
+    save_job_state(group)
+    return record
+
+
 def require_media(document, group_id):
     group = document.require_group_artifacts(group_id)
     folder = Path(group.output_dir).resolve()
@@ -484,10 +499,13 @@ def require_media(document, group_id):
                 raise PipelineStateError(f"{group.label}: unavailable TTS plan: {error}") from error
             if current_hash != provenance.get(key):
                 raise PipelineStateError(f"{group.label}: TTS text/overrides changed; resume TTS before rendering.")
+    from media.visuals import available_images
+    images = available_images(folder)
     return Step4MediaBundle(group.title, group.label, group.slug, group.output_dir,
                            group.state["thumbnail"]["path"], group.state["audiobook"]["path"],
                            str(folder / f"{group.slug}.mp4"), group.state["thumbnail"]["fingerprint"], group.state["audiobook"]["fingerprint"],
-                           str(folder / "audio_chunks" / "manifest.json"), provenance.get("effective_text_sha256", ""))
+                           str(folder / "audio_chunks" / "manifest.json"), provenance.get("effective_text_sha256", ""),
+                           cover_image_path=images.get("cover", ""), qr_image_path=images.get("qr", ""))
 
 
 def record_tts_provenance(group, processor):

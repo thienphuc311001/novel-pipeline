@@ -27,9 +27,12 @@ bundle schema, not to a visible tab number.
 - `chapters/` — multilingual heading patterns, numerals, normalization, and
   duplicate handling
 - `cleaning/` and `chunking/` — safe TTS preparation and sentence-aware chunks
-- `media/` — exact group artifacts, thumbnails, TTS, video, and YouTube state
+- `media/` — exact group artifacts, thumbnails, TTS, video, required Step 4 page
+  pictures (`media/visuals.py`: byte-identical `visuals/` copies plus `visuals.json`
+  records), and YouTube state
 - `ui/` — five-step main window, group panels, settings, YouTube, reusable
-  `Copy all` controls, and the shared modeless log window (`ui/log_dialog.py`)
+  `Copy all` controls, the shared modeless log window (`ui/log_dialog.py`), and
+  the full-frame video page preview (`ui/video_preview.py`)
 - `exporters/` — JSON and text exports
 
 The former Chinese scanning and translation packages are intentionally absent.
