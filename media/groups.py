@@ -511,10 +511,21 @@ def require_media(document, group_id):
 def record_tts_provenance(group, processor):
     folder = Path(group.output_dir)
     overrides = folder / "tts_overrides.json"
-    group.state["tts_provenance"] = {
+    provenance = {
         "voice": processor.voice, "plan_sha256": sha256_file(folder / "tts_chunks.json"),
         "overrides_sha256": sha256_file(overrides) if overrides.exists() else "",
         "effective_text_sha256": sha256_text("\n".join(f"{c.order}\0{c.text}" for c in processor.chunks))}
+    try:
+        from media.channel_intro import read_manifest_intro
+
+        intro = read_manifest_intro(Path(group.output_dir) / "audio_chunks" / "manifest.json")
+        if intro is not None:
+            provenance["intro_text_sha256"] = intro.get("text_sha256", "")
+            provenance["intro_voice"] = intro.get("voice", "")
+            provenance["intro_mp3_sha256"] = intro.get("mp3_sha256", "")
+    except Exception:
+        pass
+    group.state["tts_provenance"] = provenance
 
 
 def video_source(media):

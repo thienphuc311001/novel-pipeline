@@ -363,7 +363,16 @@ class TtsProcessor:
         self.validate_dependencies()
         return asyncio.run(self._run_async())
 
-    def merge(self, result: TtsResult, output_path: Path, *, skip_failed: bool = False) -> Path:
+    def merge(
+        self,
+        result: TtsResult,
+        output_path: Path,
+        *,
+        skip_failed: bool = False,
+        intro_path: Optional[Path] = None,
+        intro_text: str = "",
+        intro_voice: str = "",
+    ) -> Path:
         if result.cancelled:
             raise RuntimeError("Đã hủy tạo audiobook; không gộp MP3.")
         if result.failures and not skip_failed:
@@ -375,20 +384,49 @@ class TtsProcessor:
             raise RuntimeError("Không có đoạn MP3 thành công để gộp.")
         if not skip_failed and usable != {c.order for c in self.chunks}:
             raise RuntimeError("Missing successful chunk MP3s; resume Step 3 before merging.")
-        paths = [_chunk_path(self.audio_dir, chunk.order) for chunk in self.chunks if chunk.order in usable]
+        story_paths = [_chunk_path(self.audio_dir, chunk.order) for chunk in self.chunks if chunk.order in usable]
         if not self._manifest:
             self._load_manifest()
         if any(not self._is_resumable(c) for c in self.chunks if c.order in usable):
             raise RuntimeError("Chunk MP3 provenance changed; resume Step 3 before merging.")
+        intro_record: Optional[Dict[str, Any]] = None
+        paths = list(story_paths)
+        if intro_path is not None:
+            intro_file = Path(intro_path)
+            # Fail closed: intro must live inside this job's chunk directory.
+            try:
+                if intro_file.resolve().parent != self.audio_dir.resolve():
+                    raise RuntimeError("Intro MP3 must be inside the job's audio chunk directory.")
+            except OSError as error:
+                raise RuntimeError(f"Intro MP3 unavailable: {error}") from error
+            if not intro_file.is_file() or intro_file.stat().st_size <= 0:
+                raise RuntimeError("Intro MP3 is missing or empty; regenerate Step 3.")
+            from hashlib import sha256 as _sha256
+
+            intro_record = {
+                "text": intro_text,
+                "text_sha256": _sha256((intro_text or "").encode("utf-8")).hexdigest(),
+                "voice": intro_voice,
+                "file": intro_file.name,
+                "mp3_sha256": sha256_file(intro_file),
+            }
+            if not (intro_record["text"] or "").strip() or not (intro_record["voice"] or "").strip():
+                raise RuntimeError("Intro text/voice is missing; regenerate Step 3.")
+            paths = [intro_file, *story_paths]
         self._ffmpeg_concat(paths, Path(output_path))
         self._manifest["ordered_chunks"] = [asdict(c) for c in self.chunks]
-        self._manifest["merge"] = {
+        merge_payload: Dict[str, Any] = {
             "orders": [c.order for c in self.chunks if c.order in usable],
             "chunks": [dict(self._manifest["chunks"][str(c.order)]) for c in self.chunks if c.order in usable],
             "complete": len(usable) == len(self.chunks),
             "file": str(Path(output_path).resolve()),
             "mp3_sha256": sha256_file(Path(output_path)),
         }
+        if intro_record is not None:
+            merge_payload["intro"] = intro_record
+        else:
+            self._manifest.get("merge", {}).pop("intro", None) if isinstance(self._manifest.get("merge"), dict) else None
+        self._manifest["merge"] = merge_payload
         atomic_write_json(self.manifest_path, self._manifest)
         result.audiobook_path = str(output_path)
         return Path(output_path)

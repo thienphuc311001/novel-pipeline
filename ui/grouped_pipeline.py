@@ -473,7 +473,36 @@ class TtsBatchPanel(GroupBatchPanel):
             worker.message.emit(f"{group.label}: Voice {processor.voice}")
             result = processor.run()
             if not result.failures and not result.cancelled:
-                processor.merge(result, output)
+                from media.channel_intro import (
+                    channel_intro_enabled,
+                    channel_intro_text,
+                    channel_intro_voice,
+                    prepare_job_intro,
+                )
+
+                intro_path = intro_text = intro_voice = None
+                if channel_intro_enabled(self.batch_settings):
+                    worker.message.emit(f"{group.label}: Preparing channel intro…")
+                    staged = prepare_job_intro(
+                        processor.audio_dir,
+                        self.batch_settings,
+                        client_factory=processor.client_factory,
+                    )
+                    if staged is not None:
+                        from pathlib import Path as _Path
+
+                        intro_path = _Path(staged["path"])
+                        intro_text = staged["text"]
+                        intro_voice = staged["voice"]
+                        worker.message.emit(
+                            f"{group.label}: Channel intro ready ({intro_voice})."
+                        )
+                processor.merge(
+                    result, output,
+                    intro_path=intro_path,
+                    intro_text=intro_text or "",
+                    intro_voice=intro_voice or "",
+                )
             return result
         self.launch(action, self.tts_completed)
 
@@ -578,7 +607,25 @@ class TtsBatchPanel(GroupBatchPanel):
             self.running = True
             self.set_busy(True)
             def action(worker):
-                processor.merge(result, Path(group.output_dir) / "audiobook.mp3", skip_failed=True)
+                from media.channel_intro import channel_intro_enabled, prepare_job_intro
+
+                intro_path = intro_text = intro_voice = None
+                if channel_intro_enabled(self.settings):
+                    staged = prepare_job_intro(
+                        processor.audio_dir, self.settings,
+                        client_factory=processor.client_factory,
+                    )
+                    if staged is not None:
+                        from pathlib import Path as _Path
+
+                        intro_path = _Path(staged["path"])
+                        intro_text = staged["text"]
+                        intro_voice = staged["voice"]
+                processor.merge(
+                    result, Path(group.output_dir) / "audiobook.mp3", skip_failed=True,
+                    intro_path=intro_path, intro_text=intro_text or "",
+                    intro_voice=intro_voice or "",
+                )
                 return result
             def completed(value):
                 group.state.update(tts_status="Partial", excluded_chunks=missing)

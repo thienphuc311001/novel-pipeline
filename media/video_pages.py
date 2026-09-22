@@ -27,7 +27,8 @@ __all__ = [
     "fallback_font_paths", "fallback_segments", "fallback_textlength", "fit_body", "fit_lines",
     "font_paths", "gap_ladder", "line_height", "measure_length", "wrap_lines", "BODY_COLOR",
     "CHAPTER_COLOR", "DIVIDER_COLOR", "PANEL_COLOR", "PANEL_OUTLINE", "TITLE_COLOR", "draw_frame",
-    "render_page", "scaled_style", "page_chapter_label", "load_narration", "prepare_video_timeline",
+    "render_page", "scaled_style", "page_chapter_label", "load_narration", "load_intro_record",
+    "prepare_video_timeline",
     "source_fingerprint", "validate_page_layout", "validate_timeline_timestamps", "visual_settings",
     "VideoPage", "VideoTimeline", "side_panel_boxes", "paste_side_image", "required_page_images",
     "SIDE_PANEL_VERSION", "SIDE_PANEL_GAP", "SIDE_PANEL_SIZE", "SIDE_PANEL_MIN_SIZE", "SIDE_PANEL_QUIET_ZONE",
@@ -130,6 +131,20 @@ def load_narration(media):
             raise VideoValidationError(f"Resume/regenerate Step 3 before rendering: {error}") from error
 
 
+def load_intro_record(media):
+    """Validated channel-intro record (thumbnail-full segment) or ``None``.
+
+    Backward compatible: manifests merged without an intro simply have no
+    ``merge.intro`` entry and render the old story-only timeline.
+    """
+    try:
+        from media.channel_intro import read_manifest_intro
+
+        return read_manifest_intro(Path(media.tts_manifest_path))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _stored_chunk_plan(media):
     """The Step 3 plan of this job, or ``None`` when no plan file is readable."""
     try:
@@ -188,6 +203,7 @@ def _side_image_fingerprint(media):
 
 def source_fingerprint(media):
     records = load_narration(media)
+    intro = load_intro_record(media)
     timeline_path = Path(media.output_dir) / "video_timeline.json"
     if not timeline_path.is_file():
         raise VideoValidationError("Create a measured page timeline in Step 4 before recording/uploading the video")
@@ -198,6 +214,7 @@ def source_fingerprint(media):
             "thumbnail": dict(getattr(media, "thumbnail_fingerprint", {})),
             "audio": dict(getattr(media, "audiobook_fingerprint", {})),
             "chunks": records,
+            "intro": dict(intro) if intro is not None else None,
             "timeline_sha256": sha256_file(timeline_path)}
 
 
@@ -222,9 +239,16 @@ def _input_paths(media, records):
     folder = Path(media.output_dir)
     images = [Path(value) for value in (getattr(media, "cover_image_path", ""), getattr(media, "qr_image_path", ""))
               if value]
-    return [media.tts_manifest_path, media.audiobook_path, media.thumbnail_path, *font_paths(), *images,
+    paths = [media.tts_manifest_path, media.audiobook_path, media.thumbnail_path, *font_paths(), *images,
             *(r['mp3_path'] for r in records),
             *(folder / name for name in ('tts_chunks.json', 'tts_overrides.json') if (folder / name).exists())]
+    try:
+        intro = load_intro_record(media)
+        if intro is not None and intro.get("mp3_path"):
+            paths.append(intro["mp3_path"])
+    except Exception:
+        pass
+    return paths
 
 
 
@@ -509,6 +533,7 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
             raise VideoValidationError("Video preparation cancelled")
     check()
     records = load_narration(media)
+    intro = load_intro_record(media)
     cover_image, qr_image = required_page_images(media)
     validate_page_layout(media, records, style=style)
     initial_files = file_states(_input_paths(media, records))
@@ -517,11 +542,15 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
     for record in records:
         check()
         probes.append(probe_audio(Path(record["mp3_path"]), ffprobe_path))
-    if any(p.codec != "mp3" for p in [audio, *probes]):
+    intro_probe = None
+    if intro is not None:
+        check()
+        intro_probe = probe_audio(Path(intro["mp3_path"]), ffprobe_path)
+    if any(p.codec != "mp3" for p in [audio, *probes, *([intro_probe] if intro_probe else [])]):
         raise VideoValidationError("Step 3 chunks and the merged audiobook must contain MP3 audio")
-    total = math.fsum(p.duration for p in probes)
+    total = math.fsum([*( [intro_probe.duration] if intro_probe else []), *(p.duration for p in probes)])
     # Allow at most two MPEG audio frames of container rounding, never accumulated drift.
-    tolerance = max(audio_rounding_tolerance(p) for p in [audio, *probes])
+    tolerance = max(audio_rounding_tolerance(p) for p in [audio, *probes, *([intro_probe] if intro_probe else [])])
     if abs(total - audio.duration) > tolerance:
         raise VideoValidationError(f"Chunk duration total {total:.6f}s differs from audiobook {audio.duration:.6f}s; regenerate Step 3")
     folder = Path(media.output_dir)
@@ -532,6 +561,42 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
                                      "qr": sha256_file(Path(qr_image))}}
     pages = []
     start = 0.0
+    if intro is not None and intro_probe is not None:
+        from media.channel_intro import intro_frame_path, render_intro_frame
+
+        check()
+        thumbnail_sha = sha256_file(Path(media.thumbnail_path))
+        intro_key = _identity(dict(visual_source, intro_thumbnail=thumbnail_sha,
+                                   intro_text_sha256=intro.get("text_sha256", ""),
+                                   intro_voice=intro.get("voice", "")))
+        intro_page_path = intro_frame_path(folder, thumbnail_sha)
+        intro_cache_path = intro_page_path.with_suffix(".json")
+        intro_layout = None
+        try:
+            cache = json.loads(intro_cache_path.read_text(encoding="utf-8"))
+            if cache["visual_fingerprint"] == intro_key and cache["page_sha256"] == sha256_file(intro_page_path):
+                with Image.open(intro_page_path) as image:
+                    image.verify()
+                intro_layout = cache["layout"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        if intro_layout is None:
+            intro_layout = render_intro_frame(media.thumbnail_path, intro_page_path)
+            # Stamp the cache key so thumbnail/voice changes repaint.
+            intro_layout = {**intro_layout, "visual_fingerprint": intro_key}
+            check()
+            atomic_write_json(intro_cache_path, {"visual_fingerprint": intro_key,
+                                                 "page_sha256": sha256_file(intro_page_path),
+                                                 "layout": intro_layout})
+        end = math.fsum([start, intro_probe.duration])
+        pages.append(VideoPage(0, 0, intro.get("text", ""), intro.get("text_sha256", ""),
+                               intro["mp3_path"], intro.get("mp3_sha256", ""),
+                               intro_probe.duration, start, end,
+                               str(intro_page_path.resolve()), intro_key,
+                               sha256_file(intro_page_path), intro_layout))
+        start = end
+        if progress:
+            progress(0, len(records) + 1, "Prepared intro thumbnail")
     for record, probe in zip(records, probes):
         check()
         # Each page names only its own chapter; the group range stays on the thumbnail.
@@ -563,7 +628,10 @@ def prepare_video_timeline(media, ffprobe_path, *, style=DEFAULT_STYLE, cancel_e
                                str(page_path.resolve()), key, sha256_file(page_path), layout))
         start = end
         if progress:
-            progress(len(pages), len(records), f"Prepared page {record['order']}/{len(records)}")
+            total_pages = len(records) + (1 if intro is not None else 0)
+            progress(len(pages), total_pages, f"Prepared page {record['order']}/{len(records)}")
+    if not pages:
+        raise VideoValidationError("No video pages to render.")
     check()
     concat_path = folder / "render_pages" / "timeline.ffconcat"
     # The final duplicate is an endpoint packet, not a second visual page.

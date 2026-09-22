@@ -17,6 +17,10 @@ from typing import Any, Dict, List
 APP_DIR_NAME = "novel-pipeline-v2"
 CONFIG_FILE_NAME = "config.json"
 DEFAULT_TTS_VOICE = "vi-VN-HoaiMyNeural"
+DEFAULT_CHANNEL_INTRO_TEXT = (
+    "Chào mừng bạn đến với Ghiền Truyện Chữ. "
+    "Đừng quên nhấn thích và đăng ký kênh để ủng hộ mình nhé."
+)
 
 # ---------------------------------------------------------------- constants
 
@@ -166,6 +170,12 @@ class Settings:
     tts_retry_count: int = 5
     tts_fallback_retry_count: int = 3  # Legacy config compatibility; full-chunk retries only.
 
+    # --- fixed channel intro (reused at the start of every audiobook/video) --
+    channel_intro_enabled: bool = True
+    channel_intro_text: str = DEFAULT_CHANNEL_INTRO_TEXT
+    # Empty means "follow tts_voice" so the intro matches the story voice.
+    channel_intro_voice: str = ""
+
     # --- thumbnail / video pages ------------------------------------------
     thumbnail_jpeg_quality: int = 95
     # Suggested picture for the Create Video step's "Add QR image" dialog.  The
@@ -203,6 +213,10 @@ class Settings:
         if not isinstance(settings.tts_preprocessing, dict):
             settings.tts_preprocessing = {}
         settings.tts_voice = str(settings.tts_voice or "").strip() or DEFAULT_TTS_VOICE
+        if not isinstance(getattr(settings, "channel_intro_text", ""), str) or not settings.channel_intro_text.strip():
+            settings.channel_intro_text = DEFAULT_CHANNEL_INTRO_TEXT
+        settings.channel_intro_enabled = bool(getattr(settings, "channel_intro_enabled", True))
+        settings.channel_intro_voice = str(getattr(settings, "channel_intro_voice", "") or "").strip()
         return settings
 
     @classmethod

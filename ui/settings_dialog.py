@@ -142,6 +142,9 @@ class SettingsDialog(QDialog):
         self._int(form, "tts_max_concurrency", "Maximum concurrent requests", 1, 100)
         self._int(form, "tts_timeout_seconds", "Chunk timeout (seconds)", 10, 600)
         self._int(form, "tts_retry_count", "Attempts per chunk", 1, 10)
+        self._bool(form, "channel_intro_enabled", "Play fixed channel intro first")
+        self._text(form, "channel_intro_text", "Channel intro text (fixed)")
+        self._text(form, "channel_intro_voice", "Channel intro voice (empty = follow TTS voice)")
         form.addRow("Step 3 chunk target", QLabel("700 characters · full-chunk retries"))
         self._int(form, "thumbnail_jpeg_quality", "Thumbnail JPEG quality", 70, 100)
         self._file_path(form, "qr_image_path", "Suggested QR image (Create Video step)",
