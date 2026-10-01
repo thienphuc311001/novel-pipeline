@@ -1035,12 +1035,8 @@ class UploadBatchPanel(GroupBatchPanel):
 
     def enter(self):
         super().enter()
-        configured = str(self.settings.youtube_client_secrets_path or "").strip()
-        if self.editor._auth_path != configured:
-            self.editor.auth, self.editor.account = None, None
-            self.editor._auth_path = configured
-            self.editor._restore_attempted = False
-        if not self.editor._restore_attempted and not self.editor.busy:
+        self.editor.refresh_connection_config()
+        if self.editor._auth_path and not self.editor._restore_attempted and not self.editor.busy:
             self.editor._restore_attempted = True
             self.editor._start("restore", lambda worker: self.editor._get_auth().restore())
 
@@ -1073,6 +1069,10 @@ class UploadBatchPanel(GroupBatchPanel):
             group = self.document_provider().require_group_artifacts(self.selected_id())
             state = load_upload_state(group.output_dir)
             self.editor.state = state
+            self.editor._remember_uploaded_tags(group.title, state, only_if_missing=True)
+            self.editor._load_story_tags(group.title, apply=not state or state.get("status") == "rejected")
+            if state.get("metadata") and state.get("status") != "rejected":
+                self.editor.tags_edit.setText(", ".join(state["metadata"].get("tags", [])))
             self._changing_title = True
             title = self.titles.get(group.group_id, f"{group.title} | {group.label}")
             if state and state.get("status") != "rejected":
@@ -1114,6 +1114,9 @@ class UploadBatchPanel(GroupBatchPanel):
                 group = self.document_provider().require_group_artifacts(group_id)
                 state = load_upload_state(group.output_dir)
                 row = dict(shared, title=self.titles.get(group_id, f"{group.title} | {group.label}"))
+                if not self.editor._tags_manually_edited and (not state or state.get("status") == "rejected"):
+                    story_tags = self.settings.tags_for_uploaded_title(group.title)
+                    row["tags"] = story_tags if story_tags is not None else []
                 if state and state.get("status") != "rejected" and not allow_duplicate:
                     row = state.get("metadata", row)
                 value = UploadMetadata(**row)
@@ -1164,6 +1167,7 @@ class UploadBatchPanel(GroupBatchPanel):
         group = self.document_provider().require_group_artifacts(self.current_id)
         group.state["youtube"] = state
         save_job_state(group)
+        self.editor._remember_uploaded_tags(group.title, state)
         if self.editor.auth is not None and self.editor.auth.account is None and not self.cancel_event.is_set():
             self.pause_for_auth()
             return
@@ -1260,9 +1264,11 @@ class UploadBatchPanel(GroupBatchPanel):
         privacy.setCurrentText(old.get("privacy", "private"))
         kids = QCheckBox("Made for kids")
         kids.setChecked(old.get("made_for_kids", False))
+        ai = QCheckBox("Có sử dụng AI")
+        ai.setChecked(old.get("contains_synthetic_media", False))
         schedule = QLineEdit(old.get("publish_at") or "")
         schedule.setPlaceholderText("Optional future ISO timestamp; blank removes schedule")
-        for name, widget in (("Title", title), ("Description", description), ("Tags", tags), ("Category ID", category), ("Visibility", privacy), ("", kids), ("Publish time", schedule)):
+        for name, widget in (("Title", title), ("Description", description), ("Tags", tags), ("Category ID", category), ("Visibility", privacy), ("", kids), ("", ai), ("Publish time", schedule)):
             form.addRow(name, widget)
         error_label = QLabel()
         form.addRow(error_label)
@@ -1272,7 +1278,14 @@ class UploadBatchPanel(GroupBatchPanel):
         accepted = []
         def validate():
             try:
-                metadata = UploadMetadata(title.text(), description.toPlainText(), [t.strip() for t in tags.text().split(",") if t.strip()], category.text(), privacy.currentText(), kids.isChecked(), old.get("playlist_id"), schedule.text().strip() or None)
+                metadata = UploadMetadata(
+                    title=title.text(), description=description.toPlainText(),
+                    tags=[t.strip() for t in tags.text().split(",") if t.strip()],
+                    category_id=category.text(), privacy=privacy.currentText(),
+                    made_for_kids=kids.isChecked(), playlist_id=old.get("playlist_id"),
+                    publish_at=schedule.text().strip() or None,
+                    contains_synthetic_media=ai.isChecked(),
+                )
                 metadata.validate()
                 accepted.append(metadata)
                 dialog.accept()

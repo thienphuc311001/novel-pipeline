@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -189,6 +190,7 @@ class Settings:
     font_size: int = 10
     max_log_lines: int = 2000
     title_history: List[str] = field(default_factory=list)
+    youtube_title_tags: Dict[str, List[str]] = field(default_factory=dict)
     window_geometry: str = ""
 
     # ---------------------------------------------------------------- io
@@ -210,6 +212,13 @@ class Settings:
         settings.title_history = list(dict.fromkeys(
             str(title).strip() for title in settings.title_history if str(title).strip()
         ))
+        if not isinstance(settings.youtube_title_tags, dict):
+            settings.youtube_title_tags = {}
+        settings.youtube_title_tags = {
+            title: list(tags) for title, tags in settings.youtube_title_tags.items()
+            if isinstance(title, str) and title.strip() and isinstance(tags, list)
+            and all(isinstance(tag, str) for tag in tags)
+        }
         if not isinstance(settings.tts_preprocessing, dict):
             settings.tts_preprocessing = {}
         settings.tts_voice = str(settings.tts_voice or "").strip() or DEFAULT_TTS_VOICE
@@ -224,9 +233,44 @@ class Settings:
         path = path or config_path()
         try:
             with open(path, "r", encoding="utf-8") as handle:
-                return cls.from_dict(json.load(handle))
+                settings = cls.from_dict(json.load(handle))
         except (OSError, ValueError):
-            return cls()
+            settings = cls()
+        settings._loaded_config_path = Path(path)
+        return settings
+
+    @staticmethod
+    def _story_key(title: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", title).casefold().split())
+
+    def tags_for_uploaded_title(self, title: str) -> List[str] | None:
+        key = self._story_key(str(title or ""))
+        for saved_title, tags in self.youtube_title_tags.items():
+            if self._story_key(saved_title) == key:
+                return list(tags)
+        return None
+
+    def remember_uploaded_title_tags(self, title: str, tags: List[str], *, only_if_missing=False) -> bool:
+        """Record tags after a confirmed upload; never persist an upload draft."""
+        title = str(title or "").strip()
+        if not title or not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+            return False
+        if only_if_missing and self.tags_for_uploaded_title(title) is not None:
+            return False
+        key = self._story_key(title)
+        previous = self.youtube_title_tags
+        updated = {name: values for name, values in previous.items() if self._story_key(name) != key}
+        updated[title] = list(tags)
+        if updated == previous:
+            return False
+        self.youtube_title_tags = updated
+        try:
+            if hasattr(self, "_loaded_config_path"):
+                self.save(self._loaded_config_path)
+        except OSError:
+            self.youtube_title_tags = previous
+            raise
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         data = {name: getattr(self, name) for name in self.__dataclass_fields__}

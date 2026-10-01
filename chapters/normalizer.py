@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from cleaning.textclean import (
     enforce_sentence_endings,
+    normalize_double_quotes,
     normalize_spacing,
     restore_escaped_newlines,
 )
@@ -102,6 +103,7 @@ class NormalizeReport:
     chinese_titles_removed: int = 0
     text_loss: int = 0
     unnumbered_segments: int = 0
+    double_quotes_normalized: int = 0
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -113,6 +115,7 @@ class NormalizeReport:
             "chinese_titles_removed": self.chinese_titles_removed,
             "text_loss": self.text_loss,
             "unnumbered_segments": self.unnumbered_segments,
+            "double_quotes_normalized": self.double_quotes_normalized,
         }
 
 
@@ -261,7 +264,11 @@ def build_chapters(
         preamble="\n".join(preamble_lines),
         glued_splits=len([n for n in notes if n.get("kind") == "glued"]),
     )
-    
+
+    # Normalize preamble double quotes (detection already ran on original input).
+    report.preamble, preamble_count = normalize_double_quotes(report.preamble)
+    report.double_quotes_normalized += preamble_count
+
     if not hits:
         diagnostics.append(
             Diagnostic(
@@ -288,10 +295,13 @@ def build_chapters(
         if options.restore_newlines:
             body, count = restore_escaped_newlines(body)
             report.restored_newlines += count
-        
+
         if options.normalize_spacing:
             body = normalize_spacing(body)
-        
+
+        body, quote_count = normalize_double_quotes(body)
+        report.double_quotes_normalized += quote_count
+
         if options.enforce_period:
             body, count = enforce_sentence_endings(body)
             report.periods_added += count
@@ -328,7 +338,13 @@ def build_chapters(
         else:
             # Mixed or unknown - preserve title
             title_to_use = hit.title
-        
+
+        # Normalize double quotes in the title before rendering the header,
+        # so the canonical header inherits the normalized title without
+        # double-counting the same characters.
+        title_to_use, title_quote_count = normalize_double_quotes(title_to_use)
+        report.double_quotes_normalized += title_quote_count
+
         # Format canonical header
         if options.keep_original_headers:
             header, artifacts = _clean_header_artifacts(hit.header_line)
@@ -336,6 +352,9 @@ def build_chapters(
                 report.header_artifacts_removed += artifacts
         else:
             header = format_chapter_header(hit.number, title_to_use, options)
+
+        header, header_quote_count = normalize_double_quotes(header)
+        report.double_quotes_normalized += header_quote_count
         
         # Create Chapter object
         chapter = Chapter(

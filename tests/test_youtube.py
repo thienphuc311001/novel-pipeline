@@ -115,6 +115,7 @@ class YouTubeUploadTests(unittest.TestCase):
         payload = session.calls[0][2]["json"]
         self.assertEqual(payload["snippet"]["title"], self.metadata.title)
         self.assertEqual(payload["status"]["selfDeclaredMadeForKids"], False)
+        self.assertIs(payload["status"]["containsSyntheticMedia"], False)
         put_calls = [call for call in session.calls if call[0] == "PUT"]
         self.assertEqual(put_calls[0][2]["headers"]["Content-Range"], "bytes 0-262143/262157")
         self.assertEqual(put_calls[1][2]["headers"]["Content-Range"], "bytes 262144-262156/262157")
@@ -129,6 +130,30 @@ class YouTubeUploadTests(unittest.TestCase):
             self.video, self.thumbnail, self.job, self.metadata, "channel1", allow_duplicate=True
         )
         self.assertEqual(new["prior_uploads"][0]["video_id"], "abc123")
+
+    def test_ai_disclosure_is_uploaded_and_persisted(self):
+        self.metadata.contains_synthetic_media = True
+        session = ScriptedSession(START, COMPLETE, Response())
+        state = self.upload(session)
+        self.assertIs(session.calls[0][2]["json"]["status"]["containsSyntheticMedia"], True)
+        self.assertIs(state["metadata"]["contains_synthetic_media"], True)
+        self.assertEqual(load_upload_state(self.job), state)
+
+    def test_legacy_pending_upload_resumes_without_ai_field_and_keeps_metadata_frozen(self):
+        state = self.pending()
+        state["metadata"].pop("contains_synthetic_media")
+        (self.job / "youtube_upload.json").write_text(json.dumps(state))
+        session = ScriptedSession(COMPLETE, Response())
+        self.metadata.contains_synthetic_media = True
+        with self.assertRaisesRegex(YouTubeUploadError, "saved metadata"):
+            self.upload(session)
+        self.assertFalse(session.calls)
+        self.metadata.contains_synthetic_media = False
+        result = self.upload(session)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["metadata"], state["metadata"])
+        self.assertEqual(session.calls[0][0], "PUT")
+        self.assertFalse(any(call[1].endswith("/videos") for call in session.calls))
 
     def test_interrupted_final_response_checks_session_without_second_insert(self):
         session = ScriptedSession(START, TimeoutError("token=SECRET"), COMPLETE, Response())
@@ -264,6 +289,8 @@ class YouTubeUploadTests(unittest.TestCase):
     def test_validation_scheduling_and_transient_retries_are_bounded(self):
         invalid = [UploadMetadata(""), UploadMetadata("x" * 101), UploadMetadata("title", description="á" * 2501),
                    UploadMetadata("title", privacy="bad"), UploadMetadata("title", tags=["x" * 501]),
+                   UploadMetadata("title", contains_synthetic_media="yes"),
+                   UploadMetadata("title", contains_synthetic_media=1),
                    UploadMetadata("title", publish_at="2020-01-01T00:00:00Z"),
                    UploadMetadata("title", privacy="public", publish_at="2099-01-01T00:00:00Z")]
         for item in invalid:

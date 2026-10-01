@@ -40,6 +40,7 @@ class SettingsDialog(QDialog):
         "tts_rate",
         "tts_fallback_retry_count",
         "title_history",
+        "youtube_title_tags",
     }
 
     def __init__(self, settings: Settings, parent=None):
@@ -156,6 +157,8 @@ class SettingsDialog(QDialog):
         note = QLabel(
             "Enable YouTube Data API v3 in your Google Cloud project and create an "
             "OAuth client of type Desktop app. Choose its downloaded JSON once. "
+            "After saving, click Connect YouTube Account in YouTube Upload and "
+            "sign in with Google. Selecting this file alone does not connect an account. "
             "Sign-in tokens are stored in your operating system credential store."
         )
         note.setWordWrap(True)

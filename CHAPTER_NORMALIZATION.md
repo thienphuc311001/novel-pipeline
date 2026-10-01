@@ -86,7 +86,10 @@ Input:  Chương 0327: Lưu dân không đáng sợ
 Output: Chương 327: Lưu dân không đáng sợ
 
 Input:  Chương 0328: "Tiểu tử hiểu rồi……". Khấu Quý chắp tay nói với Lý Địch.
-Output: Chương 328: "Tiểu tử hiểu rồi……". Khấu Quý chắp tay nói với Lý Địch.
+Output: Chương 328: 'Tiểu tử hiểu rồi……'. Khấu Quý chắp tay nói với Lý Địch.
+
+Step 1 normalizes all double-quote characters (`"`, `“`, `”`, `„`, `‟`, `＂`)
+to ASCII single quote (`'`) before chunking; quoted content is otherwise unchanged.
 
 Input:  Hồi 1: Khởi đầu
 Output: Hồi 1: Khởi đầu
@@ -195,7 +198,7 @@ Chương 327: Lưu dân không đáng sợ
 Đám lao dịch bận rộn trên đường phố...
 
 
-Chương 328: "Tiểu tử hiểu rồi……"
+Chương 328: 'Tiểu tử hiểu rồi……'
 
 Khấu Quý chắp tay nói với Lý Địch.
 ```

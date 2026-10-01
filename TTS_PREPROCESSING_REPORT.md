@@ -127,7 +127,7 @@ Output:
 ```text
 Chương 327: Đại chiến
 
-Hắn nhìn lên trời! “Không thể nào!” Lâm Phàm hét lên.
+Hắn nhìn lên trời! 'Không thể nào!' Lâm Phàm hét lên.
 
 Ngươi là ai? Ta không biết…
 ```

@@ -49,6 +49,29 @@ SERIALIZED_ESCAPE_RE = re.compile(r"(?:\\r\\n|\\n|\\r){1,}")
 
 UNWANTED_FILE_PREFIXES = ("__macosx/", "._", ".ds_store")
 
+# Double-quote characters normalized to ASCII single quote (U+0027) in Step 1:
+# " U+0022, “ U+201C, ” U+201D, „ U+201E, ‟ U+201F, ＂ U+FF02.
+DOUBLE_QUOTE_CHARS = '"\u201c\u201d\u201e\u201f\uff02'
+
+_DOUBLE_QUOTE_TABLE = str.maketrans(
+    {char: "'" for char in DOUBLE_QUOTE_CHARS}
+)
+
+
+def normalize_double_quotes(text: str) -> Tuple[str, int]:
+    """Map every supported double-quote character to ASCII single quote.
+
+    Deterministic, idempotent, 1-code-point to 1-code-point only.
+    Returns ``(normalized_text, replaced_count)`` and preserves
+    ``len()`` (Python code points, not UTF-8 bytes).
+    """
+    if not text:
+        return text, 0
+    count = sum(text.count(char) for char in DOUBLE_QUOTE_CHARS)
+    if not count:
+        return text, 0
+    return text.translate(_DOUBLE_QUOTE_TABLE), count
+
 
 @dataclass
 class CleaningOptions:

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QTimer
 
 from config.settings import Settings
 from ui.main_window import MainWindow
@@ -17,8 +18,10 @@ def main():
     app.setOrganizationName("NovelTools")
     
     settings = Settings.load()
-    window = MainWindow(settings)
+    window = MainWindow(settings, enable_sessions=True)
     window.show()
+    if window._session_store.list_sessions():
+        QTimer.singleShot(0, window._choose_session)
     
     return app.exec()
 

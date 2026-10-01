@@ -60,6 +60,7 @@ class UploadMetadata:
     made_for_kids: bool = False
     playlist_id: str | None = None
     publish_at: str | None = None
+    contains_synthetic_media: bool = False
 
     def validate(self, *, require_future: bool = True) -> None:
         if not isinstance(self.title, str) or not self.title.strip() or len(self.title) > 100:
@@ -79,6 +80,8 @@ class UploadMetadata:
             raise ValueError("Visibility must be private, unlisted or public.")
         if not isinstance(self.made_for_kids, bool):
             raise ValueError("Made for kids must be explicitly true or false.")
+        if not isinstance(self.contains_synthetic_media, bool):
+            raise ValueError("AI content must be explicitly true or false.")
         if self.playlist_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", self.playlist_id):
             raise ValueError("Select a valid playlist.")
         if self.publish_at:
@@ -93,7 +96,8 @@ class UploadMetadata:
 
     def payload(self) -> dict:
         self.validate()
-        status = {"privacyStatus": self.privacy, "selfDeclaredMadeForKids": self.made_for_kids}
+        status = {"privacyStatus": self.privacy, "selfDeclaredMadeForKids": self.made_for_kids,
+                  "containsSyntheticMedia": self.contains_synthetic_media}
         if self.publish_at:
             status["publishAt"] = datetime.fromisoformat(self.publish_at.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         return {"snippet": {"title": self.title, "description": self.description,
@@ -349,7 +353,10 @@ class YouTubeUploader:
             if old and not allow_duplicate and old.get("status") != "rejected":
                 if old.get("video_fingerprint") != fingerprint:
                     raise ResumeUncertainError("The video differs from this job's pending upload. Recover its previous upload or explicitly choose Upload Again.")
-                if old.get("metadata") != asdict(metadata):
+                saved_metadata = dict(old.get("metadata") or {})
+                # Uploads started before the AI checkbox did not store this flag.
+                saved_metadata.setdefault("contains_synthetic_media", False)
+                if saved_metadata != asdict(metadata):
                     raise YouTubeUploadError("A pending upload uses the saved metadata. Restore those values to resume; metadata cannot change during an upload.")
                 if not old.get("session_key"):
                     raise ResumeUncertainError("The previous upload session is unavailable. Check YouTube Studio before explicitly choosing Upload Again.")

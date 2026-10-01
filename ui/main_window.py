@@ -40,6 +40,7 @@ from pipeline.document import (
 from ui.copy_controls import add_copy_button, copy_text
 from ui.log_dialog import LogDialog
 from ui.video_preview import VideoPreviewDialog, build_page_preview, first_page_text
+from ui.session_support import SessionSupport
 
 
 class _TtsWorker(QObject):
@@ -455,13 +456,19 @@ class _FailedChunksDialog(QDialog):
         self.failure_text.setPlainText("\n\n".join(sections))
 
 
-class MainWindow(QMainWindow):
+class MainWindow(SessionSupport, QMainWindow):
     """Main window with the complete five-stage pipeline."""
 
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, parent=None, *, enable_sessions=False, session_store=None):
         super().__init__(parent)
         self.settings = settings
         self.document = PipelineDocument()
+        from pipeline.sessions import SessionStore
+        self._session_store = session_store or SessionStore()
+        self._sessions_enabled = enable_sessions
+        self._session_id = None
+        self._restoring_session = False
+        self._session_save_error = ""
         self._updating_widgets = False
         self._updating_job_widgets = False
         self._tts_prepare_thread = None
@@ -488,6 +495,11 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._apply_runtime_settings()
         self._update_status()
+        self._session_timer = QTimer(self)
+        self._session_timer.setInterval(30_000)
+        self._session_timer.timeout.connect(self._autosave_session)
+        if enable_sessions:
+            self._session_timer.start()
 
     def _setup_ui(self):
         """Build the main layout."""
@@ -502,6 +514,14 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton("📁 Load Files")
         self.load_btn.clicked.connect(self._on_load)
         toolbar.addWidget(self.load_btn)
+        self.sessions_btn = QPushButton("📚 Phiên làm việc")
+        self.sessions_btn.clicked.connect(self._choose_session)
+        toolbar.addWidget(self.sessions_btn)
+        self.save_session_btn = QPushButton("💾 Lưu phiên")
+        self.save_session_btn.clicked.connect(lambda: self._save_session(report=True))
+        toolbar.addWidget(self.save_session_btn)
+        self.session_status = QLabel("")
+        toolbar.addWidget(self.session_status)
         
         self.settings_btn = QPushButton("⚙ Settings")
         self.settings_btn.clicked.connect(self._on_open_settings)
@@ -903,6 +923,10 @@ class MainWindow(QMainWindow):
                     detect_max_number=lambda text: max(header_numbers(text), default=None),
                 )
                 result.diagnostics.extend(inserted)
+            if (self._sessions_enabled or self._session_id) and not self._save_session(report=True):
+                return
+            self.document = PipelineDocument()
+            self._session_id = None
             self.document.source_files = result.files
             first_path = Path(paths[0]).expanduser().resolve()
             self.document.load_original_input(
@@ -925,6 +949,8 @@ class MainWindow(QMainWindow):
             self._video_audio_probe = None
             self._refresh_stage5_ui()
             self._update_status()
+            self._apply_session(self.document, {}, {})
+            self._autosave_session()
         except Exception as error:
             self._error(f"Load failed: {error}")
     
@@ -1268,6 +1294,8 @@ class MainWindow(QMainWindow):
                 panel.refresh()
 
     def _set_group_batch_busy(self, index: int, busy: bool):
+        self.sessions_btn.setEnabled(not busy)
+        self.save_session_btn.setEnabled(not busy)
         self.load_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
         self.tabs.blockSignals(True)
@@ -1278,6 +1306,8 @@ class MainWindow(QMainWindow):
                 self.tabs.setTabEnabled(tab, not busy or tab == index)
         finally:
             self.tabs.blockSignals(False)
+        if self._sessions_enabled:
+            self._save_session(allow_busy=busy)
 
     def _set_job_editors(self, title: str, chapter: str) -> None:
         self._updating_job_widgets = True
@@ -1963,6 +1993,8 @@ class MainWindow(QMainWindow):
         session.start()
 
     def _set_video_busy(self, busy: bool) -> None:
+        self.sessions_btn.setEnabled(not busy)
+        self.save_session_btn.setEnabled(not busy)
         self.load_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
         for button in (self.stage5_cover_btn, self.stage5_qr_btn, self.stage5_preview_btn):
@@ -1973,6 +2005,8 @@ class MainWindow(QMainWindow):
             self.tabs.setTabEnabled(4, True)
 
     def _set_youtube_busy(self, busy: bool) -> None:
+        self.sessions_btn.setEnabled(not busy)
+        self.save_session_btn.setEnabled(not busy)
         self.load_btn.setEnabled(not busy)
         self.settings_btn.setEnabled(not busy)
         # Disabling the current tab can cause Qt to select each intermediate
@@ -2011,6 +2045,14 @@ class MainWindow(QMainWindow):
             return
         if self._video_detection_thread is not None and self._video_detection_thread.isRunning():
             self._log("Please wait for the active encoder check to finish before closing.")
+            event.ignore()
+            return
+        if self._tts_thread is not None or self._merge_thread is not None:
+            self._on_cancel_tts()
+            self._log("Chờ tạo âm thanh kết thúc trước khi đóng; phiên sẽ được lưu sau đó.")
+            event.ignore()
+            return
+        if (self._sessions_enabled or self._session_id) and not self._save_session(report=True):
             event.ignore()
             return
         # The log window is a child of this window; hide it so the application
@@ -2134,6 +2176,8 @@ class MainWindow(QMainWindow):
                     save_job_state(group)
             path = self.settings.save()
             self._apply_runtime_settings()
+            self.stage6_widget.refresh_connection_config()
+            self.group6.editor.refresh_connection_config()
             self._refresh_group_panels()
             self._log(f"✓ Settings saved to {path}")
         except Exception as error:

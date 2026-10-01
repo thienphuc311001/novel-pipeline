@@ -404,6 +404,9 @@ Chương 0328: "Tiểu tử hiểu rồi……". Khấu Quý chắp tay nói v�
         ch328 = chapters[1]
         assert ch328.number == 328
         assert "Tiểu tử hiểu rồi" in ch328.header_line
+        # Double quotes normalize to ASCII single quotes in Step 1 output.
+        assert "'Tiểu tử hiểu rồi" in ch328.header_line
+        assert '"' not in ch328.header_line
     
     def test_full_pipeline_with_export(self, tmp_path):
         """Test complete pipeline from detection to clean export."""
@@ -443,6 +446,140 @@ Khấu Quý chắp tay nói.
         # Verify no metadata
         assert "source_line" not in content
         assert "language" not in content
+
+
+class TestDoubleQuoteNormalization:
+    """Step 1 normalizes all double quotes to ASCII single quote before chunking."""
+
+    SIX_QUOTES = '"\u201c\u201d\u201e\u201f\uff02'
+
+    def get_pattern_set(self):
+        return PatternSet(patterns=DEFAULT_PATTERNS)
+
+    def assert_no_double_quotes(self, *texts):
+        for text in texts:
+            for char in self.SIX_QUOTES:
+                assert char not in text, f"{char!r} found in {text!r}"
+
+    def test_helper_converts_all_six_variants(self):
+        """A: every supported double-quote character becomes '."""
+        from cleaning.textclean import DOUBLE_QUOTE_CHARS, normalize_double_quotes
+
+        assert set(DOUBLE_QUOTE_CHARS) == set(self.SIX_QUOTES)
+        result, count = normalize_double_quotes(self.SIX_QUOTES)
+        assert result == "''''''"
+        assert count == 6
+        assert len(result) == len(self.SIX_QUOTES)
+
+    def test_helper_preserves_inner_content(self):
+        """B: quoted content is otherwise untouched."""
+        from cleaning.textclean import normalize_double_quotes
+
+        result, count = normalize_double_quotes('“abc 123 !?”')
+        assert result == "'abc 123 !?'"
+        assert count == 2
+
+    def test_helper_idempotent(self):
+        """C: second application is a no-op."""
+        from cleaning.textclean import normalize_double_quotes
+
+        first, count1 = normalize_double_quotes('"“hello”"')
+        assert first == "''hello''"
+        assert count1 == 4
+        second, count2 = normalize_double_quotes(first)
+        assert second == first
+        assert count2 == 0
+
+    def test_step1_covers_preamble_header_and_body(self):
+        """E: preamble, chapter header/title and body are all normalized."""
+        pattern_set = self.get_pattern_set()
+        text = (
+            'Lời mở đầu “preamble”.\n'
+            'Chương 1: "Tiêu đề „test‟"\n'
+            '\n'
+            'Nội dung “body” và ＂abc＂.\n'
+        )
+        chapters, report, _diagnostics = normalize_chapters(
+            text, pattern_set, NormalizeOptions()
+        )
+        assert len(chapters) == 1
+        chapter = chapters[0]
+        self.assert_no_double_quotes(
+            report.preamble, chapter.header_line, chapter.title, chapter.text
+        )
+        assert report.preamble == "Lời mở đầu 'preamble'."
+        assert chapter.title == "'Tiêu đề 'test''"
+        assert "'Tiêu đề 'test''" in chapter.header_line
+        assert "'body'" in chapter.text
+        assert "'abc'" in chapter.text
+        # D: the report count equals the actual number of converted characters.
+        assert report.double_quotes_normalized == text.count('"') + sum(
+            text.count(char) for char in "“”„‟＂"
+        )
+        assert report.double_quotes_normalized > 0
+
+    def test_unpaired_and_empty_quotes(self):
+        """F/G: balance is not required; empty pairs become ''."""
+        pattern_set = self.get_pattern_set()
+        text = 'Chương 1\n\n“abc\n\nChương 2\n\n“”\n'
+        chapters, report, _diagnostics = normalize_chapters(
+            text, pattern_set, NormalizeOptions()
+        )
+        assert len(chapters) == 2
+        # Note: enforce_sentence_endings appends "." to the prose line.
+        assert chapters[0].text == "'abc."
+        assert chapters[1].text == "''"
+        self.assert_no_double_quotes(chapters[0].text, chapters[1].text)
+
+    def test_spacing_before_quote_normalization(self):
+        """H: '“ hello ”' first collapses spacing, then converts quotes."""
+        pattern_set = self.get_pattern_set()
+        chapters, _report, _diagnostics = normalize_chapters(
+            "Chương 1\n\n“ hello ”\n", pattern_set, NormalizeOptions()
+        )
+        assert chapters[0].text == "'hello'"
+
+    def test_detection_still_finds_chapters(self):
+        """Chapter detection operates on the original input, unaffected."""
+        pattern_set = self.get_pattern_set()
+        chapters, _report, _diagnostics = normalize_chapters(
+            'Chương 1: "Tiêu đề"\n\nNội dung.\n', pattern_set, NormalizeOptions()
+        )
+        assert [c.number for c in chapters] == [1]
+        assert chapters[0].header_line == "Chương 1: 'Tiêu đề'"
+
+    def test_end_to_end_no_double_quotes_and_chunk_integrity(self):
+        """I: normalize → derive → split keeps content and verifies integrity."""
+        from chunking.splitter import (
+            split_chapters,
+            verify_chunk_integrity,
+        )
+        from pipeline.document import (
+            derive_chapters_from_text,
+            render_chapters_text,
+        )
+
+        pattern_set = self.get_pattern_set()
+        text = (
+            'Chương 1: "Mở đầu"\n\nHắn nói “xin chào” rồi đi.\n\n'
+            'Chương 2\n\nCô đáp „vâng‟ và ＂đi ngay＂.\n'
+        )
+        chapters, _report, _diagnostics = normalize_chapters(
+            text, pattern_set, NormalizeOptions()
+        )
+        rendered = render_chapters_text(chapters)
+        self.assert_no_double_quotes(rendered)
+
+        derived = derive_chapters_from_text(rendered, pattern_set)
+        chunks, plan, _diagnostics = split_chapters(
+            derived, 700, include_header=True, layout=None
+        )
+        assert chunks
+        verify_chunk_integrity(render_chapters_text(derived), plan)
+        combined = "\n".join(chunk.text for chunk in chunks)
+        self.assert_no_double_quotes(combined)
+        assert "xin chào" in combined
+        assert "Mở đầu" in combined
 
 
 if __name__ == "__main__":

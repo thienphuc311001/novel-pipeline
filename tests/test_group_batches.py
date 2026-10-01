@@ -339,6 +339,7 @@ class GroupBatchTests(unittest.TestCase):
         first = self.groups[0]
         Path(first.output_dir, 'youtube_upload.json').write_text(json.dumps({'schema_version': 1, 'status': 'completed', 'video_id': 'abc123', 'channel_id': 'channel', 'metadata': frozen.__dict__}))
         panel.editor.description_edit.setPlainText('New shared description')
+        panel.editor.ai_check.setChecked(True)
         panel.titles[self.groups[1].group_id] = 'Individual second title'
         captured = []
         original = panel.process_group
@@ -354,8 +355,11 @@ class GroupBatchTests(unittest.TestCase):
         self.wait_finished(panel)
         self.assertEqual(captured[0].title, 'Frozen title')
         self.assertEqual(captured[0].description, 'saved')
+        self.assertFalse(captured[0].contains_synthetic_media)
         self.assertEqual(captured[1].title, 'Individual second title')
         self.assertEqual(captured[1].description, 'New shared description')
+        self.assertTrue(captured[1].contains_synthetic_media)
+        self.assertTrue(captured[2].contains_synthetic_media)
         self.assertIn('already uploaded', panel.result.toPlainText())
         self.assertIn('using saved metadata', panel.status_for(first))
 
@@ -389,14 +393,18 @@ class GroupBatchTests(unittest.TestCase):
         panel.start_batch()
         self.assertTrue(panel.paused)
         panel.editor.description_edit.setPlainText('Changed while paused')
+        panel.editor.ai_check.setChecked(True)
         panel.editor.account = panel.editor.auth.account = {'channel_id': 'channel'}
         captured = []
         panel.process_group = lambda group: (captured.append(panel.batch_metadata[group.group_id]), panel.group_done('Completed'))
         panel.resume_batch()
         self.wait_finished(panel)
         self.assertEqual(captured[0].description, 'Frozen description')
+        self.assertFalse(captured[0].contains_synthetic_media)
         self.assertEqual(captured[1].description, 'Changed while paused')
         self.assertEqual(captured[2].description, 'Changed while paused')
+        self.assertTrue(captured[1].contains_synthetic_media)
+        self.assertTrue(captured[2].contains_synthetic_media)
 
     def test_sequential_upload_engine_continues_after_group_failure(self):
         from pipeline.document import Step5UploadBundle
@@ -499,7 +507,7 @@ class VideoMetadataUpdateTests(unittest.TestCase):
 
     def test_metadata_update_preserves_unrelated_fields_and_frozen_insertion(self):
         session = ScriptedSession(Response(data={'items': [self.current]}), Response(data={'id': 'abc123'}))
-        result = YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(self.job, 'channel', UploadMetadata('New', description='New description'))
+        result = YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(self.job, 'channel', UploadMetadata('New', description='New description', contains_synthetic_media=True))
         body = session.calls[1][2]['json']
         self.assertEqual(session.calls[1][0], 'PUT')
         self.assertEqual(body['snippet']['defaultLanguage'], 'vi')
@@ -509,7 +517,17 @@ class VideoMetadataUpdateTests(unittest.TestCase):
         self.assertTrue(body['status']['containsSyntheticMedia'])
         self.assertEqual(result['metadata']['title'], 'Original')
         self.assertEqual(result['updated_metadata']['title'], 'New')
+        self.assertTrue(result['updated_metadata']['contains_synthetic_media'])
         self.assertEqual(result['playlist_id'], 'playlist')
+
+    def test_metadata_update_can_clear_ai_disclosure(self):
+        session = ScriptedSession(Response(data={'items': [self.current]}), Response(data={'id': 'abc123'}))
+        result = YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(
+            self.job, 'channel', UploadMetadata('New', contains_synthetic_media=False),
+        )
+        self.assertIs(session.calls[1][2]['json']['status']['containsSyntheticMedia'], False)
+        self.assertIs(result['updated_metadata']['contains_synthetic_media'], False)
+        self.assertEqual(result['metadata'], self.state['metadata'])
 
     def test_api_failure_keeps_local_record_unchanged(self):
         session = ScriptedSession(Response(data={'items': [self.current]}), Response(403))

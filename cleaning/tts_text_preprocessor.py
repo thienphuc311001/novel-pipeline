@@ -9,6 +9,7 @@ from typing import Any
 
 from .tts_boundaries import (DEFAULT_ABBREVIATIONS, EMAIL_RE, URL_RE,
                              boundary_positions, protection_mask)
+from .textclean import normalize_double_quotes
 
 PREPROCESSOR_VERSION = "tts-preprocess-v2"
 
@@ -64,7 +65,7 @@ BLOCK_TAGS = {"br", "p", "div", "li", "ul", "ol", "section", "article", "table",
 ENTITY_RE = re.compile(r"&(?:(?:amp|#0*38|#x0*26);)*(?:#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);", re.I)
 DECORATION_RE = re.compile(r"^[ \t]*[-—–*=~#■◆◇★☆█•●▪_│|]{3,}[ \t]*$", re.M)
 HEADING_RE = re.compile(r"^(?:Chương|Chuong|Chapter|Hồi|Quyển)\s+\d+\b", re.I)
-FULLWIDTH = str.maketrans({"。": ".", "！": "!", "？": "?", "，": ",", "；": ";", "：": ":", "（": "(", "）": ")", "＂": '"', "＇": "'"})
+FULLWIDTH = str.maketrans({"。": ".", "！": "!", "？": "?", "，": ",", "；": ";", "：": ":", "（": "(", "）": ")", "＂": "'", "＇": "'"})
 INVISIBLE_RE = re.compile(r"[\ufeff\u200b\u2060-\u2064\u061c\u00ad\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af]")
@@ -257,6 +258,34 @@ def preprocess_with_diagnostics(text: str, config: TTSPreprocessConfig | None = 
         return output
 
     text = diagnostic_source
+    # Defensive fallback for edited/legacy/Step-1-skipped input. Step 1
+    # normally guarantees no supported double quotes remain; this is
+    # idempotent and preserves code-point length, so mojibake offsets stay valid.
+    # Technical tokens (JSON objects, URLs, emails, ...) whose syntax requires
+    # ASCII double quotes are left intact: the shared helper runs only on
+    # unprotected spans, so dialogue quotes normalize while JSON protection
+    # below keeps working.
+    _quote_mask = protection_mask(text, config.abbreviations)
+    _quote_parts: list[str] = []
+    _seg_start: int | None = None
+    _double_quote_count = 0
+    for _i in range(len(text) + 1):
+        if _i < len(text) and not _quote_mask[_i]:
+            if _seg_start is None:
+                _seg_start = _i
+        else:
+            if _seg_start is not None:
+                _seg, _seg_count = normalize_double_quotes(text[_seg_start:_i])
+                _quote_parts.append(_seg)
+                _double_quote_count += _seg_count
+                _seg_start = None
+            if _i < len(text):
+                _quote_parts.append(text[_i])
+    if _double_quote_count:
+        text = "".join(_quote_parts)
+        stats["double_quotes_normalized"] = (
+            stats.get("double_quotes_normalized", 0) + _double_quote_count
+        )
     if protected_replacements:
         pieces, cursor = [], 0
         for start, end, token in protected_replacements:

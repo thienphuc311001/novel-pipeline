@@ -29,7 +29,7 @@ CASES = [
     ('Giá là 3.14.Ta biết.', 'Giá là 3.14. Ta biết.'),
     ('Bây giờ là 12:30.Hắn đã đến.', 'Bây giờ là 12:30. Hắn đã đến.'),
     ('Có 10,000 người.', 'Có 10,000 người.'),
-    ('“Ngươi là ai?”Hắn hỏi.', '“Ngươi là ai?” Hắn hỏi.'),
+    ('“Ngươi là ai?”Hắn hỏi.', "'Ngươi là ai?' Hắn hỏi."),
     ('—Ngươi đến rồi?\n—Đúng.', '— Ngươi đến rồi?\n— Đúng.'),
     ('Ta   không    biết.', 'Ta không biết.'),
     ('Ta đi . Hắn ở lại !', 'Ta đi. Hắn ở lại!'),
@@ -67,11 +67,29 @@ class PreprocessingTests(unittest.TestCase):
 
     def test_full_required_example_and_adjacent_url(self):
         source = '\ufeffChương 327: Đại chiến.....Hắn nhìn lên trời!!!!!!“Không thể nào!”Lâm Phàm hét lên.<br><br>Ngươi là ai?Ta không biết...https://example.com'
-        expected = 'Chương 327: Đại chiến\n\nHắn nhìn lên trời! “Không thể nào!” Lâm Phàm hét lên.\n\nNgươi là ai? Ta không biết…'
+        expected = 'Chương 327: Đại chiến\n\nHắn nhìn lên trời!\' Không thể nào!\' Lâm Phàm hét lên.\n\nNgươi là ai? Ta không biết…'
         self.assertEqual(preprocess_for_tts(source), expected)
         self.assertEqual(preprocess_for_tts(expected), expected)
         self.assertEqual(preprocess_for_tts('Ta đi...https://example.com'), 'Ta đi…')
         self.assertEqual(preprocess_for_tts('Ta đi...https://example.com', TTSPreprocessConfig(url_policy='keep')), 'Ta đi… https://example.com')
+
+    def test_double_quote_fallback_matches_step1_policy(self):
+        # Defensive fallback for edited/legacy/Step-1-skipped input: dialogue
+        # quotes become ASCII single quotes, including fullwidth ＂.
+        self.assertEqual(
+            preprocess_for_tts('Hắn nói “xin chào” rồi đi “về”.'),
+            "Hắn nói 'xin chào' rồi đi 'về'.",
+        )
+        self.assertEqual(preprocess_for_tts('Cô đáp ＂đi ngay＂.'), "Cô đáp 'đi ngay'.")
+        # Technical tokens keep their ASCII double quotes (JSON protection).
+        self.assertEqual(
+            preprocess_for_tts('{"title":"abc","value":3.14}'),
+            '{"title":"abc","value":3.14}',
+        )
+        result = preprocess_with_diagnostics('Nói “hi”.')
+        self.assertEqual(result.text, "Nói 'hi'.")
+        self.assertEqual(result.statistics.get("double_quotes_normalized"), 2)
+        self.assertEqual(preprocess_for_tts(result.text), result.text)
 
     def test_protected_structures_and_semantics(self):
         samples = ['3.14', '0.5', '1,000', '1.000.000', '50%', '12:30', '08:30:15',
@@ -281,7 +299,7 @@ class TtsIntegrationTests(unittest.TestCase):
         plan, chunks = prepare_tts(self.doc, self.group.group_id, self.settings)
         speech = '\n'.join(c.text for c in chunks)
         self.assertIn('Ngươi là ai? Ta không biết…', speech)
-        self.assertIn('“Hắn sống!” Lâm hét.', speech)
+        self.assertIn("'Hắn sống!' Lâm hét.", speech)
         self.assertNotIn('https://', speech)
         self.assertTrue(plan['warnings'])
         self.assertEqual(prepare_tts(self.doc, self.group.group_id, self.settings)[0], plan)

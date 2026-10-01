@@ -2,7 +2,8 @@
 
 Each stage receives a :class:`PipelineDocument` and returns a new one.  Nothing
 in the pipeline ever requires the user to save a temporary file in order to
-continue: intermediate results live in memory only.
+continue. The desktop session store can persist this in-memory state for later
+resumption without rerunning earlier stages.
 """
 
 from __future__ import annotations

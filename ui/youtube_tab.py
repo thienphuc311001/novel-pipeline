@@ -75,7 +75,11 @@ class YouTubeTab(QWidget):
         self._worker = None
         self._cancel = threading.Event()
         self._mode = ""
+        self._connection_error_dialog = None
+        self._story_title = ""
+        self._tags_manually_edited = False
         self._build_ui()
+        self.refresh_connection_config()
 
     @property
     def busy(self):
@@ -112,6 +116,10 @@ class YouTubeTab(QWidget):
                             ("Video", self.video_label), ("Thumbnail", self.thumbnail_label)):
             account_form.addRow(name, label)
         layout.addLayout(account_form)
+        self.connection_hint = QLabel()
+        self.connection_hint.setTextFormat(Qt.TextFormat.PlainText)
+        self.connection_hint.setWordWrap(True)
+        layout.addWidget(self.connection_hint)
 
         self.metadata_widget = QWidget()
         form = QFormLayout(self.metadata_widget)
@@ -120,12 +128,18 @@ class YouTubeTab(QWidget):
         self.description_edit.setMaximumHeight(100)
         self.tags_edit = QLineEdit()
         self.tags_edit.setPlaceholderText("Comma-separated tags")
+        self.tags_edit.textEdited.connect(self._tags_edited)
+        self.saved_titles_combo = QComboBox()
+        self.saved_titles_combo.currentIndexChanged.connect(self._saved_title_selected)
+        self.saved_titles_combo.setToolTip("Chọn truyện đã upload để dùng lại bộ tag; title video không thay đổi.")
         self.category_combo = QComboBox()
         self.category_combo.addItem("People & Blogs", "22")
         self.privacy_combo = QComboBox()
         for label, value in (("Private", "private"), ("Unlisted", "unlisted"), ("Public", "public")):
             self.privacy_combo.addItem(label, value)
         self.kids_check = QCheckBox("Yes, this video is made for kids")
+        self.ai_check = QCheckBox("Có sử dụng AI")
+        self.ai_check.setToolTip("Tick để khai báo video có nội dung tổng hợp hoặc chỉnh sửa bằng AI với YouTube.")
         self.playlist_combo = QComboBox()
         self.playlist_combo.addItem("Not selected", None)
         self.schedule_check = QCheckBox("Schedule publishing (requires Private)")
@@ -135,8 +149,10 @@ class YouTubeTab(QWidget):
         self.schedule_edit.setEnabled(False)
         self.schedule_check.toggled.connect(self.schedule_edit.setEnabled)
         for name, widget in (("Title", self.title_edit), ("Description", self.description_edit),
+                             ("Tags của truyện đã upload", self.saved_titles_combo),
                              ("Tags", self.tags_edit), ("Category", self.category_combo),
                              ("Visibility", self.privacy_combo), ("Made for kids", self.kids_check),
+                             ("", self.ai_check),
                              ("Playlist", self.playlist_combo), ("", self.schedule_check),
                              ("Publish time (local)", self.schedule_edit)):
             form.addRow(name, widget)
@@ -191,28 +207,88 @@ class YouTubeTab(QWidget):
         self.video_label.setText(self.media.video_path)
         self.thumbnail_label.setText(self.media.thumbnail_path)
         self.state = load_upload_state(self.media.output_dir)
-        if identity != self._identity:
+        self._remember_uploaded_tags(self.media.title, self.state, only_if_missing=True)
+        fresh_media = identity != self._identity
+        if fresh_media:
             self._identity = identity
             self.title_edit.setText(f"{self.media.title} | {self.media.chapter}")
             self.description_edit.clear()
             self.tags_edit.clear()
+            self._tags_manually_edited = False
             self.privacy_combo.setCurrentIndex(0)
             self.kids_check.setChecked(False)
+            self.ai_check.setChecked(False)
             self.schedule_check.setChecked(False)
             self.playlist_combo.setCurrentIndex(0)
             if self.state:
                 self._restore_metadata()
+        self._load_story_tags(self.media.title, apply=fresh_media and (not self.state or self.state.get("status") == "rejected"))
         self._show_state()
+        self.refresh_connection_config()
+        if self._auth_path and not self._restore_attempted and not self.busy:
+            self._restore_attempted = True
+            self._start("restore", lambda worker: self._get_auth().restore())
+        self._update_controls()
+
+    def _tags_edited(self, _text):
+        self._tags_manually_edited = True
+
+    def _saved_title_selected(self, _index):
+        title = self.saved_titles_combo.currentData()
+        if title is None:
+            title = self._story_title
+        tags = self.settings.tags_for_uploaded_title(title)
+        self.tags_edit.setText(", ".join(tags or []))
+        self._tags_manually_edited = title != self._story_title
+
+    def _load_story_tags(self, title, *, apply=True):
+        """Refresh the uploaded-story picker and fill tags for a new story."""
+        changed = title != self._story_title
+        self._story_title = title
+        self.saved_titles_combo.blockSignals(True)
+        self.saved_titles_combo.clear()
+        self.saved_titles_combo.addItem("Truyện hiện tại", None)
+        for saved_title in self.settings.youtube_title_tags:
+            self.saved_titles_combo.addItem(saved_title, saved_title)
+        matched = next((index for index in range(1, self.saved_titles_combo.count())
+                        if self.settings._story_key(self.saved_titles_combo.itemData(index)) == self.settings._story_key(title)), 0)
+        self.saved_titles_combo.setCurrentIndex(matched)
+        self.saved_titles_combo.setEnabled(self.saved_titles_combo.count() > 1)
+        self.saved_titles_combo.blockSignals(False)
+        if changed:
+            self._tags_manually_edited = False
+        if apply and (changed or not self._tags_manually_edited):
+            tags = self.settings.tags_for_uploaded_title(title)
+            self.tags_edit.setText(", ".join(tags or []))
+
+    def _remember_uploaded_tags(self, story_title, state, *, only_if_missing=False):
+        if not state.get("video_id"):
+            return
+        metadata = state.get("updated_metadata") or state.get("metadata") or {}
+        tags = metadata.get("tags") if isinstance(metadata, dict) else None
+        if not isinstance(tags, list):
+            return
+        try:
+            changed = self.settings.remember_uploaded_title_tags(
+                story_title, tags, only_if_missing=only_if_missing,
+            )
+        except OSError:
+            self.diagnostic.emit("YouTube: Video đã upload, nhưng chưa lưu được bộ tag của truyện vào Settings.")
+            return
+        if changed:
+            self._load_story_tags(story_title, apply=False)
+
+    def refresh_connection_config(self):
+        """Apply settings on the UI thread before starting authentication work."""
+        if self.busy:
+            return
         configured = str(self.settings.youtube_client_secrets_path or "").strip()
         if configured != self._auth_path:
             self.auth = None
             self.account = None
             self._restore_attempted = False
             self._auth_path = configured
-            self._show_account()
-        if not self._restore_attempted and not self.busy:
-            self._restore_attempted = True
-            self._start("restore", lambda worker: self._get_auth().restore())
+        self._show_account()
         self._update_controls()
 
     def _get_auth(self):
@@ -224,8 +300,11 @@ class YouTubeTab(QWidget):
         return self.auth
 
     def connect_account(self):
-        if not self.settings.youtube_client_secrets_path:
-            self._show_error("Choose your Desktop OAuth client JSON in Settings → YouTube first.")
+        if self.busy:
+            return
+        self.refresh_connection_config()
+        if not self._auth_path:
+            self._show_connection_error("Choose your Desktop OAuth client JSON in Settings → YouTube first.")
             return
         self._start("connect", lambda worker: self._get_auth().connect(cancel_event=self._cancel))
 
@@ -235,6 +314,15 @@ class YouTubeTab(QWidget):
     def _show_account(self):
         account = self.account or {}
         self.account_label.setText(account.get("email") or "Not connected")
+        self.connection_hint.setText(
+            "Đã kết nối tài khoản YouTube." if account else (
+                "Đã chọn tệp OAuth. Bấm Connect YouTube Account, đăng nhập Google "
+                "và cấp quyền YouTube trong trình duyệt để hoàn tất kết nối."
+                if self._auth_path else
+                "Chọn tệp OAuth Desktop client JSON trong Settings → YouTube, "
+                "sau đó bấm Connect YouTube Account để đăng nhập."
+            )
+        )
         self.channel_label.setText(
             f"{account.get('channel_title', '')} ({account.get('channel_id', '')})" if account else "—"
         )
@@ -260,6 +348,7 @@ class YouTubeTab(QWidget):
         self.description_edit.setPlainText(metadata.get("description", ""))
         self.tags_edit.setText(", ".join(metadata.get("tags", [])))
         self.kids_check.setChecked(bool(metadata.get("made_for_kids", False)))
+        self.ai_check.setChecked(bool(metadata.get("contains_synthetic_media", False)))
         for combo, key in ((self.privacy_combo, "privacy"), (self.category_combo, "category_id"),
                            (self.playlist_combo, "playlist_id")):
             value = metadata.get(key)
@@ -286,18 +375,25 @@ class YouTubeTab(QWidget):
             category_id=str(self.category_combo.currentData() or ""),
             privacy=self.privacy_combo.currentData(), made_for_kids=self.kids_check.isChecked(),
             playlist_id=self.playlist_combo.currentData(), publish_at=publish_at,
+            contains_synthetic_media=self.ai_check.isChecked(),
         )
 
     def upload(self, _checked=False, *, allow_duplicate=False):
         if self.busy or not self.account:
             return
         try:
+            from media.youtube import UploadMetadata, YouTubeUploadError, load_upload_state
+
             self.media = self.document_provider().require_step5_outputs()
             bundle = self.document_provider().require_step3_artifacts()
             step4_media = self.document_provider().require_step4_outputs()
-            metadata = self._metadata()
-            metadata.validate()
-        except (PipelineStateError, ValueError) as error:
+            state = load_upload_state(self.media.output_dir)
+            resuming = bool(state.get("session_key") and not allow_duplicate)
+            # Resume with the exact metadata accepted by the existing session.
+            # The date editor can round timestamps and its schedule may now be past.
+            metadata = UploadMetadata(**state["metadata"]) if resuming else self._metadata()
+            metadata.validate(require_future=not resuming)
+        except (PipelineStateError, YouTubeUploadError, ValueError) as error:
             self._show_error(str(error))
             return
         media = self.media
@@ -379,6 +475,8 @@ class YouTubeTab(QWidget):
             "disconnect": "Disconnecting…", "upload": "Uploading…",
             "thumbnail": "Retrying thumbnail…", "playlist": "Retrying playlist…",
         }.get(mode, "Working…"))
+        if mode in ("restore", "connect", "disconnect"):
+            self.connection_hint.setText(self.status_label.text())
         self.busy_changed.emit(True)
         self._update_controls()
         self._thread.start()
@@ -390,6 +488,8 @@ class YouTubeTab(QWidget):
             self.status_label.setText("YouTube account connected" if self.account else "Connect a YouTube account to upload.")
         else:
             self.state = result or {}
+            if self._mode == "upload" and self.media is not None:
+                self._remember_uploaded_tags(self.media.title, self.state)
             if self.auth is not None and self.auth.account is None:
                 self.account = None
                 self._show_account()
@@ -411,6 +511,26 @@ class YouTubeTab(QWidget):
             except Exception:
                 pass
         self._show_error(message)
+        if self._mode in ("restore", "connect", "disconnect"):
+            self.connection_hint.setText(message)
+            if self._mode != "restore":
+                self._show_connection_error(message)
+
+    def _show_connection_error(self, message):
+        self._show_error(message)
+        self.connection_hint.setText(message)
+        if self._connection_error_dialog is not None:
+            self._connection_error_dialog.close()
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Không thể kết nối YouTube")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(message)
+        dialog.setInformativeText("Sửa lỗi được nêu ở trên, rồi bấm Connect YouTube Account để thử lại.")
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        self._connection_error_dialog = dialog
+        # Keep the event loop free so authentication thread cleanup can finish.
+        dialog.open()
 
     def _show_error(self, message):
         self.status_label.setText(message)

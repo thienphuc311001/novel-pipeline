@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -75,6 +76,49 @@ class YouTubeUiTests(unittest.TestCase):
         self.window._continue_to_stage6()
         self.wait_idle()
 
+    def test_connect_uses_changed_oauth_settings_without_reentering_tab(self):
+        self.enter()
+        old_auth = self.tab.auth
+        self.window.settings.youtube_client_secrets_path = "new-client.json"
+        with patch.object(self.tab, "auth_factory", side_effect=FakeAuth) as factory:
+            self.tab.connect_account()
+            self.wait_idle()
+        factory.assert_called_once_with("new-client.json")
+        self.assertIsNot(self.tab.auth, old_auth)
+        self.assertEqual(self.tab.account["channel_id"], "channel1")
+
+    def test_configured_oauth_without_saved_login_explains_sign_in(self):
+        self.tab.auth_factory = lambda path: FakeAuth(path)
+        with patch.object(FakeAuth, "restore", return_value=None):
+            self.enter()
+        self.assertEqual(self.tab.account_label.text(), "Not connected")
+        self.assertIn("Connect YouTube Account", self.tab.connection_hint.text())
+        self.assertFalse(self.tab.upload_btn.isEnabled())
+        self.assertTrue(self.tab.connect_btn.isEnabled())
+
+    def test_group_connection_error_visible_beside_account(self):
+        from media.youtube_auth import YouTubeAuthError
+
+        self.tab = self.window.group6.editor
+        self.tab.auth_factory = FakeAuth
+        with patch.object(FakeAuth, "connect", side_effect=YouTubeAuthError("OAuth test error")):
+            self.tab.connect_account()
+            self.wait_idle()
+        self.assertEqual(self.tab.connection_hint.text(), "OAuth test error")
+        self.assertFalse(self.tab.connection_hint.isHidden())
+        self.assertTrue(self.tab.status_label.isHidden())
+        self.assertTrue(self.tab._connection_error_dialog.isVisible())
+        self.assertEqual(self.tab._connection_error_dialog.text(), "OAuth test error")
+        self.tab._connection_error_dialog.close()
+
+    def test_connect_without_config_displays_error_dialog(self):
+        self.window.settings.youtube_client_secrets_path = ""
+        self.tab.connect_btn.click()
+        self.assertFalse(self.tab.busy)
+        self.assertTrue(self.tab._connection_error_dialog.isVisible())
+        self.assertIn("Settings", self.tab._connection_error_dialog.text())
+        self.tab._connection_error_dialog.close()
+
     def test_continue_and_direct_navigation_share_automatic_inputs_and_metadata(self):
         self.enter()
         self.assertEqual(self.window.tabs.count(), 5)
@@ -126,6 +170,23 @@ class YouTubeUiTests(unittest.TestCase):
             self.tab.upload_again()
         self.assertEqual(len(self.tab.auth.transport.calls), calls)
 
+    def test_ai_checkbox_uploads_both_values_and_restores_saved_choice(self):
+        self.enter()
+        self.assertFalse(self.tab.ai_check.isChecked())
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.tab.ai_check.setChecked(enabled)
+                self.tab.auth.transport = ScriptedSession(START, COMPLETE, Response())
+                self.tab.upload(allow_duplicate=True)
+                self.wait_idle()
+                payload = self.tab.auth.transport.calls[0][2]["json"]
+                self.assertIs(payload["status"]["containsSyntheticMedia"], enabled)
+                self.assertIs(self.tab.state["metadata"]["contains_synthetic_media"], enabled)
+        self.tab.ai_check.setChecked(False)
+        self.tab._identity = None
+        self.tab.enter()
+        self.assertTrue(self.tab.ai_check.isChecked())
+
     def test_partial_thumbnail_failure_retry_keeps_video_and_saved_state_on_reentry(self):
         self.enter()
         self.tab.auth.transport = ScriptedSession(START, COMPLETE, Response(403))
@@ -155,6 +216,47 @@ class YouTubeUiTests(unittest.TestCase):
         self.tab.upload()
         self.assertFalse(self.tab.busy)
         self.assertIn("Private", self.tab.status_label.text())
+
+    def test_standalone_resume_preserves_saved_metadata_and_past_schedule(self):
+        from media.youtube import UploadMetadata, YouTubeUploader
+        from tests.test_youtube import SESSION_URI
+        from ui.youtube_tab import YouTubeTab
+
+        self.tab = YouTubeTab(lambda: self.document, self.window.settings)
+        self.addCleanup(self.tab.close)
+        self.tab.auth = FakeAuth("fake.json")
+        self.tab.account = ACCOUNT.copy()
+        media = self.document.require_step5_outputs()
+        metadata = UploadMetadata(
+            "Saved title", publish_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            contains_synthetic_media=True,
+        )
+        uploader = YouTubeUploader(self.tab.auth.transport, self.tab.auth.secret_store)
+        state = {
+            "schema_version": 1, "status": "uploading", "channel_id": "channel1",
+            "metadata": metadata.__dict__, "session_key": "resume-key",
+            "video_fingerprint": uploader._fingerprint(Path(media.video_path)),
+            "total_bytes": Path(media.video_path).stat().st_size, "bytes_sent": 0,
+            "video_id": None, "playlist_id": None, "title": metadata.title, "privacy": "private",
+        }
+        Path(media.output_dir, "youtube_upload.json").write_text(json.dumps(state))
+        self.tab.auth.secret_store.set("resume-key", SESSION_URI)
+        self.tab.auth.transport = ScriptedSession(COMPLETE, Response())
+        self.tab.title_edit.setText("Unsaved edit must not replace resumed metadata")
+        self.tab.upload()
+        self.wait_idle()
+        self.assertEqual(self.tab.state["status"], "completed")
+        self.assertEqual(self.tab.state["metadata"], metadata.__dict__)
+        first = self.tab.auth.transport.calls[0]
+        self.assertEqual(first[0], "PUT")
+        self.assertEqual(first[2]["headers"]["Content-Range"], f"bytes */{state['total_bytes']}")
+
+        # An explicit new upload must still reject a past publishing date.
+        self.tab._restore_metadata()
+        self.assertTrue(self.tab.ai_check.isChecked())
+        self.tab.upload(allow_duplicate=True)
+        self.assertFalse(self.tab.busy)
+        self.assertIn("future", self.tab.status_label.text())
 
     def test_api_worker_keeps_ui_responsive_and_cancel_saves_session(self):
         self.enter()

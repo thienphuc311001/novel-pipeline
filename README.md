@@ -23,6 +23,15 @@ Raw TXT / ZIP
   → Sequential YouTube uploads with per-group recovery
 ```
 
+### Saved work sessions
+
+- **Phiên làm việc** opens a list of saved sessions with the story title, last open step, and save time. The same picker appears when the app starts if saved sessions exist.
+- **Lưu phiên** saves immediately. The app also saves every 30 seconds while idle, before group operations, before switching sessions/loading another story, and on normal exit. If an operation is running, cancel it and wait for it to stop before closing.
+- Reopening a session restores edited text, chapter groups, processing settings, selected groups, upload drafts, and the open step. It does not automatically restart an upload or batch.
+- Existing audio/video files stay in their original job folders. Missing files are reported; normal provenance checks still reject changed or incomplete outputs. Completed per-group job state is recovered from disk when it is newer than the session snapshot.
+- Session JSON files are stored in `sessions/` under the app configuration directory (normally `~/.config/novel-pipeline-v2/sessions/`, or beneath `NOVEL_PIPELINE_CONFIG_DIR`). Google credentials remain in the OS keyring.
+- Choose **Phiên mới** or load another input to start a separate session. Existing sessions remain selectable.
+
 ### Stage 1: Chapter Normalization
 
 - **JSON artifact unwrapping** - Detects and unwraps structured JSON artifacts
@@ -75,7 +84,8 @@ Raw TXT / ZIP
 
 - Uses the current Step 4 MP4 and Step 3 thumbnail automatically.
 - Connects through the system browser; credentials and resumable session URLs live in the OS credential store.
-- Reviews editable title, description, tags, category, visibility, made-for-kids, playlist, and optional publication time.
+- Reviews editable title, description, tags, category, visibility, made-for-kids, AI content disclosure, playlist, and optional publication time.
+- Remembers the tags of successfully uploaded videos by story title. When the same story is selected again, tags load automatically; the uploaded-story picker can reuse tags from another story without changing the video title. Saved tags stay available across work sessions and app restarts.
 - Shows transferred bytes, percentage, and speed, with bounded retries and saved-session recovery.
 - Stores `youtube_upload.json` in the job folder; another video upload requires explicit action.
 - Retries thumbnail and playlist failures independently using the saved video ID.

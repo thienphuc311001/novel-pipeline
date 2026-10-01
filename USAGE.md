@@ -168,6 +168,8 @@ Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings →
 
 Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
 
+Tick **Có sử dụng AI** to disclose synthetic or AI-altered content to YouTube; untick it to send `false`. It starts unticked, applies to new uploads (including selected groups), and is saved with upload metadata and work-session drafts. Resuming an upload retains the choice accepted when that upload started. The uploaded-video metadata editor can also change this choice.
+
 All group checkboxes start unchecked. Select groups and click **Start Uploads**. Uploads run sequentially with current-group and overall progress. Authentication failures pause the batch for reconnect; **Cancel** stops queued groups at a safe boundary.
 
 `youtube_upload.json` persists video ID/URL, metadata, byte position, and independent video/thumbnail/playlist outcomes. Resumable URLs and OAuth tokens remain in the OS credential store. **Resume Upload** queries an existing session rather than creating a new video; uncertain uploads never automatically create duplicates.
