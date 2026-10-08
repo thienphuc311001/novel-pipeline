@@ -906,34 +906,12 @@ class MainWindow(SessionSupport, QMainWindow):
             self._log(f"Could not remember input folder: {error}")
         self._log(f"Loading {len(paths)} file(s)...")
         try:
-            from chapters import build_patterns, detect_headers_in_text
-            from pipeline.loader import insert_missing_headers, load_paths
-            result = load_paths(paths, chain=self.settings.encoding_chain, sort_mode="natural")
-            if self.settings.auto_insert_headers:
-                patterns = build_patterns(self.settings)
-
-                def header_numbers(text: str) -> list[int]:
-                    return [item[1] for item in detect_headers_in_text(text, patterns)]
-
-                result.files, inserted = insert_missing_headers(
-                    result.files,
-                    has_header=lambda text: bool(header_numbers(text)),
-                    prefix=self.settings.auto_insert_prefix,
-                    continuous=self.settings.continuous_numbering,
-                    detect_max_number=lambda text: max(header_numbers(text), default=None),
-                )
-                result.diagnostics.extend(inserted)
+            from pipeline.service import load_document
+            document, result = load_document(paths, self.settings)
             if (self._sessions_enabled or self._session_id) and not self._save_session(report=True):
                 return
-            self.document = PipelineDocument()
+            self.document = document
             self._session_id = None
-            self.document.source_files = result.files
-            first_path = Path(paths[0]).expanduser().resolve()
-            self.document.load_original_input(
-                result.text,
-                source_path=str(first_path),
-                input_directory=str(first_path.parent),
-            )
             default_title = Path(paths[0]).stem or "Novel Title"
             self._set_job_editors(default_title, "")
             self.document.diagnostics.extend(result.diagnostics)
@@ -960,20 +938,12 @@ class MainWindow(SessionSupport, QMainWindow):
             return
         self._log("Normalizing chapters...")
         try:
-            from chapters import build_patterns, normalize_chapters, NormalizeOptions
-            patterns = build_patterns(self.settings)
-            options = NormalizeOptions.from_settings(self.settings)
-            chapters, report, diagnostics = normalize_chapters(
-                self.document.original_input_text, patterns, options, source_name="merged"
-            )
-            normalized_text = self.document.set_normalized_output(chapters)
+            from pipeline.service import normalize_document
+            normalize_document(self.document, self.settings)
+            chapters = self.document.chapters
+            normalized_text = self.document.normalized_text
             self._video_media = None
             self._video_audio_probe = None
-            self.document.diagnostics.extend(diagnostics)
-            self.document.stage("normalize").touch(
-                f"{len(self.document.source_files)} sources",
-                f"{len(chapters)} chapters", report.to_dict()
-            )
             self._log(f"✓ Detected {len(chapters)} chapters")
             self._set_editor_text(self.stage1_output, normalized_text)
             self.stage1_output.setReadOnly(False)

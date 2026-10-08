@@ -83,8 +83,8 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    _atomic_write_bytes(path, (text or "").encode("utf-8"))
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    _atomic_write_bytes(path, (text or "").encode(encoding))
 
 
 def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:

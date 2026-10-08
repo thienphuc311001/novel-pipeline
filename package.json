@@ -1,0 +1,18 @@
+{
+  "name": "novel-pipeline-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "np": "scripts/np.mjs"
+  },
+  "scripts": {
+    "dev": "node scripts/np.mjs run dev"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

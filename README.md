@@ -1,6 +1,6 @@
 # Novel Pipeline v2
 
-A standalone local Python desktop application that merges three novel-processing tools into one unified pipeline.
+A local novel-processing application with a Qt-free Python core, FastAPI job manager, and React + Vite + shadcn/ui workspace. The legacy PyQt6 interface remains available during incremental migration.
 
 ## Purpose
 
@@ -25,8 +25,8 @@ Raw TXT / ZIP
 
 ### Saved work sessions
 
-- **Phiên làm việc** opens a list of saved sessions with the story title, last open step, and save time. The same picker appears when the app starts if saved sessions exist.
-- **Lưu phiên** saves immediately. The app also saves every 30 seconds while idle, before group operations, before switching sessions/loading another story, and on normal exit. If an operation is running, cancel it and wait for it to stop before closing.
+- **Phiên làm việc** lists saved sessions with the story title, last workflow step, and save time. The desktop also opens its picker at startup; the web uses the sessions screen.
+- **Lưu phiên** saves immediately. Web drafts auto-save after 1.5 seconds of idle editing and job completion; desktop saves every 30 seconds and on normal exit. Save before closing a browser tab. If a job is running, stop it and wait for the worker to exit before closing the server.
 - Reopening a session restores edited text, chapter groups, processing settings, selected groups, upload drafts, and the open step. It does not automatically restart an upload or batch.
 - Existing audio/video files stay in their original job folders. Missing files are reported; normal provenance checks still reject changed or incomplete outputs. Completed per-group job state is recovered from disk when it is newer than the session snapshot.
 - Session JSON files are stored in `sessions/` under the app configuration directory (normally `~/.config/novel-pipeline-v2/sessions/`, or beneath `NOVEL_PIPELINE_CONFIG_DIR`). Google credentials remain in the OS keyring.
@@ -100,23 +100,46 @@ See [YouTube setup and recovery](USAGE.md#step-5-youtube-upload) before first us
 ### Requirements
 
 - Python 3.11+
-- PyQt6
+- Node.js 22.12+ and npm (to develop/build the React interface)
 - FFmpeg and FFprobe (for joining MP3 chunks and creating/validating video)
+- PyQt6 only for the optional legacy desktop interface
 
-### Setup
+### Local web setup
 
 ```bash
-# System packages (Arch Linux example)
-sudo pacman -S python-pyqt6
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+npm --prefix frontend ci
+npm --prefix frontend run build
+python -m backend
+```
 
-# Or via pip
-pip install -r requirements.txt
+Open `http://127.0.0.1:8000` for the built application. For development, start both servers in one terminal:
 
-# Clone and run
-git clone <repo>
-cd novel-pipeline-v2
+```bash
+npm ci
+npm link
+np run dev
+```
+
+Open `http://127.0.0.1:5173`; Vite proxies `/api` to the dedicated dev FastAPI server on port 8765, not the shared port 8000.
+The launcher uses `.venv` automatically and stops both servers on Ctrl+C or
+when either exits. `npm run dev` is the equivalent without global registration.
+
+### Headless CLI and optional desktop
+
+```bash
+# No QApplication or PyQt6 dependency
+python -m pipeline run /path/story.txt --title "My story" --group-size 20 --prepare --export zip
+python -m pipeline sessions
+
+# Legacy interface for migration comparisons
+python -m pip install -r requirements-desktop.txt
 python app.py
 ```
+
+See [installation](INSTALL.md) and [web/CLI usage](USAGE.md#local-web-workspace) for sessions, API calls, cancellation, and output placement.
 
 ## Usage
 
@@ -141,10 +164,17 @@ Settings are stored in `~/.config/novel-pipeline-v2/config.json` (or `XDG_CONFIG
 
 ```
 novel-pipeline-v2/
-├── app.py                      # Entry point
+├── app.py                      # Optional legacy desktop entry point
+├── backend/                    # Loopback FastAPI, jobs, SSE, uploads/downloads
+├── frontend/                   # React + Vite + shadcn/ui workspace
 ├── config/
-│   └── settings.py             # Settings and configuration
+│   ├── settings.py             # Settings and configuration
+│   └── validation.py           # Shared Qt-free settings edit validation
 ├── pipeline/
+│   ├── service.py              # Shared workspace actions
+│   ├── media_service.py        # Qt-free TTS/video/YouTube orchestration
+│   ├── cli.py                  # python -m pipeline
+│   ├── sessions.py             # Existing versioned session store
 │   ├── document.py             # In-memory pipeline document
 │   └── loader.py               # TXT/ZIP input loading
 ├── chapters/
@@ -193,10 +223,11 @@ Break preference cascade:
 ## Technology
 
 - **Python 3.11+** - Modern Python with type hints
-- **PyQt6** - Native desktop UI
-- **No database** - In-memory pipeline, lightweight JSON persistence
-- **No mandatory network** - Core processing is fully offline
-- **Minimal dependencies** - Standard library + PyQt6
+- **React + Vite + shadcn/ui** - Local web workspace
+- **FastAPI** - Serial job lifecycle, cooperative cancellation and SSE monitoring
+- **PyQt6 (optional)** - Legacy desktop retained until external-service parity is established
+- **No database** - In-memory pipeline, existing versioned JSON sessions and job provenance
+- **Offline text processing** - Edge-TTS and YouTube require network services when invoked
 
 ## License
 

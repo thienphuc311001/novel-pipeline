@@ -1,23 +1,88 @@
 # Usage Guide
 
-## Quick Start
+## Local web workspace
 
-1. **Launch the application**
-   ```bash
-   python app.py
-   ```
+Build/install using [INSTALL.md](INSTALL.md). For the built application, run
+`python -m backend` and open `http://127.0.0.1:8000`. For development, run
+`np run dev` and open `http://127.0.0.1:5173`; the launcher starts its own API
+on port 8765 and Vite proxies `/api` there.
 
-2. **Load your novel files**
-   - Click "📁 Load Files"
-   - Select one or more `.txt` or `.zip` files
-   - Files are merged in natural order (ch9 before ch10)
+1. Import ordered local TXT/ZIP paths or upload files. Local paths preserve the
+   original input-relative output placement. Uploaded inputs are durable copies;
+   outputs live beside those copies, not beside files on the browser's machine.
+2. Normalize and review/edit the result. Saving an edit invalidates downstream
+   group/media authority but never deletes completed files.
+3. Preview chapter groups for the selected size. Numeric boundaries require an
+   explicit confirmation tied to the current text, patterns and group size.
+4. Select groups, create thumbnails, prepare TTS plans and generate/resume
+   audiobooks. Failed groups retain chunk details; later groups continue. Partial
+   merge is an explicit action and its audiobook cannot pass the video gate.
+5. Supply the square page image and QR image, preview the exact rendered page,
+   then render selected videos. Upload only validated current MP4s through the
+   YouTube screen after reviewing metadata and connecting an account.
 
-3. **Process through the pipeline**
-   - Tab 1: Normalize chapters
-   - Tab 2: Detect chapters and group
-   - Tab 3: Generate thumbnail and audiobook
-   - Tab 4: Create the final MP4
-   - Tab 5: Upload to YouTube
+YouTube tags default to the current story's confirmed-upload history. The saved-
+story picker reuses another story's tags without changing titles; editing or
+clearing tags is an explicit override. Existing resumable uploads keep their
+frozen metadata until the separate metadata-edit action is used.
+
+The dashboard displays actual jobs, live progress and logs. One operation owns
+the workspace at a time; conflicting mutations return HTTP 409. Stop requests
+cancellation and remains in `stopping` until the worker exits. Completed files
+and resume state are preserved. An incomplete batch is reported as failed with
+per-group results, never as a successful job.
+
+Use the sessions screen to save/open/new workspaces. Existing desktop sessions
+remain readable; web drafts use separate `web_*` fields. Reopening restores the
+last workflow step, text, selected groups and upload drafts without starting a job.
+Drafts auto-save after 1.5 seconds of idle editing; use Save before closing a tab.
+Settings stay global for accounts/preferences and are restored per story for
+processing options. TXT/JSON exports honor the filename template and encoding;
+ZIP exports honor folder-per-range and manifest options.
+Do not run desktop and web simultaneously against the same output folders.
+
+### CLI
+
+```bash
+python -m pipeline run story.txt --title "My story" --group-size 20 --prepare --export zip
+python -m pipeline sessions
+python -m pipeline action export --session SESSION_ID --options '{"format":"json"}'
+python -m pipeline action tts --session SESSION_ID --options '{"group_ids":["GROUP_ID"]}'
+```
+
+`run` imports, normalizes, groups and exports. Optional `--thumbnail IMAGE`,
+`--tts`, and `--video --cover IMAGE --qr IMAGE` invoke real media processing.
+Video also requires `--tts` and `--thumbnail`. CLI grouping refuses numbering
+gaps until boundaries are reviewed; use the web preview or a saved-session
+`group` action with the matching `confirmation_fingerprint`. `Ctrl+C` requests
+cooperative cancellation; output includes the saved session ID.
+
+### Local API
+
+- `GET /api/state`, `/api/settings`, `/api/jobs`, `/api/sessions`, `/api/outputs`
+- `POST /api/jobs` with `{"action":"normalize","options":{}}`
+- `GET /api/jobs/{id}` and `/api/jobs/{id}/logs?after=N`
+- `POST /api/jobs/{id}/stop`
+- `GET /api/events`: SSE `update` events always include jobs and `state_revision`;
+  full `state` arrives initially/on reconnect and after a workspace commit.
+- State includes `youtube_tags.current` and `youtube_tags.history`. Upload
+  metadata may omit `tags` to use story defaults; `tags: []` explicitly clears them.
+- `GET /api/grouping?size=20`: current grouping preview and confirmation identity
+- `PUT /api/settings`: validated settings edits
+- `POST /api/inputs` or `/api/assets`: multipart `files`; returns durable paths
+- `GET /api/outputs/download?path=...`: downloads only registered generated outputs
+- `POST /api/sessions` with `{"ui":{}}`, `/api/sessions/{id}/open`, `/api/sessions/new`
+
+API documentation is available at `/docs`. This unauthenticated, filesystem-
+capable API is deliberately loopback-only. Unexpected Host/Origin values are
+rejected; it is not a remotely hosted service.
+
+## Legacy desktop workflow
+
+Install `requirements-desktop.txt` and run `python app.py`. The stage descriptions
+below describe the existing desktop controls and shared processing semantics.
+PyQt6 is retained while real external-service parity is being established;
+translation/dictionary are not restored by this migration.
 
 ## Stage 1: Input & Normalize
 

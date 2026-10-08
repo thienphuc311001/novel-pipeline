@@ -1,0 +1,7 @@
+# Qt-free normalization, media generation and YouTube integration
+Pillow>=10.0.0
+edge-tts>=7.2.8
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+keyring>=25.0.0
+requests>=2.31.0

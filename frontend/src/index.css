@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+:root {
+  --pine-800: oklch(0.33 0.057 169);
+  --pine-100: oklch(0.95 0.024 159);
+  --stone-50: oklch(0.979 0.004 85);
+  --stone-100: oklch(0.958 0.006 85);
+  --stone-200: oklch(0.88 0.009 85);
+  --stone-500: oklch(0.48 0.015 85);
+  --stone-900: oklch(0.24 0.012 85);
+  --red-700: oklch(0.49 0.175 28);
+  --amber-100: oklch(0.97 0.034 88);
+  --amber-900: oklch(0.36 0.07 67);
+  --background: var(--stone-50);
+  --foreground: var(--stone-900);
+  --card: white;
+  --card-foreground: var(--foreground);
+  --primary: var(--pine-800);
+  --primary-foreground: white;
+  --secondary: var(--stone-100);
+  --secondary-foreground: var(--stone-900);
+  --muted: var(--stone-100);
+  --muted-foreground: var(--stone-500);
+  --accent: var(--pine-100);
+  --accent-foreground: var(--pine-800);
+  --destructive: var(--red-700);
+  --destructive-foreground: white;
+  --border: var(--stone-200);
+  --input: var(--stone-200);
+  --ring: var(--pine-800);
+  --warning: var(--amber-100);
+  --warning-foreground: var(--amber-900);
+  --radius: 0.625rem;
+  --log-background: var(--stone-900);
+  --log-foreground: var(--stone-50);
+}
+@theme inline {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply m-0 bg-background font-sans text-foreground antialiased;
+  }
+  button,
+  a,
+  input,
+  textarea,
+  select,
+  summary {
+    touch-action: manipulation;
+  }
+  button,
+  summary {
+    cursor: pointer;
+  }
+  a:focus-visible,
+  summary:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 4px;
+    border-radius: 4px;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  p,
+  li,
+  h1,
+  h2,
+  h3 {
+    overflow-wrap: anywhere;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+}
+@layer components {
+  .app-grid {
+    @apply min-h-dvh lg:grid lg:grid-cols-[15rem_minmax(0,1fr)];
+  }
+  .sidebar {
+    @apply flex min-w-0 flex-col border-b bg-secondary/50 p-4 lg:sticky lg:top-0 lg:h-dvh lg:border-b-0 lg:border-r lg:p-5;
+  }
+  .navigation {
+    @apply grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1;
+  }
+  .nav-item {
+    @apply flex min-h-11 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground;
+  }
+  .nav-active {
+    @apply bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground;
+  }
+  .eyebrow {
+    @apply text-[11px] font-semibold tracking-[0.14em] text-muted-foreground;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-md bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground;
+  }
+  .select {
+    @apply min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50;
+  }
+  .empty {
+    @apply rounded-lg border border-dashed bg-muted/50 p-5 text-sm leading-relaxed text-muted-foreground;
+  }
+  .warning {
+    background: var(--warning);
+    color: var(--warning-foreground);
+    @apply rounded-lg border p-4 text-sm leading-relaxed;
+  }
+  .error-box {
+    @apply rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm leading-relaxed text-destructive;
+  }
+  .success-box {
+    @apply rounded-lg border border-primary/20 bg-accent p-4 text-sm text-accent-foreground;
+  }
+  .status-strip {
+    @apply flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-sm;
+  }
+  .text-preview {
+    @apply max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-4 font-mono text-xs leading-relaxed;
+    overflow-wrap: anywhere;
+  }
+  .log-view {
+    background: var(--log-background);
+    color: var(--log-foreground);
+  }
+  .break-anywhere {
+    overflow-wrap: anywhere;
+  }
+  .skip-link {
+    @apply sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-3 focus:text-primary-foreground;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

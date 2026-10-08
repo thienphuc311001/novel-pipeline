@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import codecs
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -27,8 +26,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from chapters.patterns import validate_custom_regex
 from config.settings import Settings
+from config.validation import validate_settings
 
 
 class SettingsDialog(QDialog):
@@ -344,33 +343,7 @@ class SettingsDialog(QDialog):
             except (TypeError, ValueError, json.JSONDecodeError) as error:
                 raise ValueError(f"Invalid value for {name}: {error}") from error
 
-        if not isinstance(data.get("symbol_map"), dict):
-            raise ValueError("Symbol replacements must be a JSON object.")
-        if not isinstance(data.get("custom_rules"), list) or not all(
-            isinstance(rule, dict) for rule in data["custom_rules"]
-        ):
-            raise ValueError("Custom rules must be a JSON list of objects.")
-
-        settings = Settings.from_dict(data)
-        if not settings.encoding_chain:
-            raise ValueError("Encoding fallback order cannot be empty.")
-        for encoding in settings.encoding_chain:
-            try:
-                codecs.lookup(encoding)
-            except LookupError as error:
-                raise ValueError(f"Unknown encoding: {encoding}") from error
-        invalid_pairs = [pair for pair in settings.bracket_pairs if len(pair) != 2]
-        if invalid_pairs:
-            raise ValueError("Every bracket pair must contain exactly two characters.")
-        if settings.min_chunk_chars > settings.max_chunk_chars:
-            raise ValueError("Minimum chunk size cannot exceed maximum chunk size.")
-        voice = str(data.get("tts_voice") or "").strip()
-        if not voice:
-            raise ValueError("TTS voice cannot be empty (for example: vi-VN-HoaiMyNeural).")
-        settings.tts_voice = voice
-        if settings.use_custom_chapter_regex:
-            validate_custom_regex(settings.custom_chapter_regex)
-        return settings
+        return validate_settings(data)
 
     def accept(self) -> None:
         try:

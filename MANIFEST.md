@@ -1,8 +1,9 @@
 # Implementation Manifest
 
-Novel Pipeline v2 is a local PyQt6 application for normalizing novel text,
-grouping chapters, generating audiobook/video media, and uploading selected
-videos to YouTube.
+Novel Pipeline v2 is a local React/Vite/shadcn workspace backed by FastAPI and a
+Qt-free Python core for normalizing text, grouping chapters, generating media,
+and uploading selected videos. The legacy PyQt6 interface is retained for
+incremental migration comparisons, not required by CLI or web.
 
 ## Current five-step workflow
 
@@ -23,13 +24,18 @@ bundle schema, not to a visible tab number.
 
 ## Components
 
-- `pipeline/` — document state, stage tracking, and input loading
+- `pipeline/` — document state, shared workspace/media actions, Qt-free CLI,
+  input loading, and the existing versioned session store
 - `chapters/` — multilingual heading patterns, numerals, normalization, and
   duplicate handling
 - `cleaning/` and `chunking/` — safe TTS preparation and sentence-aware chunks
 - `media/` — exact group artifacts, thumbnails, TTS, video, required Step 4 page
   pictures (`media/visuals.py`: byte-identical `visuals/` copies plus `visuals.json`
   records), and YouTube state
+- `backend/` — loopback-only FastAPI, single-flight job manager, cooperative
+  cancellation, SSE, durable input/assets uploads, registered output downloads
+- `frontend/` — React + Vite + shadcn/ui, five-step workflow, live monitoring,
+  configuration and saved sessions
 - `ui/` — five-step main window, group panels, settings, YouTube, reusable
   `Copy all` controls, the shared modeless log window (`ui/log_dialog.py`), and
   the full-frame video page preview (`ui/video_preview.py`)
@@ -65,10 +71,11 @@ job.
 
 ## Verification
 
-Run the headless suite with:
+Run the complete suite (including retained desktop comparisons) with optional
+desktop dependencies installed:
 
 ```bash
-python -m unittest discover -q
+QT_QPA_PLATFORM=offscreen python -m pytest -q
 ```
 
 Run the lightweight import and chapter checks with:

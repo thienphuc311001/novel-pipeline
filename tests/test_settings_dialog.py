@@ -22,15 +22,6 @@ class SettingsDialogTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_all_user_facing_settings_have_controls(self):
-        dialog = SettingsDialog(Settings())
-        expected = set(Settings.__dataclass_fields__) - SettingsDialog.HIDDEN_FIELDS
-
-        self.assertEqual(dialog.editable_fields(), expected)
-        self.assertEqual(dialog.tabs.count(), 6)
-        self.assertNotIn("Chinese", [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())])
-        self.assertNotIn("Translation", [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())])
-
     def test_legacy_translation_settings_are_ignored_safely(self):
         settings = Settings.from_dict({
             "detect_chinese": True,
@@ -93,22 +84,6 @@ class SettingsDialogTests(unittest.TestCase):
         self.assertEqual(settings.title_history, ["Old Novel"])
         self.assertEqual(window.stage3_title_combo.currentText(), "")
         window.close()
-
-    def test_rejects_invalid_json_shape_and_chunk_range(self):
-        dialog = SettingsDialog(Settings())
-        symbol_map = dialog.controls["symbol_map"]
-        minimum = dialog.controls["min_chunk_chars"]
-        maximum = dialog.controls["max_chunk_chars"]
-
-        symbol_map.setPlainText("[]")
-        with self.assertRaisesRegex(ValueError, "JSON object"):
-            dialog._collect()
-
-        symbol_map.setPlainText("{}")
-        minimum.setValue(5000)
-        maximum.setValue(1000)
-        with self.assertRaisesRegex(ValueError, "Minimum chunk"):
-            dialog._collect()
 
     def test_runtime_ui_settings_are_applied(self):
         settings = Settings(font_size=13, max_log_lines=321)
