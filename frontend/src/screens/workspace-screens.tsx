@@ -1,18 +1,13 @@
 import { useState } from "react";
-import { Save, Settings2 } from "lucide-react";
+import { ChevronDown, FolderOpen, Save, Settings2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Settings, Workspace } from "@/lib/types";
 import { settingsSchema } from "@/lib/schemas";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  AssetField,
-  Confirm,
-  Field,
-  Panel,
-  Toggle,
-} from "@/components/workflow";
+import { AssetField, Confirm, Field, Toggle } from "@/components/workflow";
+import { More } from "@/components/wizard";
 
 const settingSections: { title: string; fields: [string, string][] }[] = [
   {
@@ -88,7 +83,6 @@ const settingSections: { title: string; fields: [string, string][] }[] = [
     fields: [
       ["thumbnail_jpeg_quality", "Chất lượng thumbnail JPEG"],
       ["qr_image_path", "Ảnh QR mặc định"],
-      ["font_size", "Cỡ chữ giao diện Qt"],
       ["max_log_lines", "Số dòng nhật ký tối đa"],
     ],
   },
@@ -97,286 +91,119 @@ export function SettingsScreen({ w }: { w: Workspace }) {
   const advanced = w.draft.settingsJson;
   const [jsonError, setJsonError] = useState("");
   const settings = w.draft.settings ?? w.settings;
-  if (!settings)
-    return (
-      <Panel title="Thiết lập">
-        <p className="empty">Đang tải thiết lập từ máy chủ…</p>
-      </Panel>
-    );
-  const update = (key: string, value: Settings[string]) =>
-    w.setDraft({ settings: { ...settings, [key]: value } });
+  if (!settings) return <section className="step-card"><div className="step-head"><h1>Đang tải thiết lập…</h1></div></section>;
+  const update = (key: string, value: Settings[string]) => w.setDraft({ settings: { ...settings, [key]: value } });
+  const edits = Object.fromEntries(Object.entries(settings).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(w.settings?.[key])));
+  const changed = Object.keys(edits).length;
   const saveSettings = async () => {
-    const edits = Object.fromEntries(
-      Object.entries(settings).filter(
-        ([key, value]) =>
-          JSON.stringify(value) !== JSON.stringify(w.settings?.[key]),
-      ),
-    );
-    const saved = await w.perform(
-      () => api.settingsSave(edits),
-      "Đã lưu thiết lập.",
-    );
+    const saved = await w.perform(() => api.settingsSave(edits), "Đã lưu thiết lập.");
     if (saved) {
       w.setDraft({ settings: saved });
       await w.refresh();
     }
   };
   return (
-    <div className="space-y-6">
-      <Panel
-        title="Thiết lập pipeline"
-        description="Các thay đổi chỉ có hiệu lực sau khi lưu. Mỗi tác vụ dùng bản thiết lập cố định tại thời điểm bắt đầu; không sửa mặc định desktop chỉ bằng cách mở trang."
-      >
-        <Button disabled={w.busy} onClick={() => void saveSettings()}>
-          <Save aria-hidden="true" />
-          Lưu thiết lập
-        </Button>
-        <p className="text-sm text-muted-foreground">
-          Edge-TTS trực tuyến · dữ liệu, đầu ra và phiên được lưu cục bộ.
-        </p>
-      </Panel>
-      {settingSections.map((section) => (
-        <Panel key={section.title} title={section.title}>
-          <div className="grid gap-5 md:grid-cols-2">
-            {section.fields
-              .filter(([key]) => key in settings)
-              .map(([key, label]) => {
+    <section className="step-card">
+      <header className="step-head"><h1>Thiết lập</h1><p>Chỉ mở phần cần đổi. Áp dụng cho tác vụ chạy sau khi lưu.</p></header>
+      <div className="step-body">
+        {settingSections.map(section => (
+          <details key={section.title} className="settings-section">
+            <summary>{section.title}<ChevronDown className="size-4" aria-hidden="true" /></summary>
+            <div className="grid gap-4 p-4 md:grid-cols-2">
+              {section.fields.filter(([key]) => key in settings).map(([key, label]) => {
                 const value = settings[key];
-                if (typeof value === "boolean")
-                  return (
-                    <Toggle
-                      key={key}
-                      label={label}
-                      checked={value}
-                      disabled={w.busy}
-                      onChange={(next) => update(key, next)}
-                    />
-                  );
+                if (typeof value === "boolean") return <Toggle key={key} label={label} checked={value} disabled={w.busy} onChange={next => update(key, next)} />;
                 return (
-                  <Field
-                    key={key}
-                    label={label}
-                    hint={
-                      key === "tts_voice"
-                        ? "Ví dụ vi-VN-HoaiMyNeural hoặc vi-VN-NamMinhNeural."
-                        : undefined
-                    }
-                  >
-                    {(id) => {
-                      if (["quote_mode", "bracket_mode"].includes(key))
-                        return (
-                          <select
-                            id={id}
-                            className="select"
-                            value={String(value)}
-                            disabled={w.busy}
-                            onChange={(event) =>
-                              update(key, event.target.value)
-                            }
-                          >
-                            <option value="keep">Giữ nguyên</option>
-                            <option value="strip">
-                              Bỏ ký hiệu, giữ nội dung
-                            </option>
-                            <option value="remove">Loại toàn bộ đoạn</option>
-                          </select>
-                        );
-                      if (Array.isArray(value))
-                        return (
-                          <Textarea
-                            id={id}
-                            value={value.join("\n")}
-                            disabled={w.busy}
-                            onChange={(event) =>
-                              update(key, event.target.value.split("\n"))
-                            }
-                          />
-                        );
-                      if (key === "channel_intro_text")
-                        return (
-                          <Textarea
-                            id={id}
-                            value={String(value)}
-                            disabled={w.busy}
-                            onChange={(event) =>
-                              update(key, event.target.value)
-                            }
-                          />
-                        );
+                  <Field key={key} label={label} hint={key === "tts_voice" ? "Ví dụ vi-VN-HoaiMyNeural hoặc vi-VN-NamMinhNeural." : undefined}>{id => {
+                    if (["quote_mode", "bracket_mode"].includes(key))
                       return (
-                        <Input
-                          id={id}
-                          type={typeof value === "number" ? "number" : "text"}
-                          step={typeof value === "number" ? 1 : undefined}
-                          value={String(value)}
-                          disabled={w.busy}
-                          onChange={(event) => {
-                            if (typeof value === "number") {
-                              const number = event.target.valueAsNumber;
-                              if (Number.isFinite(number)) update(key, number);
-                            } else update(key, event.target.value);
-                          }}
-                        />
+                        <select id={id} className="select" value={String(value)} disabled={w.busy} onChange={event => update(key, event.target.value)}>
+                          <option value="keep">Giữ nguyên</option>
+                          <option value="strip">Bỏ ký hiệu, giữ nội dung</option>
+                          <option value="remove">Loại toàn bộ đoạn</option>
+                        </select>
                       );
-                    }}
-                  </Field>
+                    if (Array.isArray(value)) return <Textarea id={id} value={value.join("\n")} disabled={w.busy} onChange={event => update(key, event.target.value.split("\n"))} />;
+                    if (key === "channel_intro_text") return <Textarea id={id} value={String(value)} disabled={w.busy} onChange={event => update(key, event.target.value)} />;
+                    return (
+                      <Input id={id} type={typeof value === "number" ? "number" : "text"} step={typeof value === "number" ? 1 : undefined} value={String(value)} disabled={w.busy}
+                        onChange={event => {
+                          if (typeof value === "number") {
+                            const number = event.target.valueAsNumber;
+                            if (Number.isFinite(number)) update(key, number);
+                          } else update(key, event.target.value);
+                        }} />
+                    );
+                  }}</Field>
                 );
               })}
-          </div>
-        </Panel>
-      ))}
-      <Panel title="YouTube OAuth">
-        <AssetField
-          label="OAuth Desktop client JSON"
-          value={String(settings.youtube_client_secrets_path ?? "")}
-          onChange={(path) => update("youtube_client_secrets_path", path)}
-          workspace={w}
-          accept=".json,application/json"
-        />
-        <p className="text-sm text-muted-foreground">
-          Tải client JSON từ Google Cloud cho ứng dụng Desktop. Không dán token
-          vào cấu hình.
-        </p>
-      </Panel>
-      <Panel
-        title="Cấu hình nâng cao JSON"
-        description="Toàn bộ trường hiện có, gồm symbol_map, custom_rules, tts_preprocessing, title_history và các trường tương thích Qt."
-      >
-        <details>
-          <summary className="cursor-pointer font-medium">
-            Mở trình soạn cấu hình đầy đủ
-          </summary>
-          <div className="mt-4 space-y-4">
-            <Field
-              label="Settings JSON"
-              hint="Áp dụng JSON vào bản nháp trước, sau đó Lưu thiết lập. Máy chủ kiểm tra kiểu và trường không được hỗ trợ."
-            >
-              {(id) => (
-                <Textarea
-                  id={id}
-                  className="min-h-96 font-mono text-sm"
-                  value={advanced ?? JSON.stringify(settings, null, 2)}
-                  disabled={w.busy}
-                  onChange={(event) => {
-                    w.setDraft({ settingsJson: event.target.value });
-                    setJsonError("");
-                  }}
-                />
-              )}
-            </Field>
-            {jsonError && (
-              <p role="alert" className="error-box">
-                {jsonError}
-              </p>
-            )}
-            <Button
-              variant="outline"
-              disabled={w.busy}
-              onClick={() => {
-                try {
-                  const parsed = settingsSchema.parse(
-                    JSON.parse(advanced ?? JSON.stringify(settings)),
-                  );
-                  w.setDraft({ settings: parsed, settingsJson: null });
-                  setJsonError("");
-                } catch (cause) {
-                  setJsonError(
-                    cause instanceof Error ? cause.message : String(cause),
-                  );
-                }
-              }}
-            >
-              <Settings2 aria-hidden="true" />
-              Áp dụng JSON vào bản nháp
-            </Button>
+            </div>
+          </details>
+        ))}
+        <details className="settings-section">
+          <summary>YouTube OAuth<ChevronDown className="size-4" aria-hidden="true" /></summary>
+          <div className="p-4">
+            <AssetField label="OAuth Desktop client JSON" value={String(settings.youtube_client_secrets_path ?? "")} onChange={path => update("youtube_client_secrets_path", path)} workspace={w} accept=".json,application/json" />
           </div>
         </details>
-      </Panel>
-      <Button disabled={w.busy} onClick={() => void saveSettings()}>
-        Lưu tất cả thiết lập
-      </Button>
-    </div>
+        <More title="Sửa cấu hình JSON đầy đủ">
+          <Field label="Settings JSON" hint="Áp dụng vào bản nháp rồi bấm Lưu.">{id => (
+            <Textarea id={id} className="min-h-96 font-mono text-sm" value={advanced ?? JSON.stringify(settings, null, 2)} disabled={w.busy}
+              onChange={event => { w.setDraft({ settingsJson: event.target.value }); setJsonError(""); }} />
+          )}</Field>
+          {jsonError && <p role="alert" className="error-box">{jsonError}</p>}
+          <Button variant="outline" disabled={w.busy} onClick={() => {
+            try {
+              w.setDraft({ settings: settingsSchema.parse(JSON.parse(advanced ?? JSON.stringify(settings))), settingsJson: null });
+              setJsonError("");
+            } catch (cause) {
+              setJsonError(cause instanceof Error ? cause.message : String(cause));
+            }
+          }}><Settings2 aria-hidden="true" />Áp dụng JSON</Button>
+        </More>
+      </div>
+      <footer className="step-foot">
+        <span className="step-note">{changed ? `${changed} thay đổi chưa lưu` : "Không có thay đổi"}</span>
+        <Button size="lg" disabled={w.busy || !changed} onClick={() => void saveSettings()}><Save aria-hidden="true" />Lưu thiết lập</Button>
+      </footer>
+    </section>
   );
 }
+
 export function SessionsScreen({ w }: { w: Workspace }) {
   return (
-    <div className="space-y-6">
-      <Panel
-        title="Phiên & bản nháp"
-        description="Tự động lưu sau khi bản nháp ổn định và khi pipeline hoàn tất. Phiên giữ đường dẫn đầu ra, lựa chọn nhóm, biểu mẫu và văn bản đang biên tập."
-      >
-        <p className="break-anywhere text-sm">
-          Phiên hiện tại: {w.state?.session_id ?? "Chưa lưu"}
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={w.busy || !w.state} onClick={() => void w.save()}>
-            <Save aria-hidden="true" />
-            Lưu phiên hiện tại
-          </Button>
-          <Confirm
-            label="Phiên mới"
-            title="Bắt đầu phiên mới?"
-            description="Bản nháp hiện tại được lưu trước khi mở không gian trống. Các tệp trên ổ đĩa không bị xóa."
-            disabled={w.busy || !w.state}
-            onConfirm={() => void w.open()}
-          />
-          <Button
-            variant="outline"
-            disabled={w.busy}
-            onClick={() => void w.refresh()}
-          >
-            Tải lại danh sách
-          </Button>
-        </div>
-        {w.state?.missing_artifacts.length ? (
-          <div className="warning">
-            <h3 className="font-medium">Tệp cần khôi phục</h3>
-            <ul className="mt-2 space-y-1">
-              {w.state.missing_artifacts.map((path) => (
-                <li key={path} className="break-anywhere">
-                  {path}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </Panel>
-      <Panel title="Phiên đã lưu">
+    <section className="step-card">
+      <header className="step-head"><h1>Phiên làm việc</h1><p>Tự động lưu. Chọn một phiên để làm tiếp.</p></header>
+      <div className="step-body">
         {w.sessions.length ? (
-          <ul className="divide-y">
-            {w.sessions.map((session) => (
-              <li
-                key={session.id}
-                className="flex flex-wrap items-center justify-between gap-3 py-4"
-              >
-                <div className="min-w-0">
-                  <h3 className="font-medium">
-                    {session.title || "Bản thảo chưa đặt tên"}
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    {new Date(session.updated_at).toLocaleString("vi-VN")} ·
-                    bước {session.step}
-                  </p>
-                  <p className="break-anywhere text-xs text-muted-foreground">
-                    {session.id}
-                  </p>
-                </div>
-                <Confirm
-                  label="Khôi phục"
-                  title={`Mở ${session.title || "phiên đã lưu"}?`}
-                  description="Phiên hiện tại được lưu trước khi chuyển. Đầu ra được kiểm tra lại theo đường dẫn và fingerprint, tệp thiếu sẽ được cảnh báo."
-                  disabled={w.busy || session.id === w.state?.session_id}
-                  onConfirm={() => void w.open(session.id)}
-                />
-              </li>
-            ))}
+          <ul className="session-list">
+            {w.sessions.map(session => {
+              const current = session.id === w.state?.session_id;
+              return (
+                <li key={session.id} className={current ? "is-current" : ""}>
+                  <FolderOpen className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium">{session.title || "Chưa đặt tên"}</p>
+                    <p className="text-xs text-muted-foreground">{new Date(session.updated_at).toLocaleString("vi-VN")}</p>
+                  </div>
+                  {current ? <span className="badge">Đang mở</span> : (
+                    <Confirm label="Mở" title={`Mở ${session.title || "phiên này"}?`} description="Phiên hiện tại được lưu trước khi chuyển." disabled={w.busy} onConfirm={() => void w.open(session.id)} />
+                  )}
+                </li>
+              );
+            })}
           </ul>
-        ) : (
-          <p className="empty">
-            Chưa có phiên đã lưu. Nhập bản thảo hoặc lưu bản nháp để tạo phiên.
-          </p>
+        ) : <p className="empty">Chưa có phiên nào. Nhập bản thảo để bắt đầu.</p>}
+        {!!w.state?.missing_artifacts.length && (
+          <More title={`${w.state.missing_artifacts.length} tệp bị thiếu`}>
+            <ul className="space-y-1 text-sm">{w.state.missing_artifacts.map(path => <li key={path} className="break-anywhere">{path}</li>)}</ul>
+          </More>
         )}
-      </Panel>
-    </div>
+      </div>
+      <footer className="step-foot">
+        <Button variant="ghost" disabled={w.busy || !w.state} onClick={() => void w.save()}><Save aria-hidden="true" />Lưu ngay</Button>
+        <Confirm variant="default" label="Phiên mới" title="Bắt đầu phiên mới?" description="Phiên hiện tại được lưu trước. Tệp trên ổ đĩa không bị xóa." disabled={w.busy || !w.state} onConfirm={() => void w.open()} />
+      </footer>
+    </section>
   );
 }

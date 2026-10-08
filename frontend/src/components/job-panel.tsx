@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Terminal } from "lucide-react";
+import { AlertCircle, Loader2, Terminal, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { LogLine, Workspace } from "@/lib/types";
 import { Button } from "./ui/button";
@@ -99,6 +99,7 @@ export function JobPanel({ w }: { w: Workspace }) {
       : 0;
   return (
     <Panel
+      className="job-panel"
       title="Tác vụ & nhật ký"
       description="Tiến độ trực tiếp từ máy chủ. Dừng tác vụ giữ lại những đầu ra đã hoàn thành và chờ worker thoát an toàn."
       aside={
@@ -181,7 +182,7 @@ export function JobPanel({ w }: { w: Workspace }) {
               )}
             </div>
           )}
-          <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="job-actions">
             <Toggle
               label="Tự cuộn nhật ký"
               checked={autoScroll}
@@ -229,7 +230,7 @@ export function JobPanel({ w }: { w: Workspace }) {
                   key={line.sequence}
                   className="break-anywhere whitespace-pre-wrap font-mono text-xs leading-6"
                 >
-                  <span className="opacity-65">
+                  <span className="log-time">
                     {new Date(line.timestamp).toLocaleTimeString("vi-VN")} [
                     {line.level}]{" "}
                   </span>
@@ -243,5 +244,46 @@ export function JobPanel({ w }: { w: Workspace }) {
         </>
       )}
     </Panel>
+  );
+}
+
+const resumable = ["tts", "video", "upload", "thumbnail"];
+
+/** Bottom bar: only shows while something runs (or just failed). Full logs open on demand. */
+export function JobBar({ w }: { w: Workspace }) {
+  const [open, setOpen] = useState(false);
+  const [dismissed, setDismissed] = useState("");
+  const active = w.jobs.find(job => ["queued", "running", "stopping"].includes(job.status));
+  const latest = w.jobs[0];
+  const failed = !active && latest?.status === "failed" && latest.id !== dismissed ? latest : undefined;
+  const job = active ?? failed;
+  const percent = job && job.progress.total > 0 ? Math.round(Math.min(100, (job.progress.done / job.progress.total) * 100)) : null;
+  return (
+    <>
+      {open && (
+        <div className="log-sheet" role="dialog" aria-label="Tác vụ & nhật ký">
+          <div className="log-sheet-inner">
+            <Button variant="ghost" className="log-sheet-close" aria-label="Đóng nhật ký" onClick={() => setOpen(false)}><X aria-hidden="true" /></Button>
+            <JobPanel w={w} />
+          </div>
+        </div>
+      )}
+      {job ? (
+        <div className={`jobbar ${failed ? "is-failed" : ""}`} role="status">
+          {failed ? <AlertCircle className="size-5 shrink-0" aria-hidden="true" /> : <Loader2 className="size-5 shrink-0 animate-spin" aria-hidden="true" />}
+          <div className="jobbar-copy">
+            <p><strong>{actionLabels[job.action] ?? job.action}</strong>{failed ? " — chưa xong" : job.status === "stopping" ? " — đang dừng" : ""}{w.chainLeft > 0 && !failed ? <span className="jobbar-next"> · còn {w.chainLeft} bước</span> : null}</p>
+            <p className="jobbar-msg">{failed ? `${failed.error ?? "Có lỗi."}${resumable.includes(failed.action) ? " Bấm chạy lại để làm tiếp phần còn thiếu." : ""}` : job.progress.message || "Đang xử lý…"}</p>
+            {!failed && <div className="jobbar-track"><div style={{ width: `${percent ?? 8}%` }} className={percent === null ? "is-indeterminate" : ""} /></div>}
+          </div>
+          {percent !== null && !failed && <span className="jobbar-pct">{percent}%</span>}
+          <Button variant="ghost" onClick={() => setOpen(!open)}>{open ? "Ẩn" : "Chi tiết"}</Button>
+          {active && <Confirm variant="ghost" label={active.status === "stopping" ? "Đang dừng…" : "Dừng"} title="Dừng tác vụ?" description="Phần đã xong được giữ lại. Có thể chạy tiếp sau." disabled={active.status === "stopping" || w.pending} onConfirm={() => void w.perform(() => api.stop(active.id), "Đã yêu cầu dừng.")} />}
+          {failed && <Button variant="ghost" aria-label="Ẩn thông báo lỗi" onClick={() => setDismissed(failed.id)}><X aria-hidden="true" /></Button>}
+        </div>
+      ) : w.jobs.length > 0 && (
+        <button type="button" className="log-fab" onClick={() => setOpen(!open)}><Terminal className="size-4" aria-hidden="true" />Nhật ký</button>
+      )}
+    </>
   );
 }

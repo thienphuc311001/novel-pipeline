@@ -1,467 +1,201 @@
-import { useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, FileText, WandSparkles } from "lucide-react";
+import { useEffect, useId, useState } from "react";
+import { ArrowDown, ArrowUp, FileText, Upload, WandSparkles, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Grouping, Workspace } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Confirm,
-  Field,
-  MediaLink,
-  OutputDownloads,
-  Panel,
-  Toggle,
-  UploadIcon,
-} from "@/components/workflow";
+import { Confirm, Field, MediaLink, OutputDownloads, Toggle } from "@/components/workflow";
+import { Chips, DoneCard, More, NextButton, RunButton, StepPage } from "@/components/wizard";
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 export function InputScreen({ w }: { w: Workspace }) {
-  const paths = w.draft.paths
-    .split("\n")
-    .map((path) => path.trim())
-    .filter(Boolean);
+  const [replacing, setReplacing] = useState(false);
+  const dropId = useId();
+  const paths = w.draft.paths.split("\n").map(path => path.trim()).filter(Boolean);
+  const setPaths = (next: string[]) => w.setDraft({ paths: next.join("\n") });
   const move = (index: number, direction: number) => {
     const reordered = [...paths];
-    [reordered[index], reordered[index + direction]] = [
-      reordered[index + direction],
-      reordered[index],
-    ];
-    w.setDraft({ paths: reordered.join("\n") });
+    [reordered[index], reordered[index + direction]] = [reordered[index + direction], reordered[index]];
+    setPaths(reordered);
   };
+  const start = () => {
+    setReplacing(false);
+    void w.runSteps([{ action: "import", options: { paths, sort_mode: w.draft.sort } }, { action: "normalize" }]);
+  };
+  const hasText = Boolean(w.state?.text);
+
+  if (hasText && !replacing)
+    return (
+      <StepPage title="Bản thảo đã sẵn sàng" primary={<NextButton to="normalize" />}>
+        <DoneCard
+          title={w.state!.title || fileName(w.state!.source_path) || "Bản thảo"}
+          detail={`${w.state!.text.length.toLocaleString("vi-VN")} ký tự · ${w.state!.sources.length} tệp nguồn`}
+          action={<Button variant="outline" disabled={w.busy} onClick={() => setReplacing(true)}>Đổi bản thảo</Button>}
+        />
+        <More title="Xem nội dung gốc"><pre className="text-preview">{w.state!.original_text}</pre></More>
+      </StepPage>
+    );
+
+  const primary = hasText ? (
+    <Confirm variant="default" label="Thay bản thảo" title="Thay bản thảo hiện tại?" description="Nhóm, âm thanh và video của bản thảo cũ sẽ không còn dùng được. Phiên hiện tại được lưu trước." disabled={w.busy || !paths.length} onConfirm={start} />
+  ) : (
+    <RunButton w={w} label="Nhập bản thảo" disabled={!paths.length} onClick={start} />
+  );
   return (
-    <div className="space-y-6">
-      <Panel
-        title="Đưa bản thảo vào không gian làm việc"
-        description="TXT hoặc ZIP. Có thể giữ tệp tại vị trí gốc bằng đường dẫn tuyệt đối; tệp tải lên được lưu bền vững trên máy chủ."
-      >
-        <Field
-          label="Tải bản thảo TXT / ZIP"
-          hint="Tải lên chỉ thêm đường dẫn. Kiểm tra thứ tự rồi bấm Nhập bản thảo."
-        >
-          {(id) => (
-            <Input
-              id={id}
-              type="file"
-              multiple
-              accept=".txt,.zip"
-              disabled={w.busy}
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                if (files.length)
-                  void w.perform(async () => {
-                    const uploaded = await api.upload("inputs", files);
-                    w.setDraft({
-                      paths: [...paths, ...uploaded.paths].join("\n"),
-                    });
-                  }, "Đã tải bản thảo lên. Kiểm tra thứ tự trước khi nhập.");
-                event.target.value = "";
-              }}
-            />
-          )}
-        </Field>
-        <Field
-          label="Đường dẫn theo thứ tự lựa chọn"
-          hint="Mỗi dòng một đường dẫn tuyệt đối TXT, ZIP hoặc thư mục được backend hỗ trợ."
-        >
-          {(id) => (
-            <Textarea
-              id={id}
-              rows={5}
-              value={w.draft.paths}
-              disabled={w.busy}
-              onChange={(event) => w.setDraft({ paths: event.target.value })}
-              placeholder="/home/user/truyen/chuong-01.txt"
-            />
-          )}
-        </Field>
-        {paths.length > 0 && (
-          <ol className="space-y-2">
-            {paths.map((path, index) => (
-              <li
-                key={`${index}-${path}`}
-                className="flex min-w-0 items-center gap-2 rounded-lg border p-2"
-              >
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {index + 1}
-                </span>
-                <span className="break-anywhere min-w-0 flex-1 text-sm">
-                  {path}
-                </span>
-                <Button
-                  variant="ghost"
-                  aria-label={`Đưa tệp ${index + 1} lên`}
-                  disabled={w.busy || index === 0}
-                  onClick={() => move(index, -1)}
-                >
-                  <ArrowUp aria-hidden="true" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  aria-label={`Đưa tệp ${index + 1} xuống`}
-                  disabled={w.busy || index === paths.length - 1}
-                  onClick={() => move(index, 1)}
-                >
-                  <ArrowDown aria-hidden="true" />
-                </Button>
-              </li>
-            ))}
-          </ol>
-        )}
-        <Field label="Cách sắp xếp khi nhập">
-          {(id) => (
-            <select
-              id={id}
-              className="select"
-              value={w.draft.sort}
-              disabled={w.busy}
-              onChange={(event) =>
-                w.setDraft({ sort: event.target.value as typeof w.draft.sort })
-              }
-            >
-              <option value="natural">Tự nhiên (1, 2, 10)</option>
-              <option value="selection">Giữ thứ tự đã chọn</option>
-              <option value="name">Theo tên tệp</option>
-            </select>
-          )}
-        </Field>
-        {w.state?.text ? (
-          <Confirm
-            label="Nhập bản thảo mới"
-            title="Thay thế bản thảo hiện tại?"
-            description="Nội dung và các đầu ra phụ thuộc hiện tại sẽ không còn là đầu ra hợp lệ của bản thảo mới. Phiên hiện tại được lưu trước khi nhập."
-            disabled={w.busy || !paths.length}
-            onConfirm={() =>
-              void w.run("import", { paths, sort_mode: w.draft.sort })
-            }
-          />
-        ) : (
-          <Button
-            disabled={w.busy || !paths.length}
-            onClick={() =>
-              void w.run("import", { paths, sort_mode: w.draft.sort })
-            }
-          >
-            <UploadIcon aria-hidden="true" />
-            Nhập bản thảo
-          </Button>
-        )}
-      </Panel>
-      <Panel title="Bản thảo đang làm việc">
-        {w.state?.text ? (
-          <>
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div>
-                <p className="eyebrow">Nguồn</p>
-                <p className="break-anywhere">
-                  {w.state.source_path || "Nhiều tệp"}
-                </p>
-              </div>
-              <div>
-                <p className="eyebrow">Tệp nguồn</p>
-                <p>{w.state.sources.length}</p>
-              </div>
-              <div>
-                <p className="eyebrow">Ký tự</p>
-                <p>{w.state.text.length.toLocaleString("vi-VN")}</p>
-              </div>
-            </div>
-            <details>
-              <summary className="cursor-pointer text-sm font-medium">
-                Xem nội dung gốc
-              </summary>
-              <pre className="text-preview mt-3">{w.state.original_text}</pre>
-            </details>
-            <Button asChild variant="outline">
-              <a href="#normalize">Tiếp tục: chuẩn hóa</a>
-            </Button>
-          </>
-        ) : (
-          <p className="empty">
-            Nhập bản thảo đầu tiên để bắt đầu. Mọi số liệu ở đây lấy từ dữ liệu
-            thực.
-          </p>
-        )}
-      </Panel>
-    </div>
+    <StepPage title="Chọn bản thảo" hint="Tệp TXT hoặc ZIP. Có thể chọn nhiều tệp." primary={primary} secondary={replacing ? <Button variant="ghost" onClick={() => setReplacing(false)}>Hủy</Button> : undefined}>
+      <label htmlFor={dropId} className="dropzone">
+        <Upload aria-hidden="true" />
+        <strong>{paths.length ? "Thêm tệp" : "Bấm để chọn tệp"}</strong>
+        <input id={dropId} type="file" multiple accept=".txt,.zip" disabled={w.busy} onChange={event => {
+          const files = Array.from(event.target.files ?? []);
+          if (files.length) void w.perform(async () => setPaths([...paths, ...(await api.upload("inputs", files)).paths]));
+          event.target.value = "";
+        }} />
+      </label>
+      {paths.length > 0 && (
+        <ol className="file-list">
+          {paths.map((path, index) => (
+            <li key={`${index}-${path}`}>
+              <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate" title={path}>{fileName(path)}</span>
+              {paths.length > 1 && <>
+                <Button variant="ghost" aria-label="Lên" disabled={w.busy || index === 0} onClick={() => move(index, -1)}><ArrowUp aria-hidden="true" /></Button>
+                <Button variant="ghost" aria-label="Xuống" disabled={w.busy || index === paths.length - 1} onClick={() => move(index, 1)}><ArrowDown aria-hidden="true" /></Button>
+              </>}
+              <Button variant="ghost" aria-label="Bỏ tệp" disabled={w.busy} onClick={() => setPaths(paths.filter((_, i) => i !== index))}><X aria-hidden="true" /></Button>
+            </li>
+          ))}
+        </ol>
+      )}
+      {paths.length > 1 && (
+        <Chips label="Thứ tự ghép" value={w.draft.sort} disabled={w.busy} onChange={sort => w.setDraft({ sort })}
+          options={[["natural", "Tự động (1, 2, 10)"], ["selection", "Như danh sách"], ["name", "Theo tên"]]} />
+      )}
+      <More title="Nhập bằng đường dẫn trên máy">
+        <Field label="Mỗi dòng một đường dẫn" hint="TXT, ZIP hoặc thư mục.">{id => (
+          <Textarea id={id} rows={3} value={w.draft.paths} disabled={w.busy} placeholder="/home/user/truyen/chuong-01.txt" onChange={event => w.setDraft({ paths: event.target.value })} />
+        )}</Field>
+      </More>
+    </StepPage>
   );
 }
+
+const sizeOptions: [number, string][] = [[10, "10"], [20, "20"], [25, "25"], [50, "50"]];
+
 export function NormalizeScreen({ w }: { w: Workspace }) {
   const [preview, setPreview] = useState<Grouping | null>(null);
   const [previewError, setPreviewError] = useState("");
-  const [previewPending, setPreviewPending] = useState(false);
   const [numericConfirmed, setNumericConfirmed] = useState(false);
+  const normalized = w.state?.normalized_text !== null && Boolean(w.state?.text);
   useEffect(() => {
-    setPreview(null);
     setNumericConfirmed(false);
     setPreviewError("");
-    if (
-      !w.state?.text ||
-      w.busy ||
-      !Number.isInteger(w.draft.groupSize) ||
-      w.draft.groupSize < 1
-    )
-      return;
+    if (!normalized || w.busy || !Number.isInteger(w.draft.groupSize) || w.draft.groupSize < 1) return;
     let current = true;
     const timeout = window.setTimeout(() => {
-      setPreviewPending(true);
-      void api
-        .grouping(w.draft.groupSize)
-        .then((result) => {
-          if (current) setPreview(result);
-        })
-        .catch((cause) => {
-          if (current)
-            setPreviewError(
-              cause instanceof Error ? cause.message : String(cause),
-            );
-        })
-        .finally(() => {
-          if (current) setPreviewPending(false);
-        });
-    }, 350);
-    return () => {
-      current = false;
-      window.clearTimeout(timeout);
-    };
-  }, [w.draft.groupSize, w.state?.text, w.busy]);
-  const canGroup = Boolean(
-    preview &&
-      !preview.error &&
-      preview.headings.length &&
-      w.draft.title.trim() &&
-      (!preview.requires_numeric_boundaries ||
-        (preview.numeric_available && numericConfirmed)),
-  );
+      void api.grouping(w.draft.groupSize)
+        .then(result => { if (current) setPreview(result); })
+        .catch(cause => { if (current) setPreviewError(cause instanceof Error ? cause.message : String(cause)); });
+    }, 300);
+    return () => { current = false; window.clearTimeout(timeout); };
+  }, [w.draft.groupSize, w.state?.text, normalized, w.busy]);
+
+  if (!w.state?.text)
+    return <StepPage title="Chưa có bản thảo" back="input" primary={<NextButton to="input" label="Chọn bản thảo" />}><p className="text-muted-foreground">Quay lại bước 1 để chọn tệp.</p></StepPage>;
+  if (!normalized)
+    return (
+      <StepPage title="Chuẩn hóa bản thảo" hint="Sửa tiêu đề chương và khoảng trắng theo thiết lập." back="input"
+        primary={<RunButton w={w} label="Chuẩn hóa" onClick={() => void w.run("normalize")} />}>
+        <div className="hero-icon"><WandSparkles aria-hidden="true" /></div>
+      </StepPage>
+    );
+
+  const groups = w.state.groups;
+  const custom = !sizeOptions.some(([size]) => size === w.draft.groupSize);
+  const ready = Boolean(preview && !preview.error && preview.headings.length && w.draft.title.trim() &&
+    (!preview.requires_numeric_boundaries || (preview.numeric_available && numericConfirmed)));
+  // Without a fresh preview (e.g. while a job runs) existing groups count as current.
+  const unchanged = groups.length > 0 && (!preview || (w.draft.title.trim() === w.state.title &&
+    preview.groups.length === groups.length && preview.groups.every((group, index) => group.range_label === groups[index].range_label)));
+  const create = () => void w.run("group", {
+    title: w.draft.title.trim(),
+    size: w.draft.groupSize,
+    method: preview?.requires_numeric_boundaries ? "numeric_boundaries" : "detected_chapters",
+    confirmation_fingerprint: preview?.confirmation_fingerprint ?? "",
+  });
+  const primary = unchanged ? <NextButton to="tts" />
+    : groups.length ? <Confirm variant="default" label={`Chia lại thành ${preview?.groups.length ?? "…"} nhóm`} title="Chia lại nhóm chương?" description="Nhóm mới thay thế nhóm hiện có. Tệp đã tạo không bị xóa khỏi ổ đĩa." disabled={w.busy || !ready} onConfirm={create} />
+    : <RunButton w={w} label={`Tạo ${preview?.groups.length ?? "…"} nhóm`} disabled={!ready} onClick={create} />;
+
   return (
-    <div className="space-y-6">
-      <Panel
-        title="Chuẩn hóa và biên tập"
-        description="Chuẩn hóa dùng thiết lập hiện tại. Chỉnh sửa văn bản sẽ làm mất tính hợp lệ của nhóm và các đầu ra phụ thuộc."
-      >
-        {w.state?.normalized_text !== null && w.state?.text ? (
-          <Confirm
-            label="Chuẩn hóa lại bản thảo…"
-            title="Chuẩn hóa lại từ nội dung gốc?"
-            description="Văn bản biên tập hiện tại và các nhóm/đầu ra phụ thuộc sẽ mất tính hợp lệ. Thiết lập hiện tại được dùng để chuẩn hóa lại nguồn gốc."
-            disabled={w.busy}
-            onConfirm={() => void w.run("normalize")}
-          />
-        ) : (
-          <Button
-            disabled={w.busy || !w.state?.text}
-            onClick={() => void w.run("normalize")}
-          >
-            <WandSparkles aria-hidden="true" />
-            Chuẩn hóa bản thảo
-          </Button>
-        )}
-        <Field
-          label="Văn bản dùng để nhóm chương"
-          hint={
-            w.state?.normalized_text === null
-              ? "Chuẩn hóa trước để mở trình biên tập."
-              : `${w.draft.text.length.toLocaleString("vi-VN")} ký tự · bản nháp được lưu trong phiên; bấm Lưu văn bản để áp dụng.`
-          }
-        >
-          {(id) => (
-            <Textarea
-              id={id}
-              className="min-h-80 font-mono text-sm"
-              value={w.draft.text}
-              disabled={w.busy || !w.state || w.state.normalized_text === null}
-              onChange={(event) => w.setDraft({ text: event.target.value })}
-            />
-          )}
-        </Field>
-        <Confirm
-          label="Lưu văn bản"
-          title="Áp dụng văn bản đã chỉnh sửa?"
-          description="Các nhóm, âm thanh, video và trạng thái xuất bản phụ thuộc vào văn bản trước sẽ mất tính hợp lệ. Tệp cũ không tự động bị xóa."
-          disabled={
-            w.busy ||
-            !w.state ||
-            w.state.normalized_text === null ||
-            w.draft.text === w.state.text
-          }
-          onConfirm={() => void w.run("edit", { text: w.draft.text })}
-        />
-        {w.state?.diagnostics?.length ? (
-          <details open>
-            <summary className="font-medium">
-              Chẩn đoán ({w.state.diagnostics.length})
-            </summary>
-            <ul className="mt-3 list-inside list-disc space-y-2 text-sm">
-              {w.state.diagnostics.map((item, index) => (
-                <li key={index}>{item.message}</li>
-              ))}
-            </ul>
-          </details>
-        ) : null}
-      </Panel>
-      <Panel
-        title="Nhóm chương"
-        description="Xem trước trực tiếp theo kích thước đã chọn. Nếu số chương bị thiếu/lặp, cần xác nhận biên số trước khi tạo nhóm."
-      >
-        <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
-          <Field label="Tên truyện / dự án">
-            {(id) => (
-              <Input
-                id={id}
-                value={w.draft.title}
-                disabled={w.busy}
-                onChange={(event) => w.setDraft({ title: event.target.value })}
-              />
-            )}
-          </Field>
-          <Field label="Chương mỗi nhóm">
-            {(id) => (
-              <Input
-                id={id}
-                type="number"
-                min={1}
-                step={1}
-                value={w.draft.groupSize}
-                disabled={w.busy}
-                onChange={(event) => {
-                  const groupSize = event.target.valueAsNumber;
-                  if (
-                    Number.isFinite(groupSize) &&
-                    groupSize >= 1 &&
-                    Number.isInteger(groupSize)
-                  )
-                    w.setDraft({ groupSize });
-                }}
-              />
-            )}
-          </Field>
+    <StepPage title="Chia nhóm chương" hint="Mỗi nhóm thành một audio và một video." back="input" primary={primary}>
+      <Field label="Tên truyện">{id => <Input id={id} value={w.draft.title} disabled={w.busy} onChange={event => w.setDraft({ title: event.target.value })} />}</Field>
+      <div className="size-row">
+        <Chips label="Số chương mỗi nhóm" value={custom ? -1 : w.draft.groupSize} disabled={w.busy} onChange={size => w.setDraft({ groupSize: size === -1 ? 30 : size })}
+          options={[...sizeOptions, [-1, "Khác"]]} />
+        {custom && <Input aria-label="Số chương tùy chỉnh" className="w-24" type="number" min={1} step={1} value={w.draft.groupSize} disabled={w.busy}
+          onChange={event => { const size = event.target.valueAsNumber; if (Number.isInteger(size) && size >= 1) w.setDraft({ groupSize: size }); }} />}
+      </div>
+      {(previewError || preview?.error) && <p role="alert" className="error-box">{previewError || preview?.error}</p>}
+      {preview && !preview.error && (
+        <div className="preview-summary">
+          <p><strong>{preview.headings.length}</strong> chương <span aria-hidden="true">→</span> <strong>{preview.groups.length}</strong> nhóm</p>
+          <div className="range-tags">{preview.groups.map((group, index) => <span key={index}>{group.range_label}</span>)}</div>
         </div>
-        {w.draft.text !== w.state?.text && (
-          <p className="warning">
-            Bản nháp chưa áp dụng. Xem trước bên dưới dùng văn bản đã lưu.
-          </p>
-        )}
-        {previewPending && (
-          <p role="status" className="text-sm text-muted-foreground">
-            Đang phân tích biên chương…
-          </p>
-        )}
-        {(previewError || preview?.error) && (
-          <p role="alert" className="error-box">
-            {previewError || preview?.error}
-          </p>
-        )}
+      )}
+      {unchanged && <DoneCard title={`Đã chia ${groups.length} nhóm`} detail="Đổi số chương ở trên nếu muốn chia lại." />}
+      {preview?.requires_numeric_boundaries && (
+        <div className="warning">
+          <p>Số chương bị thiếu hoặc lặp. Nhóm sẽ chia theo số chương.</p>
+          <Toggle label="Tôi đã kiểm tra, chia theo số chương" checked={numericConfirmed} onChange={setNumericConfirmed} disabled={w.busy || !preview.numeric_available} />
+          {!preview.numeric_available && <p>Không đủ số chương hợp lệ — sửa văn bản trong Nâng cao.</p>}
+        </div>
+      )}
+      {!!preview?.warnings.length && <ul className="warning space-y-1">{preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+      <More>
+        <TextEditor w={w} />
         {preview && (
-          <>
-            <p className="text-sm">
-              Phát hiện <strong>{preview.headings.length}</strong> tiêu đề ·{" "}
-              <strong>{preview.groups.length}</strong> nhóm dự kiến
-            </p>
-            {preview.warnings.length > 0 && (
-              <ul className="warning space-y-1">
-                {preview.warnings.map((warning, index) => (
-                  <li key={index}>{warning}</li>
-                ))}
-              </ul>
-            )}
-            {preview.requires_numeric_boundaries && (
-              <div className="warning">
-                <p>
-                  Số chương không liên tục. Tạo nhóm theo biên số thay vì chỉ
-                  đếm tiêu đề.
-                </p>
-                <Toggle
-                  label="Tôi đã kiểm tra các biên số và xác nhận cách chia này"
-                  checked={numericConfirmed}
-                  onChange={setNumericConfirmed}
-                  disabled={w.busy || !preview.numeric_available}
-                />
-                {!preview.numeric_available && (
-                  <p>Không đủ biên hợp lệ. Hãy sửa bản thảo trước.</p>
-                )}
-              </div>
-            )}
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {preview.groups.map((group, index) => (
-                <div key={index} className="rounded-md border p-3">
-                  <p className="font-medium">
-                    {group.label || `Chương ${group.range_label}`}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {group.chapters?.length ?? 0} tiêu đề · ký tự {group.start}–
-                    {group.end}
-                  </p>
-                </div>
-              ))}
-            </div>
-            <details>
-              <summary className="cursor-pointer text-sm font-medium">
-                Kiểm tra tiêu đề và dòng nguồn
-              </summary>
-              <ul className="mt-3 max-h-80 overflow-y-auto space-y-1 text-sm">
-                {preview.headings.map((heading, index) => (
-                  <li key={index}>
-                    Dòng {heading.line}: {heading.heading}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          </>
+          <details className="sub-more"><summary>Danh sách tiêu đề chương ({preview.headings.length})</summary>
+            <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto text-sm">{preview.headings.map((heading, index) => <li key={index}><span className="text-muted-foreground">Dòng {heading.line}:</span> {heading.heading}</li>)}</ul>
+          </details>
         )}
-        <Confirm
-          label="Tạo / thay thế nhóm chương"
-          title="Tạo nhóm từ văn bản hiện tại?"
-          description="Nhóm mới thay thế các nhóm hiện có. Kiểm tra tên truyện, kích thước và biên chương ở trên trước khi tiếp tục."
-          disabled={w.busy || !canGroup}
-          onConfirm={() =>
-            void w.run("group", {
-              title: w.draft.title.trim(),
-              size: w.draft.groupSize,
-              method: preview?.requires_numeric_boundaries
-                ? "numeric_boundaries"
-                : "detected_chapters",
-              confirmation_fingerprint: preview?.confirmation_fingerprint ?? "",
-            })
-          }
-        />
-      </Panel>
-      <Panel
-        title="Xuất văn bản"
-        description="Tạo tệp bằng pipeline thật; tải xuống qua danh sách đầu ra được phép."
-      >
-        <div className="flex flex-wrap gap-2">
-          {(["txt", "json", "zip"] as const).map((format) => (
-            <Button
-              key={format}
-              variant="outline"
-              disabled={w.busy || !w.state?.text}
-              onClick={() => void w.run("export", { format })}
-            >
-              <FileText aria-hidden="true" />
-              Xuất {format.toUpperCase()}
-            </Button>
-          ))}
+        <div className="space-y-3">
+          <p className="field-label">Xuất văn bản</p>
+          <div className="flex flex-wrap gap-2">{(["txt", "json", "zip"] as const).map(format => (
+            <Button key={format} variant="outline" disabled={w.busy} onClick={() => void w.run("export", { format })}><FileText aria-hidden="true" />{format.toUpperCase()}</Button>
+          ))}</div>
+          <OutputDownloads files={w.state.outputs} />
         </div>
-        <OutputDownloads files={w.state?.outputs ?? []} />
-      </Panel>
-      {w.state?.groups.map((group) => (
-        <Panel
-          key={group.group_id}
-          title={group.label}
-          aside={
-            <Confirm
-              label="Xóa nhóm"
-              title={`Xóa ${group.label}?`}
-              description="Nhóm sẽ bị loại khỏi phiên và các hàng đợi; tệp đầu ra đã tạo không bị xóa khỏi ổ đĩa."
-              disabled={w.busy}
-              onConfirm={() =>
-                void w.run("delete_group", { group_id: group.group_id })
-              }
-            />
-          }
-        >
-          <MediaLink path={group.txt_path} label="Tải văn bản nhóm" />
-        </Panel>
-      ))}
+        {groups.length > 0 && (
+          <div className="space-y-2">
+            <p className="field-label">Nhóm hiện có</p>
+            <ul className="divide-y rounded-lg border">{groups.map(group => (
+              <li key={group.group_id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <span className="flex-1 text-sm">{group.label}</span>
+                <MediaLink path={group.txt_path} label="TXT" />
+                <Confirm variant="ghost" label="Xóa" title={`Xóa ${group.label}?`} description="Nhóm bị loại khỏi phiên; tệp đã tạo vẫn còn trên ổ đĩa." disabled={w.busy} onConfirm={() => void w.run("delete_group", { group_id: group.group_id })} />
+              </li>
+            ))}</ul>
+          </div>
+        )}
+      </More>
+    </StepPage>
+  );
+}
+
+function TextEditor({ w }: { w: Workspace }) {
+  return (
+    <div className="space-y-3">
+      <Field label="Sửa văn bản" hint={`${w.draft.text.length.toLocaleString("vi-VN")} ký tự. Lưu sẽ làm nhóm và đầu ra cũ không còn hợp lệ.`}>{id => (
+        <Textarea id={id} className="min-h-64 font-mono text-sm" value={w.draft.text} disabled={w.busy} onChange={event => w.setDraft({ text: event.target.value })} />
+      )}</Field>
+      <div className="flex flex-wrap gap-2">
+        <Confirm label="Lưu văn bản" title="Áp dụng văn bản đã sửa?" description="Nhóm, âm thanh, video phụ thuộc văn bản cũ sẽ không còn hợp lệ." disabled={w.busy || w.draft.text === w.state?.text} onConfirm={() => void w.run("edit", { text: w.draft.text })} />
+        <Confirm variant="ghost" label="Chuẩn hóa lại từ bản gốc" title="Chuẩn hóa lại?" description="Văn bản đã sửa và các nhóm phụ thuộc sẽ không còn hợp lệ." disabled={w.busy} onConfirm={() => void w.run("normalize")} />
+      </div>
+      {!!w.state?.diagnostics.length && <ul className="warning list-inside list-disc space-y-1">{w.state.diagnostics.map((item, index) => <li key={index}>{item.message}</li>)}</ul>}
     </div>
   );
 }

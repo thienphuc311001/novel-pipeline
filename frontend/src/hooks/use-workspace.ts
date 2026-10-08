@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import type {
   Draft,
   Job,
+  JobStep,
   JsonObject,
   Screen,
   Settings,
@@ -136,6 +137,7 @@ export function useWorkspace(): Workspace {
   const [connection, setConnection] =
     useState<Workspace["connection"]>("connecting");
   const actionLock = useRef(false);
+  const autosave = useRef<Promise<void> | null>(null);
   const draftRef = useRef(draft);
   const stateRef = useRef(state);
   const initialized = useRef(false);
@@ -182,6 +184,7 @@ export function useWorkspace(): Workspace {
       setError("");
       if (success) setNotice("");
       try {
+        if (autosave.current) await autosave.current;
         const result = await operation();
         if (success) setNotice(success);
         return result;
@@ -245,9 +248,40 @@ export function useWorkspace(): Workspace {
         const job = await api.run(action, options);
         setJobs((old) => [job, ...old.filter((row) => row.id !== job.id)]);
         return job;
-      }, "Đã đưa tác vụ vào hàng đợi. Theo dõi tiến độ bên dưới."),
+      }, "Đã bắt đầu."),
     [perform, uiPayload],
   );
+  // Client-side chain: start each following step only after the previous job completes.
+  const chain = useRef<JobStep[]>([]);
+  const chainJob = useRef<string | null>(null);
+  const [chainLeft, setChainLeft] = useState(0);
+  const runSteps = useCallback(
+    async (steps: JobStep[]) => {
+      const [first, ...rest] = steps;
+      if (!first) return;
+      const job = await run(first.action, first.options);
+      chain.current = job ? rest : [];
+      chainJob.current = job ? job.id : null;
+      setChainLeft(job ? rest.length : 0);
+    },
+    [run],
+  );
+  useEffect(() => {
+    const job = jobs.find((row) => row.id === chainJob.current);
+    if (!job || ["queued", "running", "stopping"].includes(job.status)) return;
+    const rest = chain.current;
+    chainJob.current = null;
+    chain.current = [];
+    setChainLeft(0);
+    // Not cancelled on re-render: the refs are already cleared, so frequent job updates must not drop the next step.
+    if (job.status === "completed" && rest.length)
+      window.setTimeout(() => void runSteps(rest), 300);
+  }, [jobs, runSteps]);
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(""), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
   const open = useCallback(
     async (id?: string) => {
       await perform(
@@ -322,13 +356,21 @@ export function useWorkspace(): Workspace {
     )
       return;
     const timeout = window.setTimeout(() => {
-      void perform(async () => {
-        const revision = draftRef.current;
-        const saved = await api.save(uiPayload());
-        if (revision === draftRef.current) dirty.current = false;
-        setState((old) => (old ? { ...old, session_id: saved.id } : old));
-        setSessions(await api.sessions());
-      });
+      // Background save: does not set `pending`, so controls stay enabled; perform() waits for it.
+      if (actionLock.current || autosave.current) return;
+      const revision = draftRef.current;
+      autosave.current = (async () => {
+        try {
+          const saved = await api.save(uiPayload());
+          if (revision === draftRef.current) dirty.current = false;
+          setState((old) => (old ? { ...old, session_id: saved.id } : old));
+          setSessions(await api.sessions());
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          autosave.current = null;
+        }
+      })();
     }, 1500);
     return () => window.clearTimeout(timeout);
   }, [draft, busy, error, connection, perform, uiPayload]);
@@ -345,6 +387,8 @@ export function useWorkspace(): Workspace {
     notice,
     connection,
     run,
+    runSteps,
+    chainLeft,
     perform,
     refresh,
     save,

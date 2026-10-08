@@ -1,5 +1,5 @@
-import { useId, type ReactNode } from "react";
-import { Download, Upload } from "lucide-react";
+import { useId, useState, type ReactNode } from "react";
+import { Download } from "lucide-react";
 import { api, downloadUrl } from "@/lib/api";
 import type { Group, OutputFile, Workspace } from "@/lib/types";
 import { Button } from "./ui/button";
@@ -20,26 +20,28 @@ export function Panel({
   description,
   children,
   aside,
+  className = "",
 }: {
   title: string;
   description?: string;
   children: ReactNode;
   aside?: ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="min-w-0 rounded-xl border bg-card shadow-sm">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b p-5">
+    <section className={`workflow-panel ${className}`}>
+      <header className="panel-header">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+          <h2>{title}</h2>
           {description && (
-            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+            <p className="panel-description">
               {description}
             </p>
           )}
         </div>
         {aside}
       </header>
-      <div className="space-y-5 p-5">{children}</div>
+      <div className="panel-body">{children}</div>
     </section>
   );
 }
@@ -54,12 +56,12 @@ export function Field({
 }) {
   const id = useId();
   return (
-    <div className="min-w-0 space-y-2">
-      <label htmlFor={id} className="block text-sm font-medium">
+    <div className="field">
+      <label htmlFor={id}>
         {label}
       </label>
       {children(id)}
-      {hint && <p className="text-sm text-muted-foreground">{hint}</p>}
+      {hint && <p className="field-hint">{hint}</p>}
     </div>
   );
 }
@@ -103,12 +105,12 @@ export function Confirm({
   description: string;
   onConfirm: () => void;
   disabled?: boolean;
-  variant?: "outline" | "destructive" | "ghost";
+  variant?: "default" | "outline" | "destructive" | "ghost";
 }) {
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button variant={variant} disabled={disabled}>
+        <Button variant={variant} size={variant === "default" ? "lg" : "default"} disabled={disabled}>
           {label}
         </Button>
       </AlertDialogTrigger>
@@ -140,132 +142,33 @@ export function AssetField({
   workspace: Workspace;
   accept?: string;
 }) {
+  const fileId = useId();
   return (
-    <div className="space-y-3">
-      <Field
-        label={label}
-        hint="Nhập đường dẫn tuyệt đối trên máy chạy máy chủ, hoặc tải tệp lên."
-      >
-        {(id) => (
-          <Input
-            id={id}
-            value={value}
-            disabled={workspace.busy}
-            onChange={(event) => onChange(event.target.value)}
-          />
-        )}
-      </Field>
-      <Field label={`Tải tệp: ${label}`}>
-        {(id) => (
-          <Input
-            id={id}
-            type="file"
-            accept={accept}
-            disabled={workspace.busy}
-            onChange={(event) => {
-              const files = Array.from(event.target.files ?? []);
-              if (files.length)
-                void workspace.perform(async () => {
-                  const result = await api.upload("assets", files);
-                  onChange(result.paths[0]);
-                }, "Đã tải tệp lên.");
-              event.target.value = "";
-            }}
-          />
-        )}
-      </Field>
+    <div className="space-y-3 rounded-lg border bg-muted/40 p-3">
+      <label htmlFor={fileId} className="block text-xs font-semibold">{label}</label>
+      {value && <p className="break-anywhere text-xs text-primary">{value.split(/[\\/]/).pop()}</p>}
+      <Input
+        id={fileId}
+        type="file"
+        accept={accept}
+        disabled={workspace.busy}
+        onChange={event => {
+          const files = Array.from(event.target.files ?? []);
+          if (files.length) void workspace.perform(async () => {
+            const result = await api.upload("assets",files);
+            onChange(result.paths[0]);
+          },"Đã tải tệp lên.");
+          event.target.value = "";
+        }}
+      />
+      <details className="disclosure">
+        <summary>Nhập đường dẫn tệp</summary>
+        <div><Field label={`Đường dẫn: ${label}`} hint="Đường dẫn tuyệt đối đến tệp trên máy.">{id => <Input id={id} value={value} disabled={workspace.busy} onChange={event => onChange(event.target.value)} />}</Field></div>
+      </details>
     </div>
   );
 }
-export function GroupSelection({ workspace }: { workspace: Workspace }) {
-  const groups = workspace.state?.groups ?? [];
-  const selected = workspace.draft.selected;
-  return (
-    <Panel
-      title="Hàng đợi nhóm chương"
-      description="Chỉ những nhóm được chọn mới được xử lý. Lựa chọn dùng chung cho các bước âm thanh, video và xuất bản."
-      aside={
-        <span className="badge">
-          {
-            selected.filter((id) =>
-              groups.some((group) => group.group_id === id),
-            ).length
-          }{" "}
-          / {groups.length} đã chọn
-        </span>
-      }
-    >
-      {!groups.length ? (
-        <p className="empty">
-          Chưa có nhóm chương. Hoàn tất bước chuẩn hóa và tạo nhóm trước.
-        </p>
-      ) : (
-        <>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              disabled={workspace.busy}
-              onClick={() =>
-                workspace.setDraft({
-                  selected: groups.map((group) => group.group_id),
-                })
-              }
-            >
-              Chọn tất cả
-            </Button>
-            <Button
-              variant="ghost"
-              disabled={workspace.busy}
-              onClick={() => workspace.setDraft({ selected: [] })}
-            >
-              Bỏ chọn
-            </Button>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            {groups.map((group) => (
-              <div
-                key={group.group_id}
-                className="min-w-0 rounded-lg border p-3"
-              >
-                <Toggle
-                  label={group.label}
-                  checked={selected.includes(group.group_id)}
-                  disabled={workspace.busy}
-                  onChange={(checked) =>
-                    workspace.setDraft({
-                      selected: checked
-                        ? [...selected, group.group_id]
-                        : selected.filter((id) => id !== group.group_id),
-                    })
-                  }
-                />
-                <p className="pl-9 text-sm text-muted-foreground">
-                  {group.chapters.length} chương ·{" "}
-                  {group.state.tts_status ?? "Chưa tạo âm thanh"}
-                </p>
-                <div className="mt-2 flex flex-wrap gap-2 pl-9">
-                  {group.state.thumbnail && (
-                    <span className="badge">Thumbnail</span>
-                  )}
-                  {group.state.audiobook && <span className="badge">MP3</span>}
-                  {group.state.video && <span className="badge">Video</span>}
-                  {group.state.youtube?.video_id && (
-                    <span className="badge">YouTube</span>
-                  )}
-                </div>
-                {group.state.last_error && (
-                  <p className="mt-2 text-sm text-destructive">
-                    {group.state.last_error}
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </Panel>
-  );
-}
+
 export function MediaLink({ path, label }: { path?: string; label: string }) {
   return path ? (
     <Button asChild variant="outline">
@@ -306,23 +209,25 @@ export function OutputDownloads({ files }: { files: OutputFile[] }) {
     </ul>
   );
 }
-export function GroupDetails({
-  group,
-  children,
-}: {
-  group: Group;
-  children: ReactNode;
+export function GroupInspector({ workspace, children }: {
+  workspace: Workspace;
+  children: (group: Group) => ReactNode;
 }) {
+  const groups = workspace.state?.groups ?? [];
+  const [inspected, setInspected] = useState("");
+  const current = groups.find(group => group.group_id === inspected)
+    ?? groups.find(group => group.state.last_error || group.state.failures?.length)
+    ?? groups.find(group => workspace.draft.selected.includes(group.group_id))
+    ?? groups[0];
+  if (!current) return null;
   return (
-    <details className="rounded-lg border bg-card p-4">
-      <summary className="cursor-pointer font-medium">
-        {group.label}{" "}
-        <span className="ml-2 text-sm font-normal text-muted-foreground">
-          {group.state.tts_status ?? "Chưa chạy"}
-        </span>
-      </summary>
-      <div className="mt-4 space-y-4">{children}</div>
-    </details>
+    <div className="space-y-4">
+      <Field label="Kiểm tra nhóm">{id => (
+        <select id={id} className="select" value={current.group_id} onChange={event => setInspected(event.target.value)}>
+          {groups.map(group => <option key={group.group_id} value={group.group_id}>{group.label}{group.state.last_error || group.state.failures?.length ? " · có lỗi" : ""}</option>)}
+        </select>
+      )}</Field>
+      <div key={current.group_id} className="space-y-4">{children(current)}</div>
+    </div>
   );
 }
-export const UploadIcon = Upload;
