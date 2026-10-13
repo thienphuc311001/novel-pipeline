@@ -1,0 +1,67 @@
+name: Agent Eval - Lesson 9
+
+'on':
+  pull_request:
+    paths:
+      - 'evals/**'
+      - '.github/workflows/agent-eval.yml'
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - '.claude/skills/**'
+      - '.agents/skills/**'
+      - 'skills/**'
+  workflow_dispatch:
+    inputs:
+      demo_fail:
+        description: 'Intentionally fail to practice reading CI logs'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-eval-files:
+    name: Validate Eval files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Validate Eval JSON
+        run: |
+          python -I -B - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('evals/numeral-smoke-check.json')
+          with path.open(encoding='utf-8') as handle:
+              json.load(handle)
+          print(f'PASS: {path} is valid JSON.')
+          PY
+
+      - name: Validate grader Python syntax
+        run: |
+          python -I -B - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path('evals/graders/numeral_smoke_check.py')
+          ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+          print(f'PASS: {path} has valid Python syntax (AST only).')
+          PY
+
+      - name: Demo failure (manual only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.demo_fail }}
+        run: |
+          echo '::error::Intentional failure: demo_fail=true. This is a CI log exercise.'
+          exit 1

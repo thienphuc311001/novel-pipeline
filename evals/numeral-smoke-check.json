@@ -1,0 +1,61 @@
+{
+  "name": "numeral-smoke-check",
+  "source": "novel-pipeline-v2: controller-owned immutable Git mirror; export the pinned commit into a fresh Agent-writable directory. This is a custom local Agent Eval contract, not a built-in Claude Code eval format.",
+  "from": "405c0251e2b5a06862cbf32f9acb9ebd53c11dee",
+  "prompt": "You are implementing an approved, small bug fix in novel-pipeline-v2. Read CLAUDE.md, AGENTS.md and the Approved intent/verify-smoke-check/{intent,spec,plan}.md in this checkout. Implementation of that approved plan is authorized for this isolated eval candidate. Fix the false positive in verify.py: a Chinese numeral mismatch must return False and make the real main()/script process return integer exit code 1; all four checks succeeding must return integer 0. Preserve all five numeral cases, four checks, their order, converter/chunking algorithms, callable interfaces and the existing Exception boundary. Keep the checker and main real in tests; inject converter faults at the symbol the checker actually looks up. Use the exact approved D3 messages, retain input/actual/expected diagnostics, and avoid claims of whole-application readiness. Add offline unittest.TestCase regression tests in tests/test_verify.py, including numeric-to-None and invalid-input-to-number mismatches, real main aggregation, exceptions and actual __main__/process exit. Update only the Tests and migration parity section of INSTALL.md with the root command, exit meanings and smoke/provider limits. Follow RED -> logic GREEN -> message GREEN -> bounded related regression, recording commands and actual results. Only verify.py, tests/test_verify.py and INSTALL.md may change; do not change expected fixtures, delete tests, modify approved documents, dependencies, UI, secrets or grading assets. Use the external interpreter/configuration supplied by the controller, without installing packages. No full suite, provider calls, build, commit, push or deploy. Report environmental errors separately from assertion failures. Leave logs/evidence outside the candidate repository and summarize the changed files and validation limits.",
+  "may_change": [
+    "verify.py",
+    "tests/test_verify.py",
+    "INSTALL.md"
+  ],
+  "checks": [
+    {
+      "id": "controller_boundary",
+      "kind": "controller_prerequisite",
+      "required": true,
+      "description": "Before Agent execution freeze this manifest and evals/graders/numeral_smoke_check.py outside the candidate, pin SHA-256 externally, and keep a trusted Git mirror inaccessible to the Agent. Stop the Agent before grading. Run the grader in an OS sandbox with no network/credentials, read-only inputs and isolated writable scratch. Python socket guards are not a security sandbox. A successful non-interactive Agent run receipt is required independently of grader output; calibration/reference-patch PASS is not Agent performance.",
+      "command": "<external-python> -I -B <frozen-controller-dir>/numeral_smoke_check.py --trusted-repo <trusted-mirror> --candidate <candidate-root> --python <external-python>",
+      "result_contract": "Require process exit 0 AND JSON verdict PASS plus controller prerequisites. Exit 1/FAIL is candidate failure. Exit 2/ERROR is unusable harness/environment evidence, never PASS. This JSON is data, not a runnable CI workflow."
+    },
+    {
+      "id": "scope",
+      "requirements": ["N3", "AR1"],
+      "description": "Compare bytes and executable modes with the pinned trusted tree, regardless of candidate commits/index/ignore rules. Reject missing, added or modified files outside the hardcoded allowlist, including local eval/grader changes. Reject symlinks, credential paths and unexpected artifacts without reading credential contents. Only .git bookkeeping is excluded."
+    },
+    {
+      "id": "preservation",
+      "requirements": ["R1", "R5", "N3", "AR1"],
+      "description": "Freeze the five production fixture pairs, callable interfaces, function-local converter binding, unrelated checker ASTs and real entry point. Restrict main changes to approved messages. This deliberately grades the approved minimal patch, not arbitrary equivalent runner redesigns."
+    },
+    {
+      "id": "behavior",
+      "requirements": ["R1", "R2", "R3", "R4", "R5", "R6", "AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT9"],
+      "description": "External literal oracle; real checker and main. Check true conversion/matching None, eight mismatch injections at the actual chapters.chinese_to_int lookup, five ordered calls, sticky failure, exact diagnostics, integer main 0/1, 3/4 and 4/4, each unrelated-check False/Exception, propagated converter exception and continued outer loop. Only unrelated checks use doubles in isolated aggregation scenarios. Restore faults and recheck real success."
+    },
+    {
+      "id": "process_success",
+      "requirements": ["R4", "R5", "R6", "R7", "AT8", "AT9"],
+      "description": "Run actual verify.py directly with all four real checks. External temporary sitecustomize probes a network guard and observes the real file's main frame under __main__, int return 0 and actual process exit 0. Explicit candidate cwd, UTF-8, fresh HOME/config, 30s timeout and process-group cleanup."
+    },
+    {
+      "id": "process_mismatch",
+      "requirements": ["R2", "R3", "R4", "R7", "AT8", "AT9"],
+      "description": "Trusted inline launcher changes only the child converter, then runpy executes the actual file as __main__. Require sentinel diagnostic, all real checks in order, summary 3/4, observed int main return 1 and natural process exit 1. Setup exits 78/79, missing guard/observer and traceback cannot masquerade as expected failure."
+    },
+    {
+      "id": "regression",
+      "requirements": ["R7", "N2", "AT2", "AT3", "AT8", "AR2"],
+      "description": "Run only candidate tests.test_verify in temp copies: GREEN with candidate verify.py, assertion-only RED after replacing just verify.py with trusted buggy source. Require all ten T1-T10 method identities in approved plan section 5, identical collected IDs between replays, no skips/expected failures/errors, real checker True/False and main int 0/1 observations, and RED Boolean/exit assertion evidence rather than only message differences. Deleting/renaming required methods fails this deliberately plan-specific eval. This posthoc replay demonstrates regression sensitivity, not the chronology of Agent TDD; controller logs are needed for that."
+    },
+    {
+      "id": "documentation",
+      "requirements": ["R8", "AR3"],
+      "description": "Mechanical gate: only append minimal guidance inside Tests and migration parity, retain all previous text, include python verify.py from root, 0/1 and exception meanings, application/TTS/YouTube limits. Technical Lead still reviews prose semantics; keyword checks alone do not prove documentation correctness."
+    },
+    {
+      "id": "no_runtime_file_changes",
+      "requirements": ["N1", "N2", "N4", "AT9"],
+      "description": "Recompare the candidate tree after independent probes. Fresh per-child temporary HOME/config, sanitized environment, bytecode disabled, bounded children and temporary regression copies. Python guard probes must block all four selected primitives, with zero target network attempts and active bindings. No full Python suite or paid Agent execution."
+    }
+  ]
+}
