@@ -51,6 +51,7 @@ export default function App() {
       </nav>
       <main id="main-content" tabIndex={-1} className="main">
         {!isPipeline && <a href={`#${lastStep.current}`} className="back-link"><ArrowLeft className="size-4" aria-hidden="true" />Quay lại các bước</a>}
+        <JobBar w={w} />
         {w.error && (
           <div role="alert" className="error-box flex flex-wrap items-center justify-between gap-3">
             <p className="min-w-0 flex-1">{w.error}</p>
@@ -62,8 +63,6 @@ export default function App() {
           <section className="step-card"><div className="step-head"><h1>{w.error ? "Máy chủ chưa sẵn sàng" : "Đang tải…"}</h1><p>Trang sẽ tự kết nối lại.</p></div></section>
         ) : <WorkspaceScreen screen={screen} w={w} />}
       </main>
-      <div aria-live="polite" aria-atomic="true">{w.notice && <p className="toast">{w.notice}</p>}</div>
-      <JobBar w={w} />
     </div>
   );
 }

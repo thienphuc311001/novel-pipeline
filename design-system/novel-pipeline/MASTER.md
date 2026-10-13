@@ -8,7 +8,7 @@ The interface is a local production workspace for operators processing many chap
 - Each step is one card: a short title, only the choices the step needs (chips, tap-to-select group grid, image pickers), and a footer with **Quay lại** and exactly one primary action. When the step is done, the primary becomes **Tiếp tục**.
 - Everything else (path inputs, text editor, chunk recovery, per-group inspection, exports, duplicate upload) lives in a collapsed **Tùy chọn nâng cao** section.
 - Multi-job steps run as one click via `runSteps` (import → normalize, thumbnail → TTS); the next job starts only after the previous one completes.
-- Jobs show in a bottom progress bar only while running or just failed; logs open on demand from it (or the Nhật ký button).
+- Jobs show in a bottom progress bar while running, then a persistent summary of the latest unclosed result. Every completed, failed, or cancelled job has a persistent result notification above the current step, with its action, status, timestamp, and a link to that job's details. Notifications stay until explicitly closed; closed job IDs persist in browser storage across reloads. Save/restore confirmations also stay until closed or replaced by another action. Logs remain accessible from the Nhật ký button after notifications are closed.
 - Group picker preselects groups not yet done for the current stage; selection is shared across audio, video and YouTube. Steps warn and offer to drop selected groups missing a prerequisite (audio for video, video for YouTube).
 - Autosave runs in the background and never disables controls; user actions wait for an in-flight save.
 - Main column max 768px; works down to 375px without horizontal scrolling.

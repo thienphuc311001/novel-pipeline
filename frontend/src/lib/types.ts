@@ -185,6 +185,7 @@ export interface Workspace {
   pending: boolean;
   error: string;
   notice: string;
+  dismissNotice: () => void;
   connection: "connecting" | "connected" | "reconnecting";
   run: (action: string, options?: JsonObject) => Promise<Job | undefined>;
   runSteps: (steps: JobStep[]) => Promise<void>;

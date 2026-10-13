@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "skipped",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/candidate.json",
+    "sha256": "fdc6a6a4849b747949b90ec15839a617804facca5755f606c87e87c559bff53a",
+    "bytes": 3988
+  },
+  "artifact": {
+    "path": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.html",
+    "sha256": "7f9e95845070d900088078adad28e625941a3e44aab3bd2cc58a139b33f58b6d",
+    "bytes": 757841
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "skipped"
+  },
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/chrome-unavailable",
+      "severity": "warning",
+      "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+      "subject": {
+        "artifact": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.html"
+      },
+      "evidence": {
+        "executable": null
+      },
+      "supportedFixes": [
+        "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.finalize.json",
+    "summaryReceipt": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.finalize-summary.json",
+    "browserCheckReceipt": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-09T06:12:51.692Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 796
+}

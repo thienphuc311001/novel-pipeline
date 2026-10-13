@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Loader2, Terminal, X } from "lucide-react";
+import { AlertCircle, Bell, CheckCircle2, CircleSlash, Loader2, Terminal, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { LogLine, Workspace } from "@/lib/types";
 import { Button } from "./ui/button";
@@ -34,8 +34,8 @@ export const statusLabels: Record<string, string> = {
   failed: "Thất bại / chưa đầy đủ",
   cancelled: "Đã hủy",
 };
-export function JobPanel({ w }: { w: Workspace }) {
-  const [selected, setSelected] = useState("");
+export function JobPanel({ w, initialJobId = "" }: { w: Workspace; initialJobId?: string }) {
+  const [selected, setSelected] = useState(initialJobId);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [logError, setLogError] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
@@ -249,40 +249,126 @@ export function JobPanel({ w }: { w: Workspace }) {
 
 const resumable = ["tts", "video", "upload", "thumbnail"];
 
-/** Bottom bar: only shows while something runs (or just failed). Full logs open on demand. */
+const dismissedJobsKey = "novel-pipeline.dismissed-job-notifications";
+
+/** Persistent results for every finished job, with an active progress bar and logs on demand. */
 export function JobBar({ w }: { w: Workspace }) {
   const [open, setOpen] = useState(false);
-  const [dismissed, setDismissed] = useState("");
+  const [detailId, setDetailId] = useState("");
+  const [dismissed, setDismissed] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(dismissedJobsKey) ?? "[]");
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const closeButton = useRef<HTMLButtonElement>(null);
   const active = w.jobs.find(job => ["queued", "running", "stopping"].includes(job.status));
-  const latest = w.jobs[0];
-  const failed = !active && latest?.status === "failed" && latest.id !== dismissed ? latest : undefined;
-  const job = active ?? failed;
-  const percent = job && job.progress.total > 0 ? Math.round(Math.min(100, (job.progress.done / job.progress.total) * 100)) : null;
+  const finished = w.jobs.filter(job => ["completed", "failed", "cancelled"].includes(job.status));
+  const notifications = finished.filter(job => !dismissed.includes(job.id));
+  const latestResult = notifications[0];
+  const latestFinished = finished[0];
+  const percent = active && active.progress.total > 0 ? Math.round(Math.min(100, Math.max(0, (active.progress.done / active.progress.total) * 100))) : null;
+  useEffect(() => {
+    try {
+      localStorage.setItem(dismissedJobsKey, JSON.stringify(dismissed));
+    } catch {
+      // Dismissal still works for this page when browser storage is unavailable.
+    }
+  }, [dismissed]);
+  useEffect(() => {
+    if (!open) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented && !document.querySelector('[role="alertdialog"]')) setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus({ preventScroll: true });
+    };
+  }, [open]);
+  const dismissJobs = (ids: string[]) => {
+    const currentIds = new Set(w.jobs.map(job => job.id));
+    setDismissed(old => [...new Set([...old.filter(id => currentIds.has(id)), ...ids])]);
+  };
+  const showDetails = (id = "") => {
+    setDetailId(id);
+    setOpen(true);
+  };
   return (
     <>
+      <p className="sr-only" role="status" aria-atomic="true">
+        {w.notice} {latestFinished ? `${actionLabels[latestFinished.action] ?? latestFinished.action}: ${statusLabels[latestFinished.status]}. ${new Date(latestFinished.finished_at ?? latestFinished.created_at).toLocaleString("vi-VN")}` : ""}
+      </p>
+      {(notifications.length > 0 || w.notice) && (
+        <section className="job-notifications" aria-labelledby="job-notifications-title">
+          <div className="job-notifications-head">
+            <div>
+              <h2 id="job-notifications-title"><Bell className="size-4" aria-hidden="true" />Thông báo kết quả <span className="badge">{notifications.length + (w.notice ? 1 : 0)}</span></h2>
+              <p>Thông báo được giữ lại cho đến khi bạn đóng.</p>
+            </div>
+            <Button variant="ghost" onClick={() => { dismissJobs(notifications.map(job => job.id)); w.dismissNotice(); }}>Đóng tất cả</Button>
+          </div>
+          <ul className="job-notification-list">
+            {w.notice && (
+              <li className="job-notification is-completed">
+                <CheckCircle2 className="job-notification-icon" aria-hidden="true" />
+                <p className="job-notification-copy">{w.notice}</p>
+                <Button variant="ghost" aria-label="Đóng thông báo" onClick={w.dismissNotice}><X aria-hidden="true" /></Button>
+              </li>
+            )}
+            {notifications.map(job => (
+              <li key={job.id} className={`job-notification is-${job.status}`}>
+                {job.status === "completed" ? <CheckCircle2 className="job-notification-icon" aria-hidden="true" /> : job.status === "failed" ? <AlertCircle className="job-notification-icon" aria-hidden="true" /> : <CircleSlash className="job-notification-icon" aria-hidden="true" />}
+                <div className="job-notification-copy">
+                  <p className="job-notification-title"><strong>{actionLabels[job.action] ?? job.action}</strong><span>{statusLabels[job.status]}</span></p>
+                  <p className="job-notification-message">{job.status === "failed" ? `${job.error || "Tác vụ chưa hoàn tất."}${resumable.includes(job.action) ? " Có thể chạy lại để làm tiếp phần còn thiếu." : ""}` : job.status === "cancelled" ? "Tác vụ đã dừng. Những đầu ra đã hoàn thành được giữ lại." : "Tác vụ đã hoàn tất thành công. Kết quả đã được cập nhật."}</p>
+                  <time dateTime={job.finished_at ?? job.created_at}>{new Date(job.finished_at ?? job.created_at).toLocaleString("vi-VN")}</time>
+                </div>
+                <div className="job-notification-actions">
+                  <Button variant="outline" aria-label={`Xem chi tiết ${actionLabels[job.action] ?? job.action}`} onClick={() => showDetails(job.id)}>Chi tiết</Button>
+                  <Button variant="ghost" aria-label={`Đóng thông báo ${actionLabels[job.action] ?? job.action}`} onClick={() => dismissJobs([job.id])}><X aria-hidden="true" /></Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {open && (
         <div className="log-sheet" role="dialog" aria-label="Tác vụ & nhật ký">
           <div className="log-sheet-inner">
-            <Button variant="ghost" className="log-sheet-close" aria-label="Đóng nhật ký" onClick={() => setOpen(false)}><X aria-hidden="true" /></Button>
-            <JobPanel w={w} />
+            <Button ref={closeButton} variant="ghost" className="log-sheet-close" aria-label="Đóng nhật ký" onClick={() => setOpen(false)}><X aria-hidden="true" /></Button>
+            <JobPanel key={detailId} w={w} initialJobId={detailId} />
           </div>
         </div>
       )}
-      {job ? (
-        <div className={`jobbar ${failed ? "is-failed" : ""}`} role="status">
-          {failed ? <AlertCircle className="size-5 shrink-0" aria-hidden="true" /> : <Loader2 className="size-5 shrink-0 animate-spin" aria-hidden="true" />}
+      {active ? (
+        <div className="jobbar" role="status">
+          <Loader2 className="size-5 shrink-0 animate-spin" aria-hidden="true" />
           <div className="jobbar-copy">
-            <p><strong>{actionLabels[job.action] ?? job.action}</strong>{failed ? " — chưa xong" : job.status === "stopping" ? " — đang dừng" : ""}{w.chainLeft > 0 && !failed ? <span className="jobbar-next"> · còn {w.chainLeft} bước</span> : null}</p>
-            <p className="jobbar-msg">{failed ? `${failed.error ?? "Có lỗi."}${resumable.includes(failed.action) ? " Bấm chạy lại để làm tiếp phần còn thiếu." : ""}` : job.progress.message || "Đang xử lý…"}</p>
-            {!failed && <div className="jobbar-track"><div style={{ width: `${percent ?? 8}%` }} className={percent === null ? "is-indeterminate" : ""} /></div>}
+            <p><strong>{actionLabels[active.action] ?? active.action}</strong>{active.status === "stopping" ? " — đang dừng" : ""}{w.chainLeft > 0 ? <span className="jobbar-next"> · còn {w.chainLeft} bước</span> : null}</p>
+            <p className="jobbar-msg">{active.progress.message || "Đang xử lý…"}</p>
+            <div className="jobbar-track"><div style={{ width: `${percent ?? 8}%` }} className={percent === null ? "is-indeterminate" : ""} /></div>
           </div>
-          {percent !== null && !failed && <span className="jobbar-pct">{percent}%</span>}
-          <Button variant="ghost" onClick={() => setOpen(!open)}>{open ? "Ẩn" : "Chi tiết"}</Button>
-          {active && <Confirm variant="ghost" label={active.status === "stopping" ? "Đang dừng…" : "Dừng"} title="Dừng tác vụ?" description="Phần đã xong được giữ lại. Có thể chạy tiếp sau." disabled={active.status === "stopping" || w.pending} onConfirm={() => void w.perform(() => api.stop(active.id), "Đã yêu cầu dừng.")} />}
-          {failed && <Button variant="ghost" aria-label="Ẩn thông báo lỗi" onClick={() => setDismissed(failed.id)}><X aria-hidden="true" /></Button>}
+          {percent !== null && <span className="jobbar-pct">{percent}%</span>}
+          <Button variant="ghost" onClick={() => showDetails(active.id)}>Chi tiết</Button>
+          <Confirm variant="ghost" label={active.status === "stopping" ? "Đang dừng…" : "Dừng"} title="Dừng tác vụ?" description="Phần đã xong được giữ lại. Có thể chạy tiếp sau." disabled={active.status === "stopping" || w.pending} onConfirm={() => void w.perform(() => api.stop(active.id), "Đã yêu cầu dừng.")} />
+        </div>
+      ) : latestResult ? (
+        <div className={`jobbar is-${latestResult.status}`}>
+          {latestResult.status === "completed" ? <CheckCircle2 className="size-5 shrink-0" aria-hidden="true" /> : latestResult.status === "failed" ? <AlertCircle className="size-5 shrink-0" aria-hidden="true" /> : <CircleSlash className="size-5 shrink-0" aria-hidden="true" />}
+          <div className="jobbar-copy">
+            <p><strong>{actionLabels[latestResult.action] ?? latestResult.action}</strong> — {statusLabels[latestResult.status]}</p>
+            <p className="jobbar-msg">{notifications.length > 1 ? `${notifications.length} kết quả đang được giữ trong Thông báo kết quả.` : "Thông báo được giữ lại cho đến khi bạn đóng."}</p>
+          </div>
+          <Button variant="ghost" onClick={() => showDetails(latestResult.id)}>Chi tiết</Button>
+          <Button variant="ghost" aria-label={`Đóng thông báo ${actionLabels[latestResult.action] ?? latestResult.action}`} onClick={() => dismissJobs([latestResult.id])}><X aria-hidden="true" /></Button>
         </div>
       ) : w.jobs.length > 0 && (
-        <button type="button" className="log-fab" onClick={() => setOpen(!open)}><Terminal className="size-4" aria-hidden="true" />Nhật ký</button>
+        <button type="button" className="log-fab" onClick={() => showDetails()}><Terminal className="size-4" aria-hidden="true" />Nhật ký</button>
       )}
     </>
   );

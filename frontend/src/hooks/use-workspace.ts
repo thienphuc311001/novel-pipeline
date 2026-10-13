@@ -248,7 +248,7 @@ export function useWorkspace(): Workspace {
         const job = await api.run(action, options);
         setJobs((old) => [job, ...old.filter((row) => row.id !== job.id)]);
         return job;
-      }, "Đã bắt đầu."),
+      }),
     [perform, uiPayload],
   );
   // Client-side chain: start each following step only after the previous job completes.
@@ -277,11 +277,7 @@ export function useWorkspace(): Workspace {
     if (job.status === "completed" && rest.length)
       window.setTimeout(() => void runSteps(rest), 300);
   }, [jobs, runSteps]);
-  useEffect(() => {
-    if (!notice) return;
-    const timeout = window.setTimeout(() => setNotice(""), 4000);
-    return () => window.clearTimeout(timeout);
-  }, [notice]);
+  const dismissNotice = useCallback(() => setNotice(""), []);
   const open = useCallback(
     async (id?: string) => {
       await perform(
@@ -385,6 +381,7 @@ export function useWorkspace(): Workspace {
     pending,
     error,
     notice,
+    dismissNotice,
     connection,
     run,
     runSteps,

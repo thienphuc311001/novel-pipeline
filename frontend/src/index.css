@@ -178,7 +178,26 @@
   .warning { background:var(--warning); color:var(--warning-foreground); @apply rounded-lg border p-3 text-sm leading-relaxed; }
   .error-box { @apply rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm leading-relaxed text-destructive; }
   .badge { @apply inline-flex items-center gap-1.5 rounded-md border bg-muted px-2 py-1 text-[11px] font-medium text-secondary-foreground; }
-  .toast { @apply fixed top-16 left-1/2 z-40 -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-sm text-background shadow-lg; }
+  .job-notifications { @apply overflow-hidden rounded-2xl border bg-card shadow-sm; }
+  .job-notifications-head { @apply flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3; }
+  .job-notifications-head h2 { @apply flex items-center gap-2 text-sm font-semibold; }
+  .job-notifications-head p { @apply mt-1 text-xs text-muted-foreground; }
+  .job-notification-list { @apply max-h-80 overflow-y-auto divide-y; }
+  .job-notification { @apply flex items-start gap-3 px-4 py-3; }
+  .job-notification.is-completed { @apply bg-accent/40; }
+  .job-notification.is-failed { @apply bg-destructive/5; }
+  .job-notification.is-cancelled { @apply bg-muted/50; }
+  .job-notification-icon { @apply mt-0.5 size-5 shrink-0 text-muted-foreground; }
+  .is-completed .job-notification-icon { @apply text-primary; }
+  .is-failed .job-notification-icon { @apply text-destructive; }
+  .job-notification-copy { @apply min-w-0 flex-1 text-sm; }
+  .job-notification-title { @apply flex flex-wrap items-baseline gap-x-2 gap-y-1; }
+  .job-notification-title span { @apply text-xs font-medium text-muted-foreground; }
+  .is-completed .job-notification-title span { @apply text-primary; }
+  .is-failed .job-notification-title span { @apply text-destructive; }
+  .job-notification-message { @apply mt-1 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground; }
+  .job-notification time { @apply mt-1 block text-xs tabular-nums text-muted-foreground; }
+  .job-notification-actions { @apply flex shrink-0 items-center gap-1; }
 
   /* Progressive disclosure */
   .more { @apply rounded-xl border; }
@@ -203,8 +222,10 @@
   /* Job bar & logs */
   .jobbar { @apply fixed inset-x-3 bottom-3 z-40 mx-auto flex max-w-3xl items-center gap-3 rounded-2xl border bg-card px-4 py-3 shadow-xl; }
   .jobbar > svg { @apply text-primary; }
+  .jobbar.is-completed { @apply border-primary/30 bg-accent; }
   .jobbar.is-failed { @apply border-destructive/40; }
   .jobbar.is-failed > svg { @apply text-destructive; }
+  .jobbar.is-cancelled > svg { @apply text-muted-foreground; }
   .jobbar-copy { @apply min-w-0 flex-1 space-y-1; }
   .jobbar-copy p { @apply truncate text-sm; }
   .jobbar-next { @apply font-normal text-muted-foreground; }
@@ -235,6 +256,7 @@
 }
 @keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
 @media (max-width:639px) {
+  .app { @apply pb-40; }
   .brand-name, .conn-label, .icon-link span { @apply hidden; }
   .stepper { @apply px-2 pt-4; }
   .step-label { @apply text-[11px]; }
@@ -246,6 +268,9 @@
   .jobbar { @apply flex-wrap gap-y-1; }
   .jobbar-copy { flex-basis:calc(100% - 2rem); }
   .jobbar-pct { @apply mr-auto ml-8 text-xs; }
+  .job-notification { @apply flex-wrap gap-y-2; }
+  .job-notification-copy { flex-basis:calc(100% - 2rem); }
+  .job-notification-actions { @apply ml-8; }
   input, textarea, select { font-size:16px !important; }
 }
 @media (prefers-reduced-motion:reduce) {

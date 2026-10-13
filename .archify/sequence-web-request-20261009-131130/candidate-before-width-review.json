@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "A Web Request, End to End",
+    "locale": "en",
+    "output": ".archify/sequence-web-request-20261009-131130/web-request.html",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    { "id": "browser", "type": "frontend", "label": "Browser", "sublabel": "page client" },
+    { "id": "resolver", "type": "cloud", "label": "DNS", "sublabel": "resolver" },
+    { "id": "gateway", "type": "security", "label": "Gateway", "sublabel": "HTTPS edge" },
+    { "id": "application", "type": "backend", "label": "App", "sublabel": "page handler" },
+    { "id": "storage", "type": "database", "label": "Database", "sublabel": "products" }
+  ],
+  "segments": [
+    { "from": 152, "to": 208, "label": "1. Resolve" },
+    { "from": 224, "to": 352, "label": "2. Connect" },
+    { "from": 368, "to": 560, "label": "3. Fetch page" }
+  ],
+  "messages": [
+    { "id": "dns-lookup", "from": "browser", "to": "resolver", "y": 160, "label": "Resolve host", "variant": "default" },
+    { "id": "dns-answer", "from": "resolver", "to": "browser", "y": 192, "label": "IP address", "variant": "return" },
+    { "id": "tcp-connect", "from": "browser", "to": "gateway", "y": 240, "label": "Open TCP connection", "variant": "default" },
+    { "id": "tcp-ready", "from": "gateway", "to": "browser", "y": 272, "label": "TCP established", "variant": "return" },
+    { "id": "tls-negotiate", "from": "browser", "to": "gateway", "y": 304, "label": "TLS handshake", "variant": "security" },
+    { "id": "tls-ready", "from": "gateway", "to": "browser", "y": 336, "label": "Secure connection ready", "variant": "return" },
+    { "id": "http-get", "from": "browser", "to": "gateway", "y": 384, "label": "GET /products (HTTPS)", "variant": "emphasis" },
+    { "id": "route-to-app", "from": "gateway", "to": "application", "y": 416, "label": "Route request", "variant": "default" },
+    { "id": "query-products", "from": "application", "to": "storage", "y": 448, "label": "Read products", "variant": "emphasis" },
+    { "id": "product-results", "from": "storage", "to": "application", "y": 480, "label": "Product rows", "variant": "return" },
+    { "id": "html-response", "from": "application", "to": "gateway", "y": 512, "label": "200 OK + HTML", "variant": "return" },
+    { "id": "browser-response", "from": "gateway", "to": "browser", "y": 544, "label": "200 OK + HTML (HTTPS)", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "browser", "from": 156, "to": 552, "type": "frontend" },
+    { "participant": "resolver", "from": 160, "to": 196, "type": "cloud" },
+    { "participant": "gateway", "from": 240, "to": 548, "type": "security" },
+    { "participant": "application", "from": 416, "to": 516, "type": "backend" },
+    { "participant": "storage", "from": 448, "to": 484, "type": "database" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Find and secure the server",
+      "items": [
+        "DNS maps the host name to an IP address.",
+        "TCP and TLS establish the connection; TLS encrypts HTTP traffic and authenticates the server.",
+        "Connection handshakes are summarized, with time flowing downward."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Build and display the page",
+      "items": [
+        "The gateway forwards the request; the app reads products and builds an HTML response.",
+        "The browser parses the HTML, fetches referenced assets, and renders the page.",
+        "Asset requests and error paths are omitted to keep this successful request clear."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Scope of this example",
+      "items": [
+        "An illustrative server-rendered page using HTTPS over TCP (HTTP/1.1 or HTTP/2).",
+        "Assumes a DNS lookup, a new connection, and a response that requires a database read.",
+        "Cached DNS, reused connections, cached responses, or HTTP/3 can change the path."
+      ]
+    }
+  ]
+}

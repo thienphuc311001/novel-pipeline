@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "fc6e8c54-1708-44e8-ba4f-b281c49d60f1",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/candidate.json",
+  "output": "/home/thienphuc/Projects/phuc/novel-pipeline-v2/.archify/sequence-web-request-20261009-131130/web-request.html",
+  "specification": {
+    "sha256": "2d308061d751d0e5d1843b682749b3002ed6bbf94ff336c2d636b69938517862",
+    "bytes": 4016
+  },
+  "artifact": {
+    "sha256": "1e430a70368743a9f422e3be3f31defa20835ac5d240b6d56e688fd1a70ecff6",
+    "bytes": 758087
+  }
+}
