@@ -286,9 +286,20 @@ print(json.dumps({'checks':checks,'python':__import__('sys').version.split()[0],
     launch = {k: result[k] for k in ("exit_status", "timed_out", "output_truncated")}
     if result["exit_status"] != 0 or result["timed_out"] or result["output_truncated"]:
         error = result["stderr"].lower()
+        # Export only fixed exception/operation identifiers and numeric
+        # locations from our trusted probe, never stderr prose or paths.
+        exception = re.search(r"(?m)^(PermissionError|FileNotFoundError|ModuleNotFoundError|ImportError|SyntaxError|OSError|ValueError|RuntimeError|AttributeError|NameError):", result["stderr"])
+        line = re.search(r'File "<string>", line (\d+)', result["stderr"])
+        errno_match = re.search(r"\[Errno (\d+)\]", result["stderr"])
+        launch["exception_type"] = exception.group(1) if exception else None
+        launch["payload_line"] = int(line.group(1)) if line else None
+        launch["errno"] = int(errno_match.group(1)) if errno_match else None
+        launch["operation"] = next((term for term in ("capset", "loopback", "rtm_newaddr", "prctl", "unknown option") if term in error), None)
         code = "SANDBOX_LAUNCH_FAILED"
         if result["timed_out"]:
             code = "SANDBOX_TIMEOUT"
+        elif "traceback" in error:
+            code = "SANDBOX_PYTHON_FAILED"
         elif "namespace" in error and ("permission denied" in error or "operation not permitted" in error):
             code = "SANDBOX_NAMESPACE_DENIED"
         elif "uid_map" in error or "uid map" in error:

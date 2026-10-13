@@ -131,7 +131,7 @@ def sanitized(report, exit_code):
     result = {"schema_version": 1, "name": "numeral-smoke-check",
         "failure_code": report.get("failure_code") if isinstance(report.get("failure_code"), str) and
             report["failure_code"] in ("SANDBOX_NAMESPACE_DENIED", "SANDBOX_UID_MAP_FAILED", "SANDBOX_MOUNT_FAILED",
-                "SANDBOX_EXEC_FAILED", "SANDBOX_LAUNCH_FAILED", "SANDBOX_TIMEOUT", "SANDBOX_BOUNDARY_FAILED") else None,
+                "SANDBOX_EXEC_FAILED", "SANDBOX_LAUNCH_FAILED", "SANDBOX_TIMEOUT", "SANDBOX_BOUNDARY_FAILED", "SANDBOX_PYTHON_FAILED") else None,
         "mode": report.get("mode") if report.get("mode") in ("dry-run", "live") else "UNKNOWN",
         "verdict": report.get("verdict") if report.get("verdict") in VERDICTS else "ERROR",
         "runner_exit_status": exit_code,
@@ -169,6 +169,15 @@ def sanitized(report, exit_code):
                                     for k in ("timed_out", "output_truncated")}
         rc = launch.get("exit_status")
         result["sandbox_launch"]["exit_status"] = rc if type(rc) is int and -256 <= rc <= 256 else None
+        exception = launch.get("exception_type")
+        result["sandbox_launch"]["exception_type"] = exception if exception in (
+            "PermissionError", "FileNotFoundError", "ModuleNotFoundError", "ImportError", "SyntaxError", "OSError",
+            "ValueError", "RuntimeError", "AttributeError", "NameError") else None
+        for key, maximum in (("payload_line", 512), ("errno", 256)):
+            value = launch.get(key)
+            result["sandbox_launch"][key] = value if type(value) is int and 1 <= value <= maximum else None
+        operation = launch.get("operation")
+        result["sandbox_launch"]["operation"] = operation if operation in ("capset", "loopback", "rtm_newaddr", "prctl", "unknown option") else None
     result["limits"] = {k: number(report.get("limits", {}).get(k)) for k in
                         ("agent_seconds", "tool_seconds", "grader_seconds", "max_turns", "max_budget_usd")}
     docs = report.get("current_document_status", {})

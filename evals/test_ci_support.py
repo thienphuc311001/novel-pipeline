@@ -156,6 +156,24 @@ class Contracts(unittest.TestCase):
         safe = ci.sanitized({"failure_code": marker, "sandbox_launch": {"stderr": marker}}, 2)
         self.assertNotIn(marker, json.dumps(safe))
 
+    def test_probe_python_exception_exports_only_type_and_line(self):
+        result = {"exit_status": 1, "timed_out": False, "output_truncated": False, "seconds": 0.1, "stdout": "",
+            "stderr": 'Traceback (most recent call last):\n  File "<string>", line 7, in <module>\nPermissionError: [Errno 13] SYNTHETIC_PRIVATE_VALUE\n'}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, controller = root / "candidate", root / "controller"
+            candidate.mkdir()
+            controller.mkdir()
+            with mock.patch.object(ci.runner.tools, "run_bounded", return_value=result):
+                with self.assertRaises(ci.runner.RunnerError) as caught:
+                    ci.runner.sandbox_probe("/usr/bin/bwrap", candidate, Path("/usr/bin/python3"), controller, [])
+        self.assertEqual(caught.exception.code, "SANDBOX_PYTHON_FAILED")
+        safe = ci.sanitized({"failure_code": caught.exception.code, **caught.exception.details}, 2)
+        self.assertEqual(safe["sandbox_launch"].get("exception_type"), "PermissionError")
+        self.assertEqual(safe["sandbox_launch"].get("payload_line"), 7)
+        self.assertEqual(safe["sandbox_launch"].get("errno"), 13)
+        self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", json.dumps(safe))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
