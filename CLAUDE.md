@@ -10,10 +10,52 @@
 
 ## Working Rules
 
-- Follow the current task and applicable approved intent/spec/plan. Document approval alone does not authorize execution.
+- Follow the current task and applicable approved intent/spec/plan. Explicit user approval authorizes the stage transitions below; a Markdown status field alone does not authorize execution.
 - Inspect Git status first. Preserve uncommitted changes; do not reset, stash, overwrite or commit unrelated work.
 - Preserve existing interfaces and data formats unless the task authorizes changes. Follow neighboring conventions; frontend uses strict TypeScript and semantic design tokens.
 - Treat `BUILD_PROMPT.md` as historical: flag conflicts with current requirements/code rather than adopting its outdated platform restrictions.
+
+## AI-Native SDLC — Automatic Stage Continuation
+
+Follow the project's Intent → Spec → Plan → Implementation
+→ Testing → PR Review workflow.
+
+### Automatic transitions
+
+When the user explicitly approves a stage:
+
+1. Intent Approved:
+   - Update intent.md to Approved.
+   - Immediately create spec.md as Draft.
+   - Validate Spec against the approved Intent.
+   - Stop only when Spec is ready for human review.
+
+2. Spec Approved:
+   - Update spec.md to Approved.
+   - Immediately create plan.md as Draft.
+   - Validate Plan against the approved Spec.
+   - Stop only when Plan is ready for human review.
+
+3. Plan Approved:
+   - Update plan.md to Approved.
+   - Execute implementation within the approved scope.
+   - Run relevant tests and fix failures.
+   - Perform code review and prepare a Pull Request.
+   - Stop for final human review and merge decision.
+
+### Continuation rules
+
+- Approval is permission to proceed to the next stage.
+- Do not stop immediately after updating document status.
+- Do not ask the user to say "continue" or repeat instructions.
+- Do not request approval for routine intermediate steps.
+- Never approve a stage on behalf of the user.
+- Never infer approval solely from a Markdown status field.
+- Preserve all existing uncommitted changes.
+- Pause only for genuine blockers, scope changes,
+  missing permissions, or required human decisions.
+- Never auto-merge or deploy.
+- If execution is interrupted, report the unfinished stage.
 
 ## Commands
 

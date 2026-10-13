@@ -52,15 +52,14 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap apparmor python3 python-is-python3 python3-pil python3-pytest git curl
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor apparmor-profiles python3 python-is-python3 python3-pil python3-pytest git curl
           /usr/bin/python3 -I -B -c 'import PIL.Image, pytest'
-          # Load the distro's purpose-built profile when supplied. Never disable
-          # AppArmor or global userns restrictions to make a sandbox test pass.
-          if [[ -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-          elif [[ -f /etc/apparmor.d/bwrap ]]; then
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap
-          fi
+          # Ubuntu ships this opt-in profile in apparmor-profiles, outside
+          # /etc. It permits bwrap setup; its unpriv_bwrap child denies caps.
+          # Keep AppArmor and global userns restrictions enabled.
+          test -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
           curl --fail --silent --show-error --location https://claude.ai/install.sh -o "$RUNNER_TEMP/claude-install.sh"
           bash "$RUNNER_TEMP/claude-install.sh" "$CLAUDE_VERSION" > "$RUNNER_TEMP/claude-install.log" 2>&1
           test "$("$HOME/.local/bin/claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
@@ -147,13 +146,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap apparmor python3 python-is-python3 python3-pil python3-pytest git curl
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor apparmor-profiles python3 python-is-python3 python3-pil python3-pytest git curl
           /usr/bin/python3 -I -B -c 'import PIL.Image, pytest'
-          if [[ -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-          elif [[ -f /etc/apparmor.d/bwrap ]]; then
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap
-          fi
+          test -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
           curl --fail --silent --show-error --location https://claude.ai/install.sh -o "$RUNNER_TEMP/claude-install.sh"
           bash "$RUNNER_TEMP/claude-install.sh" "$CLAUDE_VERSION" > "$RUNNER_TEMP/claude-install.log" 2>&1
           test "$("$HOME/.local/bin/claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
