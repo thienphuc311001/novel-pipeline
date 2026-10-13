@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("ci", Path(__file__).with_name("ci_support.py"))
 ci = importlib.util.module_from_spec(spec)
@@ -127,6 +128,33 @@ class Contracts(unittest.TestCase):
             self.assertEqual(summary["verdict"], "ERROR")
             self.assertTrue(summary["external_timeout"])
             self.assertIsNone(summary["model_invocation_attempted"])
+
+    def test_namespace_failure_has_safe_diagnostic(self):
+        # A real controller probe handles an external bwrap rejection. Only
+        # the OS process boundary is doubled; classification/export stay real.
+        result = {"exit_status": 1, "timed_out": False, "output_truncated": False,
+                  "seconds": 0.1, "stdout": "", "stderr": "bwrap: Creating new namespace failed: Permission denied"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, controller = root / "candidate", root / "controller"
+            candidate.mkdir()
+            controller.mkdir()
+            with mock.patch.object(ci.runner.tools, "run_bounded", return_value=result):
+                with self.assertRaises(ci.runner.RunnerError) as caught:
+                    ci.runner.sandbox_probe("/usr/bin/bwrap", candidate, Path("/usr/bin/python3"), controller, [])
+        self.assertEqual(getattr(caught.exception, "code", None), "SANDBOX_NAMESPACE_DENIED")
+        data = {"failure_code": caught.exception.code, "sandbox_launch": caught.exception.details["sandbox_launch"],
+                "reason": "SYNTHETIC_PRIVATE_VALUE"}
+        safe = ci.sanitized(data, 2)
+        self.assertEqual(safe.get("failure_code"), "SANDBOX_NAMESPACE_DENIED")
+        self.assertEqual(safe.get("sandbox_launch", {}).get("exit_status"), 1)
+        self.assertIsNone(safe["sandbox"]["net_namespace_differs"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", json.dumps(safe))
+
+    def test_unknown_failure_prose_never_exported(self):
+        marker = "SYNTHETIC_PRIVATE_VALUE"
+        safe = ci.sanitized({"failure_code": marker, "sandbox_launch": {"stderr": marker}}, 2)
+        self.assertNotIn(marker, json.dumps(safe))
 
 
 if __name__ == "__main__":

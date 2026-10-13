@@ -77,7 +77,10 @@ REQUIRED_FLAGS = ("--print", "--bare", "--restricted", "--tools", "--allowedTool
 
 
 class RunnerError(RuntimeError):
-    pass
+    def __init__(self, message, *, code=None, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 def ensure(condition, message):
@@ -280,9 +283,26 @@ print(json.dumps({'checks':checks,'python':__import__('sys').version.split()[0],
         prefix += "\nPORT=" + str(port) + "\n"
         result = tools.run_bounded(tools.sandbox_command(bwrap, candidate, python,
                                    ["{python}", "-I", "-B", "-c", prefix + source]), 15)
-    ensure(result["exit_status"] == 0 and not result["timed_out"], "sandbox probe could not start: " + result["stderr"][:300])
+    launch = {k: result[k] for k in ("exit_status", "timed_out", "output_truncated")}
+    if result["exit_status"] != 0 or result["timed_out"] or result["output_truncated"]:
+        error = result["stderr"].lower()
+        code = "SANDBOX_LAUNCH_FAILED"
+        if result["timed_out"]:
+            code = "SANDBOX_TIMEOUT"
+        elif "namespace" in error and ("permission denied" in error or "operation not permitted" in error):
+            code = "SANDBOX_NAMESPACE_DENIED"
+        elif "uid_map" in error or "uid map" in error:
+            code = "SANDBOX_UID_MAP_FAILED"
+        elif "mount" in error:
+            code = "SANDBOX_MOUNT_FAILED"
+        elif "execvp" in error:
+            code = "SANDBOX_EXEC_FAILED"
+        raise RunnerError("sandbox probe could not start: " + result["stderr"][:300],
+                          code=code, details={"sandbox_launch": launch})
     evidence = json.loads(result["stdout"])
-    ensure(evidence["checks"] and all(v is True for v in evidence["checks"].values()), "sandbox isolation probe failed")
+    if not evidence["checks"] or not all(v is True for v in evidence["checks"].values()):
+        raise RunnerError("sandbox isolation probe failed", code="SANDBOX_BOUNDARY_FAILED",
+                          details={"sandbox_launch": launch, "sandbox": evidence})
     ensure(tree_digest(candidate) == before, "sandbox modified candidate during preflight")
     return evidence
 
@@ -612,6 +632,11 @@ def execute(args):
     except (RunnerError, OSError, ValueError, KeyError, SyntaxError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
         attempted = run_root is not None and (run_root / 'controller/agent-started.json').exists()
         report.update(verdict="ERROR", reason=str(exc) or type(exc).__name__, model_invocation_attempted=attempted)
+        if isinstance(exc, RunnerError):
+            report["failure_code"] = exc.code
+            for key in ("sandbox_launch", "sandbox"):
+                if key in exc.details:
+                    report[key] = exc.details[key]
         if not attempted:
             report["model_called"] = False
         result_code = 2
