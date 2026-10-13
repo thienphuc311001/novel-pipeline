@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PyQt6.QtWidgets import QApplication
 
 from chapters import NormalizeOptions, build_patterns, normalize_chapters
 from config.settings import Settings
 from pipeline.document import PipelineDocument, PipelineStateError, StageKey
-from ui.main_window import MainWindow
+from tests.web_only_support import WebWorkspaceMixin
 
 
 RAW_TEXT = """第327章 流民不可怕
@@ -26,11 +21,7 @@ Chinese body 修炼者 修炼.
 """
 
 
-class PipelineDataFlowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class PipelineDataFlowTests(WebWorkspaceMixin, unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.settings = Settings()
@@ -95,16 +86,18 @@ class PipelineDataFlowTests(unittest.TestCase):
         self.assertEqual(document.chunks, [])
         self.assertIsNone(document.step3_artifacts)
 
-    def test_main_window_allows_chinese_text_in_step2(self):
-        window = MainWindow(self.settings)
-        self.addCleanup(window.close)
-        window.document = self.make_document()
-        window._set_job_editors("Novel", "Chương 327")
+    def test_service_allows_chinese_text_in_step2(self):
+        self.start_workspace()
+        source = self.root / "Novel.txt"
+        source.write_text(RAW_TEXT, encoding="utf-8")
+        self.run_job("import", {"paths": [str(source)]})
+        self.run_job("normalize")
 
-        window._continue_to_stage2()
-
-        self.assertEqual(window.tabs.currentIndex(), 1)
-        self.assertIn("修炼者", window.document.require_grouping_input())
+        state = self.state()
+        self.assertTrue(state["stages"]["normalize"]["ok"])
+        self.assertIn("修炼者", state["text"])
+        self.assertIn("修炼者", self.service.document.require_grouping_input())
+        self.assertFalse(state["grouping"].get("error"))
 
 
 if __name__ == "__main__":

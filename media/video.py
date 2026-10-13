@@ -1,8 +1,8 @@
 """Hardware-adaptive FFmpeg helpers for static-image audiobook videos.
 
-This module intentionally has no Qt imports.  Capability discovery and command
-construction can therefore be tested with injected command runners, while the
-desktop UI owns the asynchronous QProcess used for a full render.
+Capability discovery and command construction can be tested with injected
+command runners; ``pipeline.media_service.render_video`` runs the full render
+as a cancellable subprocess for web/CLI jobs.
 """
 
 from __future__ import annotations

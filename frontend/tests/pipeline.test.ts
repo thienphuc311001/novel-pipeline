@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { groupStatus, pipelineSummary, jobScreen } from "../src/lib/pipeline.ts";
+import { draftSchema, screenSchema, snapshotSchema } from "../src/lib/schemas.ts";
 import type { Group, Snapshot } from "../src/lib/types.ts";
 
 const snapshot = (groups: Group[] = []): Snapshot => ({
@@ -69,4 +70,48 @@ test("group status treats a missing MP3 as an error, not done", () => {
   const missing = group({tts_status:"Completed",audiobook:{path:"/tmp/a.mp3"}});
   const state = snapshot([missing]); state.missing_artifacts = ["/tmp/a.mp3"];
   assert.equal(groupStatus(state, missing, "tts"), "error");
+});
+
+// Session restoration inputs: a reopened web session and a baseline (desktop schema-v1) session.
+const uploadMetadata = {
+  title: "", description: "Mô tả chưa upload", tags: ["tag mới chưa upload"], category_id: "22",
+  privacy: "private", made_for_kids: false, playlist_id: null, publish_at: null, contains_synthetic_media: true,
+};
+
+test("reopened web session keeps the unuploaded tag draft beside saved story tags", () => {
+  const webDraft = { screen: "youtube", tagsText: "tag mới chưa upload", tagsEdited: true, selected: ["g2"], metadata: uploadMetadata };
+  const state = snapshotSchema.parse({
+    ...snapshot(), title: "Bắc Tống", youtube_tags: { current: ["tag đã upload"], history: { "Bắc Tống": ["tag đã upload"] } },
+    session_id: "a".repeat(32), ui_state: { tab: 4, web_group_size: 1, web_draft: webDraft },
+  });
+  const draft = draftSchema.parse(state.ui_state.web_draft);
+  assert.equal(draft.screen, "youtube");
+  assert.equal(draft.tagsText, "tag mới chưa upload");
+  assert.equal(draft.tagsEdited, true);
+  assert.deepEqual(draft.selected, ["g2"]);
+  assert.deepEqual(draft.metadata?.tags, ["tag mới chưa upload"]);
+  assert.equal(draft.metadata?.contains_synthetic_media, true);
+  assert.deepEqual(state.youtube_tags.current, ["tag đã upload"]);
+});
+
+test("baseline desktop session state remains a valid restoration source", () => {
+  const legacy = {
+    tab: 4, group_size: 4, custom_size: 1, cover_image: "/tmp/cover.png", qr_image: "/tmp/qr.png",
+    panels: { group4: { selected: "g1", checked: ["g1"] }, group5: { selected: "g2", checked: ["g2"] },
+      group6: { selected: "g2", checked: ["g2"] } },
+    upload_titles: { g2: "Bắc Tống | Chương 2" },
+    upload_metadata: uploadMetadata, group_upload_metadata: { ...uploadMetadata, description: "Nhóm" },
+  };
+  const state = snapshotSchema.parse({ ...snapshot(), ui_state: legacy });
+  assert.deepEqual(state.ui_state, legacy);
+  // The legacy fields restoreDraft maps (screen by tab, cover/qr, group6 checks, group metadata, titles).
+  const draft = draftSchema.parse({
+    screen: screenSchema.options[legacy.tab], cover: legacy.cover_image, qr: legacy.qr_image,
+    selected: legacy.panels.group6.checked, metadata: legacy.group_upload_metadata, titles: legacy.upload_titles,
+  });
+  assert.equal(draft.screen, "youtube");
+  assert.deepEqual(draft.metadata?.tags, ["tag mới chưa upload"]);
+  assert.equal(draft.metadata?.description, "Nhóm");
+  assert.deepEqual(draft.titles, { g2: "Bắc Tống | Chương 2" });
+  assert.equal(draftSchema.safeParse({ metadata: { tags: "not a list" } }).success, false);
 });

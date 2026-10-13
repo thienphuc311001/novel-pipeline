@@ -1,12 +1,9 @@
 """True page pixels with both required pictures in their header slots."""
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image, ImageDraw
 
@@ -14,6 +11,7 @@ from media.video import VideoValidationError
 from media.video_pages import (DEFAULT_STYLE, SIDE_PANEL_GAP, paste_side_image, render_page,
                                side_panel_boxes)
 from tests.support import create_narration_fixture, create_visuals_fixture
+from tests.web_only_support import STORY, WebWorkspaceMixin, write_image
 
 
 class SidePanelGeometryTests(unittest.TestCase):
@@ -199,49 +197,59 @@ class SidePanelTimelineTests(unittest.TestCase):
             self.assertNotEqual(hashes["qr"], hashes["cover"])
 
 
-class VideoPreviewTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PyQt6.QtWidgets import QApplication
-        cls.app = QApplication.instance() or QApplication([])
+class WebPreviewRegressionTests(WebWorkspaceMixin, unittest.TestCase):
+    """The web preview job renders the prepared narration with both real pictures."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.thumbnail = self.root / "thumbnail.jpg"
-        Image.new("RGB", (1280, 720), (70, 100, 140)).save(self.thumbnail)
-        self.visuals = create_visuals_fixture(self.root)
-        from ui.video_preview import VideoPreviewDialog, build_page_preview, first_page_text
-        self.dialog_cls = VideoPreviewDialog
-        self.build_page_preview = build_page_preview
-        self.first_page_text = first_page_text
+        self.start_workspace()
+        self.import_story()
+        self.group_id = self.group_story(1)[0]
+        self.media_ready([self.group_id])
+        self.cover, self.qr = self.page_inputs()
 
-    def test_build_page_preview_renders_a_real_full_frame(self):
-        path, note = self.build_page_preview(
-            self.root / "work", thumbnail=str(self.thumbnail), title="Truyện", chapter="Chương 1",
-            text="Một đoạn mẫu.", cover_image=self.visuals["cover"], qr_image=self.visuals["qr"])
-        self.assertEqual(note, "")
-        self.assertTrue(path.is_file())
-        with Image.open(path) as page:
+    def preview(self, **images):
+        options = {"group_id": self.group_id, "cover_image": self.cover, "qr_image": self.qr, **images}
+        return self.run_job("preview", options, expect=None)
+
+    def test_prepared_preview_renders_real_full_frame(self):
+        from media.video_pages import load_narration, page_chapter_label
+
+        target = Path(self.state()["groups"][0]["output_dir"]) / "page_preview.png"
+        missing = self.preview(qr_image=str(self.root / "missing-qr.png"))
+        self.assertEqual(missing["status"], "failed", missing)
+        self.assertFalse(target.exists())
+
+        job = self.preview()
+        self.assertEqual(job["status"], "completed", job)
+        self.assertTrue(target.is_file())
+        # The frame is the first prepared narration chunk, not a sample paragraph.
+        media = self.service.document.require_step4_outputs(self.group_id)
+        chunk = load_narration(media)[0]
+        self.assertEqual(chunk["text"], "Chương 1: Mưa")
+        self.assertIn(chunk["text"], STORY)
+        group = self.service.document.chapter_groups[0]
+        expected = self.root / "expected.png"
+        render_page(media.thumbnail_path, expected, title=media.title,
+                    chapter=page_chapter_label(chunk["chapter"], group.label), text=chunk["text"],
+                    left_image=self.cover, right_image=self.qr)
+        with Image.open(target) as page, Image.open(expected) as reference:
             self.assertEqual(page.size, (1920, 1080))
+            self.assertEqual(page.convert("RGB").tobytes(), reference.convert("RGB").tobytes())
+        published = target.read_bytes()
 
-    def test_build_page_preview_falls_back_to_sample_text(self):
-        path, note = self.build_page_preview(
-            self.root / "work", thumbnail=str(self.thumbnail), title="Truyện", chapter="Chương 1",
-            text="x " * 20000, cover_image=self.visuals["cover"], qr_image=self.visuals["qr"])
-        self.assertIn("sample paragraph shown", note)
-        self.assertTrue(path.is_file())
+        # A changed picture is repainted from the current file.
+        self.cover = write_image(self.root / "cover.png", (400, 400), (20, 160, 40))
+        job = self.preview()
+        self.assertEqual(job["status"], "completed", job)
+        self.assertNotEqual(target.read_bytes(), published)
+        published = target.read_bytes()
 
-    def test_first_page_text_uses_the_plan_or_the_sample(self):
-        self.assertEqual(self.first_page_text(self.root)[2], "sample text (no TTS plan yet)")
-
-    def test_dialog_shows_the_whole_rendered_frame(self):
-        dialog = self.dialog_cls()
-        dialog.open_for(lambda: (self.thumbnail, "caption line"))
-        self.addCleanup(dialog.close)
-        self.assertFalse(dialog._pixmap.isNull())
-        self.assertEqual(dialog.caption.text(), "caption line")
+        # Missing prepared inputs fail closed and keep the last valid preview.
+        Path(media.audiobook_path).unlink()
+        failed = self.preview()
+        self.assertEqual(failed["status"], "failed", failed)
+        self.assertEqual(target.read_bytes(), published)
+        self.assertEqual(sorted(path.name for path in target.parent.glob(".page_preview*")), [])
 
 
 if __name__ == "__main__":

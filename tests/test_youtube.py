@@ -306,5 +306,46 @@ class YouTubeUploadTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 5)
 
 
+class VideoMetadataUpdateTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.job = Path(temporary.name)
+        self.state = {'schema_version': 1, 'status': 'completed', 'video_id': 'abc123', 'channel_id': 'channel', 'metadata': UploadMetadata('Original').__dict__, 'playlist_id': 'playlist', 'thumbnail_uploaded': True}
+        Path(self.job, 'youtube_upload.json').write_text(json.dumps(self.state))
+        self.current = {'id': 'abc123', 'snippet': {'channelId': 'channel', 'title': 'Old', 'categoryId': '22', 'defaultLanguage': 'vi', 'defaultAudioLanguage': 'vi'}, 'status': {'license': 'creativeCommon', 'embeddable': False, 'publicStatsViewable': False, 'privacyStatus': 'private', 'containsSyntheticMedia': True}}
+
+    def test_metadata_update_preserves_unrelated_fields_and_frozen_insertion(self):
+        session = ScriptedSession(Response(data={'items': [self.current]}), Response(data={'id': 'abc123'}))
+        result = YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(self.job, 'channel', UploadMetadata('New', description='New description', contains_synthetic_media=True))
+        body = session.calls[1][2]['json']
+        self.assertEqual(session.calls[1][0], 'PUT')
+        self.assertEqual(body['snippet']['defaultLanguage'], 'vi')
+        self.assertEqual(body['snippet']['defaultAudioLanguage'], 'vi')
+        self.assertEqual(body['status']['license'], 'creativeCommon')
+        self.assertFalse(body['status']['embeddable'])
+        self.assertTrue(body['status']['containsSyntheticMedia'])
+        self.assertEqual(result['metadata']['title'], 'Original')
+        self.assertEqual(result['updated_metadata']['title'], 'New')
+        self.assertTrue(result['updated_metadata']['contains_synthetic_media'])
+        self.assertEqual(result['playlist_id'], 'playlist')
+
+    def test_metadata_update_can_clear_ai_disclosure(self):
+        session = ScriptedSession(Response(data={'items': [self.current]}), Response(data={'id': 'abc123'}))
+        result = YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(
+            self.job, 'channel', UploadMetadata('New', contains_synthetic_media=False),
+        )
+        self.assertIs(session.calls[1][2]['json']['status']['containsSyntheticMedia'], False)
+        self.assertIs(result['updated_metadata']['contains_synthetic_media'], False)
+        self.assertEqual(result['metadata'], self.state['metadata'])
+
+    def test_api_failure_keeps_local_record_unchanged(self):
+        session = ScriptedSession(Response(data={'items': [self.current]}), Response(403))
+        before = Path(self.job, 'youtube_upload.json').read_bytes()
+        with self.assertRaises(YouTubeUploadError):
+            YouTubeUploader(session, MemorySecrets(), retry_delay=0).update_video_metadata(self.job, 'channel', UploadMetadata('New'))
+        self.assertEqual(before, Path(self.job, 'youtube_upload.json').read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

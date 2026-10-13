@@ -5,7 +5,7 @@
 ## Context
 
 - Shared Python core: `pipeline/`, `chapters/`, `cleaning/`, `chunking/`, `filtering/`, `media/`, `config/`. Keep CLI/HTTP core independent of Qt.
-- `backend/` provides local FastAPI; `frontend/` uses React/Vite. `ui/` and `app.py` retain the optional PyQt6 interface.
+- `backend/` provides local FastAPI; `frontend/` uses React/Vite; `python -m pipeline` is the internal CLI. The PyQt6 desktop was removed; do not reintroduce Qt.
 - Read `README.md` and `INSTALL.md` for architecture/setup; for UI work, read `design-system/novel-pipeline/MASTER.md`.
 
 ## Working Rules
@@ -67,14 +67,14 @@ Run from repository root with the environment prepared per `INSTALL.md` (Python 
 | Frontend build | `npm --prefix frontend run build` | `frontend/package.json`; `INSTALL.md` |
 | Frontend tests | `npm --prefix frontend run test` | `frontend/package.json` |
 | Typecheck only | `npm --prefix frontend run typecheck` | `frontend/package.json` |
-| Python suite (POSIX shell) | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | `INSTALL.md` |
+| Python suite | `python -m pytest -q` | `INSTALL.md` |
 
 ## Safety
 
 - Do not read or expose `.env`, secrets, tokens, API keys or credential-file contents.
 - Before importing tests, select a fresh temporary `NOVEL_PIPELINE_CONFIG_DIR`; never inherit an override pointing at real user configuration.
 - TTS processing must preserve original/canonical text and media provenance.
-- Keep the API local-only; it has no multi-user authentication. Retain desktop until real TTS/video/YouTube parity is verified.
+- Keep the API local-only; it has no multi-user authentication. Offline tests, fixture media and browser smoke with fake providers do not establish real Edge-TTS/YouTube parity; report it as unverified.
 - Confirm dependencies and network requirements before broad test runs. Live provider checks must be within the authorized task.
 
 ## Known Gotchas
@@ -82,7 +82,7 @@ Run from repository root with the environment prepared per `INSTALL.md` (Python 
 - Dev: UI `5173`, API `8765`; built application: API `8000` by default.
 - Root has only the `dev` script. Use the frontend prefix for build/test/typecheck; `npm run dev` avoids global `npm link` registration.
 - Build includes typecheck. Build/typecheck can write output/cache; tests can write configuration. These are not read-only commands.
-- Python tests mix pytest and unittest; unittest discovery alone does not establish pytest-style collection. Full Python suite includes Qt.
+- Python tests mix pytest and unittest; unittest discovery alone does not establish pytest-style collection. Real media tests need FFmpeg/FFprobe on PATH.
 
 ## Verification
 

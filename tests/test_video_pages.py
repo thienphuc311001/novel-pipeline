@@ -403,15 +403,11 @@ class RealVfrTests(unittest.TestCase):
                         diff = ImageChops.difference(actual.convert('RGB'), expected.convert('RGB'))
                         self.assertLess(sum(ImageStat.Stat(diff).mean) / 3, 4)
 
-            # Exercise the Qt session with asynchronous legacy preparation and
-            # with an already prepared grouped timeline; both must remain VFR.
-            import os
-            os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-            from PyQt6.QtWidgets import QApplication
-            from PyQt6.QtTest import QTest
-            from media.video import VideoCapabilities
-            from ui.main_window import _VideoRenderSession
-            app = QApplication.instance() or QApplication([])
+            # Exercise the headless render path (as the web video job runs it) with a
+            # freshly probed audio mode and with an already prepared grouped timeline;
+            # the first verified encoder fails and the fallback must remain VFR.
+            from media.video import VideoCapabilities, mp3_copy_is_safe
+            from pipeline.media_service import render_video
             bad = EncoderCandidate('test_failure', 'test', verified=True)
             caps = VideoCapabilities('ffmpeg', 'ffprobe', 'test', 'Linux', candidates=[bad, candidate])
             def fail_first(*args, **kwargs):
@@ -419,30 +415,18 @@ class RealVfrTests(unittest.TestCase):
                 if args[1].name == 'test_failure':
                     command[command.index('-c:v') + 1] = 'missing_test_encoder'
                 return command
-            for prepared in (None, timeline):
-                if prepared is not None:
-                    prepared = prepare_video_timeline(media, 'ffprobe')
+            for audio_copy in (None, True):
+                prepared = prepare_video_timeline(media, 'ffprobe')
+                if audio_copy is None:
+                    audio_copy = mp3_copy_is_safe(root / 'audiobook.mp3', 'ffmpeg', 'ffprobe', temp_dir=root)
                 media.video_path = str(root / 'session.mp4')
-                completed, errors = [], []
-                session = _VideoRenderSession(caps, media, timeline.audiobook_duration,
-                                              audio_copy=None if prepared is None else True, timeline=prepared)
-                session.completed.connect(completed.append)
-                session.failed.connect(errors.append)
                 with patch('media.video.build_video_command', side_effect=fail_first):
-                    session.start()
-                    for _ in range(1000):
-                        app.processEvents()
-                        if completed or errors:
-                            break
-                        QTest.qWait(10)
-                self.assertFalse(errors, errors)
-                self.assertEqual(len(completed), 1)
-                self.assertEqual(completed[0].encoder, 'libx264')
-                self.assertEqual(len(completed[0].attempt_errors), 1)
-                self.assertEqual(completed[0].source, source_fingerprint(media))
-                validate_timeline_timestamps(root / 'session.mp4', session.timeline, 'ffprobe')
-                session.deleteLater()
-                app.processEvents()
+                    completed = render_video(caps, media, prepared, audio_copy=audio_copy,
+                                             cancel_event=Event(), progress=lambda *args: None)
+                self.assertEqual(completed.encoder, 'libx264')
+                self.assertEqual(len(completed.attempt_errors), 1)
+                self.assertEqual(completed.source, source_fingerprint(media))
+                validate_timeline_timestamps(root / 'session.mp4', prepared, 'ffprobe')
 
     def test_single_page_holds_to_the_end_at_44100hz(self):
         import wave
