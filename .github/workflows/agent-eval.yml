@@ -7,13 +7,16 @@ name: Agent Eval - Lesson 9
       - '.github/workflows/agent-eval.yml'
       - 'CLAUDE.md'
       - 'AGENTS.md'
-      - '.claude/skills/**'
-      - '.agents/skills/**'
-      - 'skills/**'
+      - '.claude/**'
   workflow_dispatch:
     inputs:
+      run_live:
+        description: 'Request paid Opus eval; still subject to all readiness and approval gates'
+        type: boolean
+        required: false
+        default: false
       demo_fail:
-        description: 'Intentionally fail to practice reading CI logs'
+        description: 'Intentionally fail validation to practice reading CI logs'
         type: boolean
         required: false
         default: false
@@ -21,47 +24,188 @@ name: Agent Eval - Lesson 9
 permissions:
   contents: read
 
+concurrency:
+  group: agent-eval-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CLAUDE_VERSION: '2.1.296'
+  # Official API ID verified 2026-10-13, not a CLI alias:
+  # https://platform.claude.com/docs/en/models/overview
+  OPUS_MODEL: 'claude-opus-5-5'
+  PYTHONDONTWRITEBYTECODE: '1'
+
 jobs:
   validate-eval-files:
-    name: Validate Eval files
+    name: Validate / Dry-run (no model)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - name: Checkout repository including baseline history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v6
+      - name: Install system runtime and pinned Claude CLI (no authentication)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor python3 python-is-python3 python3-pil python3-pytest git curl
+          /usr/bin/python3 -I -B -c 'import PIL.Image, pytest'
+          # Load the distro's purpose-built profile when supplied. Never disable
+          # AppArmor or global userns restrictions to make a sandbox test pass.
+          if [[ -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          elif [[ -f /etc/apparmor.d/bwrap ]]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
+          curl --fail --silent --show-error --location https://claude.ai/install.sh -o "$RUNNER_TEMP/claude-install.sh"
+          bash "$RUNNER_TEMP/claude-install.sh" "$CLAUDE_VERSION" > "$RUNNER_TEMP/claude-install.log" 2>&1
+          test "$("$HOME/.local/bin/claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          # /usr interpreter is mounted by the sandbox; hostedtoolcache is not.
+          echo "/usr/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate manifest, frozen grader digest and Python syntax
+        run: /usr/bin/python3 -I -B evals/ci_support.py validate
+
+      - name: Require exact frozen task baseline (no fallback to HEAD)
+        run: |
+          git --no-replace-objects cat-file -e '405c0251e2b5a06862cbf32f9acb9ebd53c11dee^{commit}' || { echo '::error::Pinned baseline absent from fetched refs; publish the approved baseline ref first.'; exit 2; }
+
+      - name: Exercise CI verdict contracts (synthetic only)
+        run: /usr/bin/python3 -I -B evals/test_ci_support.py
+
+      - name: Dry-run with filesystem, network and actual CLI dispatcher probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/eval-private" "$RUNNER_TEMP/eval-runs"
+          set +e
+          timeout --signal=TERM --kill-after=10s 5m python -I -B evals/run_eval.py --dry-run --model opus --python /usr/bin/python3 --output-dir "$RUNNER_TEMP/eval-runs" > "$RUNNER_TEMP/eval-private/report.json" 2> "$RUNNER_TEMP/eval-private/stderr.txt"
+          status=$?
+          set -e
+          echo "$status" > "$RUNNER_TEMP/eval-private/exit-code"
+          /usr/bin/python3 -I -B evals/ci_support.py publish --raw "$RUNNER_TEMP/eval-private/report.json" --exit-file "$RUNNER_TEMP/eval-private/exit-code" --mode dry-run --output "$RUNNER_TEMP/eval-safe"
+
+      - name: Publish sanitized evidence even on setup or validation error
+        if: ${{ always() }}
+        run: |
+          /usr/bin/python3 -I -B evals/ci_support.py publish --raw "$RUNNER_TEMP/eval-private/report.json" --exit-file "$RUNNER_TEMP/eval-private/exit-code" --mode dry-run --output "$RUNNER_TEMP/eval-safe" || true
+
+      - name: Upload selected report fields only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          python-version: '3.14'
-
-      - name: Validate Eval JSON
-        run: |
-          python -I -B - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path('evals/numeral-smoke-check.json')
-          with path.open(encoding='utf-8') as handle:
-              json.load(handle)
-          print(f'PASS: {path} is valid JSON.')
-          PY
-
-      - name: Validate grader Python syntax
-        run: |
-          python -I -B - <<'PY'
-          import ast
-          from pathlib import Path
-
-          path = Path('evals/graders/numeral_smoke_check.py')
-          ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
-          print(f'PASS: {path} has valid Python syntax (AST only).')
-          PY
+          name: numeral-smoke-check-validate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eval-safe/summary.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Demo failure (manual only)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.demo_fail }}
         run: |
-          echo '::error::Intentional failure: demo_fail=true. This is a CI log exercise.'
+          echo '::error::Intentional failure: demo_fail=true.'
           exit 1
+
+  live-eval:
+    name: Live Opus Eval (currently blocked by profile loading)
+    needs: validate-eval-files
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: agent-eval-live
+    permissions:
+      contents: read
+      actions: read # Read environment protection metadata; no write scopes.
+    steps:
+      - name: Checkout trusted default-branch controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Environment reviewer protection (metadata only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/eval-private"
+          # No secrets endpoint. Require reviewer, prevent self-review and
+          # disallow admin bypass; unavailable protection refuses paid execution.
+          gh api "repos/$GITHUB_REPOSITORY/environments/agent-eval-live" > "$RUNNER_TEMP/eval-private/environment.json"
+          /usr/bin/python3 -I -B evals/ci_support.py environment-gate --raw "$RUNNER_TEMP/eval-private/environment.json"
+
+      - name: Install system runtime and pinned Claude CLI (no API credential)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor python3 python-is-python3 python3-pil python3-pytest git curl
+          /usr/bin/python3 -I -B -c 'import PIL.Image, pytest'
+          if [[ -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          elif [[ -f /etc/apparmor.d/bwrap ]]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
+          curl --fail --silent --show-error --location https://claude.ai/install.sh -o "$RUNNER_TEMP/claude-install.sh"
+          bash "$RUNNER_TEMP/claude-install.sh" "$CLAUDE_VERSION" > "$RUNNER_TEMP/claude-install.log" 2>&1
+          test "$("$HOME/.local/bin/claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          echo "/usr/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Independently preflight and require verified current Agent profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/eval-runs" "$RUNNER_TEMP/eval-private"
+          set +e
+          timeout --signal=TERM --kill-after=10s 5m python -I -B evals/run_eval.py --dry-run --model opus --python /usr/bin/python3 --output-dir "$RUNNER_TEMP/eval-runs" > "$RUNNER_TEMP/eval-private/report.json" 2> "$RUNNER_TEMP/eval-private/stderr.txt"
+          status=$?
+          set -e
+          echo "$status" > "$RUNNER_TEMP/eval-private/exit-code"
+          /usr/bin/python3 -I -B evals/ci_support.py publish --raw "$RUNNER_TEMP/eval-private/report.json" --exit-file "$RUNNER_TEMP/eval-private/exit-code" --mode dry-run --output "$RUNNER_TEMP/eval-safe"
+          /usr/bin/python3 -I -B evals/ci_support.py live-gate --raw "$RUNNER_TEMP/eval-private/report.json"
+
+      - name: Explicit paid execution with dedicated CI authentication
+        id: paid
+        # This step cannot run while profile live_eligible/verified_loaded=false.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_EVAL_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$ANTHROPIC_API_KEY" || { echo '::error::Dedicated CI authentication absent.'; exit 2; }
+          set +e
+          timeout --signal=TERM --kill-after=10s 23m python -I -B evals/run_eval.py --live --model "$OPUS_MODEL" --python /usr/bin/python3 --output-dir "$RUNNER_TEMP/eval-runs" --max-turns 20 --agent-timeout 900 --tool-timeout 30 --grader-timeout 300 --max-budget-usd 1 > "$RUNNER_TEMP/eval-private/report.json" 2> "$RUNNER_TEMP/eval-private/stderr.txt"
+          status=$?
+          set -e
+          echo "$status" > "$RUNNER_TEMP/eval-private/exit-code"
+          /usr/bin/python3 -I -B evals/ci_support.py publish --raw "$RUNNER_TEMP/eval-private/report.json" --exit-file "$RUNNER_TEMP/eval-private/exit-code" --mode live --output "$RUNNER_TEMP/eval-safe"
+
+      - name: Export safe evidence (no raw logs, candidate, credentials or controller)
+        if: ${{ always() }}
+        env:
+          PAID_OUTCOME: ${{ steps.paid.outcome }}
+        shell: bash
+        run: |
+          mode=dry-run
+          if [[ "$PAID_OUTCOME" == 'success' || "$PAID_OUTCOME" == 'failure' || "$PAID_OUTCOME" == 'cancelled' ]]; then mode=live; fi
+          /usr/bin/python3 -I -B evals/ci_support.py publish --raw "$RUNNER_TEMP/eval-private/report.json" --exit-file "$RUNNER_TEMP/eval-private/exit-code" --mode "$mode" --output "$RUNNER_TEMP/eval-safe" || true
+
+      - name: Upload bounded sanitized report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: numeral-smoke-check-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eval-safe/summary.json
+          if-no-files-found: error
+          retention-days: 7
