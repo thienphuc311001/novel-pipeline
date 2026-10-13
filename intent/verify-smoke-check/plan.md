@@ -4,7 +4,7 @@
 
 **Project:** novel-pipeline-v2
 
-**Status:** Draft — Lesson 7 review revision; awaiting owner re-approval
+**Status:** Approved — Lesson 7 review revision; Product Owner/Technical Lead, 2026-10-13; approval digest recorded outside this file
 
 **Goal:** Phát hiện mismatch số Hán qua Boolean, tổng kết và exit code thật; giới hạn thông báo ở phạm vi smoke checks.
 
