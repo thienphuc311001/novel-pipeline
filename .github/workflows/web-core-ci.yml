@@ -48,8 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/web-core-python/reports"
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg iproute2 util-linux
+          sudo apt-get update -qq 2>&1 | tee "$RUNNER_TEMP/web-core-python/reports/system-setup.log"
+          sudo apt-get install -y --no-install-recommends ffmpeg iproute2 util-linux 2>&1 | tee -a "$RUNNER_TEMP/web-core-python/reports/system-setup.log"
           {
             python --version
             ffmpeg -version | head -n 1
@@ -63,7 +63,7 @@ jobs:
       - name: Install web/core and test dependencies (no provider call)
         run: |
           set -euo pipefail
-          python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1
+          python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1 2>&1 | tee "$RUNNER_TEMP/web-core-python/reports/python-setup.log"
           python -m pip freeze > "$RUNNER_TEMP/web-core-python/reports/dependencies.txt"
 
       - name: Run full pytest with private config and loopback-only network
