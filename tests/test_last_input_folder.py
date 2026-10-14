@@ -2,25 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PyQt6.QtWidgets import QApplication
 
 from config.settings import Settings
-from ui.main_window import MainWindow
+from tests.web_only_support import WebWorkspaceMixin
 
 
-class LastInputFolderTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class LastInputFolderTests(WebWorkspaceMixin, unittest.TestCase):
     def test_setting_round_trip_and_invalid_folder_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -53,32 +43,26 @@ class LastInputFolderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Step 1"):
                 settings.require_output_dir("")
 
-    def test_file_picker_starts_at_and_updates_last_folder(self):
-        with tempfile.TemporaryDirectory() as directory:
-            initial_dir = Path(directory) / "initial"
-            selected_dir = Path(directory) / "selected"
-            initial_dir.mkdir()
-            selected_dir.mkdir()
-            selected_file = selected_dir / "novel.txt"
-            selected_file.write_text("Chương 1\nNội dung.", encoding="utf-8")
+    def test_import_updates_and_persists_last_folder(self):
+        self.start_workspace()
+        initial_dir = self.root / "initial"
+        selected_dir = self.root / "selected"
+        initial_dir.mkdir()
+        selected_dir.mkdir()
+        selected_file = selected_dir / "novel.txt"
+        selected_file.write_text("Chương 1\nNội dung.", encoding="utf-8")
+        response = self.client.put("/api/settings", json={"last_input_dir": str(initial_dir)})
+        self.assertEqual(response.status_code, 200, response.text)
 
-            settings = Settings(last_input_dir=str(initial_dir))
-            window = MainWindow(settings)
-            with (
-                patch(
-                    "ui.main_window.QFileDialog.getOpenFileNames",
-                    return_value=([str(selected_file)], ""),
-                ) as picker,
-                patch.object(settings, "save", return_value=Path(directory) / "config.json") as save,
-            ):
-                window._on_load()
+        self.run_job("import", {"paths": [str(selected_file)]})
 
-            self.assertEqual(picker.call_args.args[2], str(initial_dir))
-            self.assertEqual(settings.last_input_dir, str(selected_dir))
-            save.assert_called_once_with()
-            self.assertEqual(window.document.original_input_text, "Chương 1\nNội dung.")
-            self.assertEqual(window.document.source_path, str(selected_file.resolve()))
-            self.assertEqual(window.document.input_directory, str(selected_dir.resolve()))
+        self.assertEqual(self.service.settings.last_input_dir, str(selected_dir.resolve()))
+        self.assertEqual(self.client.get("/api/settings").json()["last_input_dir"], str(selected_dir.resolve()))
+        self.assertEqual(Settings.load(self.config_dir / "config.json").last_input_dir, str(selected_dir.resolve()))
+        state = self.state()
+        self.assertEqual(state["original_text"], "Chương 1\nNội dung.")
+        self.assertEqual(state["source_path"], str(selected_file.resolve()))
+        self.assertEqual(state["input_directory"], str(selected_dir.resolve()))
 
 
 if __name__ == "__main__":

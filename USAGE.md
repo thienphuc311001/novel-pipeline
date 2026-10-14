@@ -32,14 +32,15 @@ cancellation and remains in `stopping` until the worker exits. Completed files
 and resume state are preserved. An incomplete batch is reported as failed with
 per-group results, never as a successful job.
 
-Use the sessions screen to save/open/new workspaces. Existing desktop sessions
-remain readable; web drafts use separate `web_*` fields. Reopening restores the
-last workflow step, text, selected groups and upload drafts without starting a job.
+Use the sessions screen to save/open/new workspaces. Sessions saved by the
+former desktop interface remain readable; web drafts use separate `web_*`
+fields. Reopening restores the last workflow step, text, selected groups and
+upload drafts without starting a job.
 Drafts auto-save after 1.5 seconds of idle editing; use Save before closing a tab.
 Settings stay global for accounts/preferences and are restored per story for
 processing options. TXT/JSON exports honor the filename template and encoding;
 ZIP exports honor folder-per-range and manifest options.
-Do not run desktop and web simultaneously against the same output folders.
+Do not run two servers or CLI jobs simultaneously against the same output folders.
 
 ### CLI
 
@@ -77,12 +78,12 @@ API documentation is available at `/docs`. This unauthenticated, filesystem-
 capable API is deliberately loopback-only. Unexpected Host/Origin values are
 rejected; it is not a remotely hosted service.
 
-## Legacy desktop workflow
+## Workflow stages
 
-Install `requirements-desktop.txt` and run `python app.py`. The stage descriptions
-below describe the existing desktop controls and shared processing semantics.
-PyQt6 is retained while real external-service parity is being established;
-translation/dictionary are not restored by this migration.
+The stage descriptions below cover the shared processing semantics behind the
+web screens and CLI actions; some control names date from the removed PyQt6
+desktop and may be labelled differently in the browser. Translation/dictionary
+features are not part of the application.
 
 ## Stage 1: Input & Normalize
 
@@ -229,7 +230,7 @@ Create the Step 4 video, then click **Continue to Step 5**. The current MP4 and
 Step 3 thumbnail appear automatically. Step 5 never selects a separate video or
 renders another MP4.
 
-Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings → YouTube** once; see [installation setup](INSTALL.md#optional-youtube-desktop-oauth). Click **Connect YouTube Account** and authorize in your system browser. The panel shows the connected email and channel. **Disconnect** removes the local saved credentials; it does not remove previously uploaded videos or job records.
+Choose the downloaded Google **Desktop app** OAuth client JSON in **Settings → YouTube** once; see [installation setup](INSTALL.md#youtube-desktop-oauth). Click **Connect YouTube Account** and authorize in your system browser. The panel shows the connected email and channel. **Disconnect** removes the local saved credentials; it does not remove previously uploaded videos or job records.
 
 Review the default `Novel Title | Chapter` title, description, comma-separated tags, category, Private/Unlisted/Public visibility, made-for-kids setting, and optional playlist. Scheduled publication requires **Private** and a future publishing time. Enter the time in your local time zone; the API receives UTC. The app validates metadata before starting network upload.
 
@@ -288,21 +289,17 @@ Settings are auto-saved to:
 
 ## Diagnostics
 
-**📋 Log** in the toolbar (or `Ctrl+L`) opens the shared log window:
+**Nhật ký** opens the job panel with each job's result and live log:
 - Stage completion status
 - Warnings (missing chapters, duplicates)
 - Errors (encoding issues, parse failures)
 - Info (chapters detected, chunks created)
 
-The window is modeless and shared by all five steps: it keeps every line when
-you close it, reopen it, or switch steps, and it never blocks or interrupts a
-running job. `Auto-scroll` follows new lines, `Clear` empties the buffer, and
-the retained line count follows **Max log lines** in Settings.
-
-Read-only generated text panels, previews, group details, failure dialogs,
-YouTube results, and the shared log window include **Copy all**. The action
-copies the complete plain text with its original line breaks; editable title,
-description, JSON, and TTS fields remain ordinary editors.
+The panel is shared by all five steps: logs stay available after a job
+finishes, when you close and reopen the panel, or switch steps, and opening it
+never blocks or interrupts a running job. **Tự cuộn nhật ký** follows new lines,
+and the retained line count follows **Max log lines** in Settings. The same
+lines are available from `GET /api/jobs/{id}/logs`.
 
 **Example:**
 ```
@@ -370,13 +367,6 @@ Each grouped job has this layout:
 
 Legacy single-job files remain untouched; they are not automatically migrated
 or deleted. Grouped jobs are restored only from a matching chapter manifest.
-
-## Keyboard Shortcuts
-
-- `Ctrl+O` - Load files (planned)
-- `Ctrl+S` - Save settings (planned)
-- `Ctrl+E` - Export (planned)
-- `Ctrl+Q` - Quit (planned)
 
 ## Advanced Features
 

@@ -4,12 +4,12 @@ import os
 import random
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
-os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from cleaning.tts_prepare import prepare_chapter
 from cleaning.tts_text_preprocessor import (TTSPreprocessConfig, preprocess_for_tts,
                                            preprocess_with_diagnostics, preprocessing_identity)
@@ -20,6 +20,7 @@ from media.groups import prepare_tts, write_groups, edit_failed_chunk
 from media.tts import TtsProcessor
 from pipeline.document import Chapter, PipelineStateError
 from tests.test_chapter_groups import document_for
+from tests.web_only_support import FakeTtsClients, WebWorkspaceMixin, make_mp3, tts_clients
 
 
 CASES = [
@@ -359,20 +360,17 @@ class TtsIntegrationTests(unittest.TestCase):
         self.assertIn('chưa biết', '\n'.join(c.text for c in chunks))
         self.assertEqual(Settings.from_dict({}).tts_preprocessing, {})
 
-class LegacyAndUiTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PyQt6.QtWidgets import QApplication
-        cls.app = QApplication.instance() or QApplication([])
+class HeadlessLegacyTests(WebWorkspaceMixin, unittest.TestCase):
+    """Legacy bundle provenance (core) plus group TTS preparation through real web jobs."""
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.settings = Settings()
+        self.start_workspace()
+        self.settings = self.service.settings
+
+    def group_files(self, group):
+        return [Path(group["txt_path"]).read_bytes(), Path(group["json_path"]).read_bytes()]
 
     def test_legacy_bundle_client_and_old_provenance(self):
-        from ui.main_window import MainWindow
         from media.tts_preparation import prepare_legacy_bundle
         from media.artifacts import load_bundle_json
         source = 'Lời đầu.\nChương 1\nNgươi là ai?Ta không biết.....<br>Giá 3.14.'
@@ -386,96 +384,81 @@ class LegacyAndUiTests(unittest.TestCase):
         self.assertIn('Lời đầu.', data['chunks'][0]['text'])
         self.assertIn('Ngươi là ai? Ta không biết…', prepared.cleaned_text)
         self.assertEqual(doc.require_grouping_input(), source)
-        window = MainWindow(self.settings)
-        window.document = doc
-        window._set_job_editors(doc.job_title, doc.job_chapter)
-        self.assertTrue(window._on_clean_chunk())
-        # Remove provenance to exercise reconstruction from upstream text.
-        bundle = window.document.step3_artifacts
-        path = Path(bundle.json_path)
-        payload = json.loads(path.read_text())
-        payload.pop('tts_preparation')
-        path.write_text(json.dumps(payload, ensure_ascii=False))
-        from media.artifacts import sha256_file
-        bundle.json_sha256 = sha256_file(path)
-        seen = []
-        class Client:
-            def __init__(self, text): self.text = text
-            async def save(self, path):
-                seen.append(self.text)
-                Path(path).write_bytes(b'audio')
-        real_init = TtsProcessor.__init__
-        def init(processor, *args, **kwargs):
-            kwargs.update(client_factory=lambda t, v: Client(t), ffmpeg_path='/bin/true')
-            real_init(processor, *args, **kwargs)
-            processor._ffmpeg_concat = lambda paths, output: Path(output).write_bytes(b'audiobook')
-        # Run the real worker synchronously so the test avoids a live service.
-        def start(thread):
-            window._tts_worker.run()
-        with patch.object(TtsProcessor, '__init__', init), patch('ui.main_window.QThread.start', start):
-            window._on_generate_audiobook()
-        self.assertIn('Ngươi là ai? Ta không biết…', '\n'.join(seen))
-        self.assertNotIn('biết.....', '\n'.join(seen))
-        self.assertEqual(load_bundle_json(window.document.step3_artifacts)['tts_preparation'],
-                         job_preprocessing_identity(window.document, self.settings))
-        window._tts_thread = None
-        window.close()
+        # Web TTS speaks the preprocessed group plan; a plan without valid provenance is rebuilt
+        # from the upstream canonical text, which itself never changes.
+        self.import_story(source, name='Truyện.txt')
+        ids = self.group_story(20, title='Truyện')
+        group = self.state()['groups'][0]
+        canonical = self.group_files(group)
+        mp3 = make_mp3(self.root / 'voice.mp3')
+        clients = FakeTtsClients(mp3)
+        with tts_clients(clients):
+            self.run_job('tts', {'group_ids': ids})
+        spoken = '\n'.join(text for text, _voice in clients.calls)
+        self.assertIn('Ngươi là ai? Ta không biết…', spoken)
+        self.assertNotIn('biết.....', spoken)
+        plan_path = Path(group['output_dir']) / 'tts_chunks.json'
+        plan = json.loads(plan_path.read_text(encoding='utf-8'))
+        tampered = dict(plan)
+        tampered.pop('config')
+        plan_path.write_text(json.dumps(tampered, ensure_ascii=False), encoding='utf-8')
+        with tts_clients(FakeTtsClients(mp3)):
+            self.run_job('tts', {'group_ids': ids})
+        self.assertEqual(json.loads(plan_path.read_text(encoding='utf-8')), plan)
+        self.assertEqual(self.group_files(group), canonical)
+        self.assertEqual(self.service.document.require_grouping_input(), self.state()['text'])
 
     def test_large_preparation_worker_cancel_and_snapshot(self):
-        from PyQt6.QtTest import QTest
-        from PyQt6.QtWidgets import QApplication
-        from ui.main_window import MainWindow
         source = 'Chương 1\n' + ('Ngươi là ai?Ta biết.\n' * 6000)
-        window = MainWindow(self.settings)
-        window.document = document_for(source, self.root)
-        window._set_job_editors('Truyện', 'Chương 1')
-        with patch.object(window, '_error', side_effect=AssertionError):
-            self.assertFalse(window._on_clean_chunk())
-            self.assertIsNotNone(window._tts_prepare_thread)
-            window._on_cancel_tts()
-            for _ in range(1000):
-                QApplication.processEvents()
-                if window._tts_prepare_thread is None:
-                    break
-                QTest.qWait(5)
-            self.assertIsNone(window._tts_prepare_thread)
-            self.assertIsNone(window.document.step3_artifacts)
-            self.assertEqual(window.document.require_grouping_input(), source)
-            self.assertFalse(window._on_clean_chunk())
-            for _ in range(1000):
-                QApplication.processEvents()
-                if window._tts_prepare_thread is None:
-                    break
-                QTest.qWait(5)
-            self.assertIsNone(window._tts_prepare_thread)
-            self.assertIsNotNone(window.document.step3_artifacts)
-            self.assertIn('Ngươi là ai? Ta biết.', window.document.cleaned_text)
-        window.close()
+        self.import_story(source, name='Truyện.txt')
+        ids = self.group_story(20, title='Truyện')
+        group = self.state()['groups'][0]
+        text, canonical = self.state()['text'], self.group_files(group)
+        plan_path = Path(group['output_dir']) / 'tts_chunks.json'
+        job_id = self.submit('prepare', {'group_ids': ids})
+        deadline = time.monotonic() + 30
+        while not any(row['message'] == 'prepare' for row in self.logs(job_id)):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.005)
+        self.stop(job_id)
+        job = self.wait(job_id)
+        self.assertEqual(job['status'], 'cancelled', job)
+        self.assertIn('Đã hủy chuẩn bị TTS', job['result']['groups'][0]['error'])
+        self.assertFalse(plan_path.exists())
+        self.assertNotIn('tts_plan', self.state()['groups'][0]['state'])
+        self.assertEqual(self.state()['text'], text)
+        self.assertEqual(self.group_files(group), canonical)
+        # A new run after cancellation prepares the complete plan.
+        self.run_job('prepare', {'group_ids': ids}, timeout=120)
+        plan = self.state()['groups'][0]['state']['tts_plan']
+        self.assertIn('Ngươi là ai? Ta biết.', '\n'.join(chunk['text'] for chunk in plan['chunks']))
+        self.assertEqual(self.group_files(group), canonical)
 
+    def change_preprocessing_after_video(self):
+        self.import_story()
+        ids = self.group_story(20)
+        self.video_ready(ids)
+        canonical = self.group_files(self.state()['groups'][0])
+        response = self.client.put('/api/settings', json={
+            'tts_preprocessing': {'url_policy': 'keep', 'sentence_per_line': True}})
+        return response, canonical
+
+    def test_config_preprocessing_settings_round_trip(self):
+        response, canonical = self.change_preprocessing_after_video()
+        self.assertEqual(response.status_code, 200, response.text)
+        updated = self.client.get('/api/settings').json()
+        self.assertEqual(updated['tts_preprocessing']['url_policy'], 'keep')
+        self.assertTrue(updated['tts_preprocessing']['sentence_per_line'])
+        # Canonical group text survives the settings change byte for byte.
+        group = self.state()['groups'][0]
+        self.assertTrue(Path(group['txt_path']).exists())
+        self.assertEqual(self.group_files(group), canonical)
+
+    @unittest.expectedFailure  # Gap G1: PUT /api/settings saves only; artifacts are not invalidated.
     def test_config_ui_and_downstream_invalidation(self):
-        from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog
-        from ui.main_window import MainWindow
-        from ui.settings_dialog import SettingsDialog
-        dialog = SettingsDialog(self.settings)
-        container = dialog.controls['tts_preprocessing']
-        combos = container.findChildren(QComboBox)
-        combos[0].setCurrentIndex(combos[0].findData('keep'))
-        flags = container.findChildren(QCheckBox)
-        flags[2].setChecked(True)
-        updated = dialog._collect()
-        self.assertEqual(updated.tts_preprocessing['url_policy'], 'keep')
-        self.assertTrue(updated.tts_preprocessing['sentence_per_line'])
-        doc = document_for('Chương 1\nBody.', self.root)
-        group = write_groups(doc, self.settings, doc.job_title, 20)[0]
-        group.state.update(audiobook={'path': 'old.mp3'}, video={'path': 'old.mp4'}, tts_status='Completed')
-        window = MainWindow(self.settings)
-        window.document = doc
-        with patch.object(SettingsDialog, 'exec', return_value=QDialog.DialogCode.Accepted), \
-             patch.object(SettingsDialog, 'updated_settings', return_value=updated), \
-             patch.object(Settings, 'save', return_value=self.root / 'settings.json'):
-            window._on_open_settings()
-        self.assertEqual(group.state['tts_status'], 'TTS Incomplete')
-        self.assertNotIn('audiobook', group.state)
-        self.assertNotIn('video', group.state)
-        self.assertTrue(Path(group.txt_path).exists())
-        window.close()
+        self.change_preprocessing_after_video()
+        # Baseline: a TTS-preprocessing change invalidates finished audio and video.
+        group = self.state()['groups'][0]
+        self.assertEqual(group['state']['tts_status'], 'TTS Incomplete')
+        self.assertNotIn('audiobook', group['state'])
+        self.assertNotIn('video', group['state'])

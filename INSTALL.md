@@ -6,7 +6,7 @@
 - Node.js 22.12+ and npm for React development or building the local UI.
 - FFmpeg and FFprobe on PATH for audiobook merging and video rendering.
 - Optional GPU drivers for VA-API, Quick Sync, NVENC, AMF or VideoToolbox. Verified encoders fall back to CPU.
-- A browser. PyQt6 is needed only for the retained legacy desktop interface.
+- A current desktop browser (Firefox, Chrome, Edge or Safari). The PyQt6 desktop interface was removed; no Qt packages are needed.
 
 ## Local web application
 
@@ -42,9 +42,9 @@ by default; the dev launcher does not require that port to be free.
 
 Open the Vite URL on port 5173; its `/api` proxy connects to `127.0.0.1:8765`. The API accepts only local Host/Origin values. Do not expose this filesystem-capable service to a LAN or the internet; it intentionally has no multi-user authentication.
 
-## CLI without Qt
+## Internal CLI
 
-The smaller dependency set supports Python/CLI processing without FastAPI or PyQt6:
+The smaller dependency set supports Python/CLI processing without FastAPI:
 
 ```bash
 python -m pip install -r requirements-core.txt
@@ -52,16 +52,7 @@ python -m pipeline run /path/story.txt --title "My story" --group-size 20 --prep
 python -m pipeline sessions
 ```
 
-`Ctrl+C` requests cooperative cancellation. Completed media and resumable job files remain on disk.
-
-## Optional legacy desktop
-
-```bash
-python -m pip install -r requirements-desktop.txt
-python app.py
-```
-
-The desktop and web workspace share normalization/loading/settings validation and use the same session format and media provenance. Keep this interface until real TTS/video/YouTube comparisons in your environment are complete. Translation and dictionary features remain intentionally absent.
+`Ctrl+C` requests cooperative cancellation. Completed media and resumable job files remain on disk. Translation and dictionary features remain intentionally absent.
 
 ## Configuration and inputs
 
@@ -81,20 +72,26 @@ Access/refresh tokens and resumable upload URLs stay in the OS credential store.
 
 Google may require OAuth verification/API auditing and may restrict uploads from unverified projects to private visibility. See [desktop OAuth setup](https://developers.google.com/identity/protocols/oauth2/native-app) and [videos.insert restrictions](https://developers.google.com/youtube/v3/docs/videos/insert).
 
-## Tests and migration parity
+## Tests
 
-The complete suite also exercises the retained Qt interface:
+The suite needs no Qt. Media regressions use the real local FFmpeg/FFprobe on PATH:
 
 ```bash
-python -m pip install -r requirements-desktop.txt pytest httpx
-QT_QPA_PLATFORM=offscreen python -m pytest -q
+python -m pip install -r requirements.txt pytest httpx
+python -m pytest -q
+npm --prefix frontend ci
+npm --prefix frontend run test
 npm --prefix frontend run build
 ```
 
-Tests do not establish external-provider parity. Check a complete real Edge-TTS
-run, resume/error handling, and a private upload on your test YouTube channel
-before removing PyQt6. A rendered video using fixture audio proves local
-rendering/muxing, not speech-provider or YouTube success.
+Use a fresh temporary `NOVEL_PIPELINE_CONFIG_DIR` when running tests so they never touch your real configuration.
+
+The desktop was removed on offline/fake-provider regression, real local FFmpeg
+rendering and a browser smoke against fake providers. Those checks do not
+establish real Edge-TTS or YouTube behavior: a rendered video using fixture audio
+proves local rendering/muxing only. Before relying on a new environment, check a
+complete real Edge-TTS run, resume/error handling and a private upload on a test
+YouTube channel yourself.
 
 ## Troubleshooting
 
@@ -102,5 +99,4 @@ rendering/muxing, not speech-provider or YouTube success.
 - **Cannot import backend/FastAPI:** activate the same virtual environment in which `requirements.txt` was installed; launch from the repository root.
 - **Cannot connect UI:** run `np run dev`, then open port 5173. Its dev API uses port 8765, independently of other apps on port 8000. The built application (`python -m backend`) uses port 8000 by default. Use localhost or 127.0.0.1, not a LAN hostname.
 - **Missing FFmpeg/FFprobe:** install the system `ffmpeg` package and verify both binaries are on PATH.
-- **Missing PyQt6 / xcb errors:** these apply only to `python app.py`; install `requirements-desktop.txt` and the platform Qt plugins. They do not affect the CLI/web core.
 - **Configuration permission error:** point `NOVEL_PIPELINE_CONFIG_DIR` at a writable persistent directory.

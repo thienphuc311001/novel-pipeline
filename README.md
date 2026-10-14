@@ -1,6 +1,6 @@
 # Novel Pipeline v2
 
-A local novel-processing application with a Qt-free Python core, FastAPI job manager, and React + Vite + shadcn/ui workspace. The legacy PyQt6 interface remains available during incremental migration.
+A local novel-processing application with a Qt-free Python core, FastAPI job manager, and React + Vite + shadcn/ui workspace. The former PyQt6 desktop interface has been removed; the browser workspace and the internal `python -m pipeline` CLI are the supported entry points.
 
 ## Purpose
 
@@ -25,8 +25,8 @@ Raw TXT / ZIP
 
 ### Saved work sessions
 
-- **Phiên làm việc** lists saved sessions with the story title, last workflow step, and save time. The desktop also opens its picker at startup; the web uses the sessions screen.
-- **Lưu phiên** saves immediately. Web drafts auto-save after 1.5 seconds of idle editing and job completion; desktop saves every 30 seconds and on normal exit. Save before closing a browser tab. If a job is running, stop it and wait for the worker to exit before closing the server.
+- **Phiên làm việc** lists saved sessions with the story title, last workflow step, and save time, on the sessions screen.
+- **Lưu phiên** saves immediately. Web drafts auto-save after 1.5 seconds of idle editing and job completion. Save before closing a browser tab. If a job is running, stop it and wait for the worker to exit before closing the server.
 - Reopening a session restores edited text, chapter groups, processing settings, selected groups, upload drafts, and the open step. It does not automatically restart an upload or batch.
 - Existing audio/video files stay in their original job folders. Missing files are reported; normal provenance checks still reject changed or incomplete outputs. Completed per-group job state is recovered from disk when it is newer than the session snapshot.
 - Session JSON files are stored in `sessions/` under the app configuration directory (normally `~/.config/novel-pipeline-v2/sessions/`, or beneath `NOVEL_PIPELINE_CONFIG_DIR`). Google credentials remain in the OS keyring.
@@ -102,7 +102,6 @@ See [YouTube setup and recovery](USAGE.md#step-5-youtube-upload) before first us
 - Python 3.11+
 - Node.js 22.12+ and npm (to develop/build the React interface)
 - FFmpeg and FFprobe (for joining MP3 chunks and creating/validating video)
-- PyQt6 only for the optional legacy desktop interface
 
 ### Local web setup
 
@@ -127,16 +126,11 @@ Open `http://127.0.0.1:5173`; Vite proxies `/api` to the dedicated dev FastAPI s
 The launcher uses `.venv` automatically and stops both servers on Ctrl+C or
 when either exits. `npm run dev` is the equivalent without global registration.
 
-### Headless CLI and optional desktop
+### Headless CLI
 
 ```bash
-# No QApplication or PyQt6 dependency
 python -m pipeline run /path/story.txt --title "My story" --group-size 20 --prepare --export zip
 python -m pipeline sessions
-
-# Legacy interface for migration comparisons
-python -m pip install -r requirements-desktop.txt
-python app.py
 ```
 
 See [installation](INSTALL.md) and [web/CLI usage](USAGE.md#local-web-workspace) for sessions, API calls, cancellation, and output placement.
@@ -152,9 +146,8 @@ See [installation](INSTALL.md) and [web/CLI usage](USAGE.md#local-web-workspace)
 5. **Create Videos** - Render selected groups, automatically skipping valid completed MP4s
 6. **Start Uploads** - Connect your channel, review shared metadata/per-group titles, and upload selected groups
 
-Open the shared log at any time with **📋 Log** in the toolbar or `Ctrl+L`: it
-collects stage status, warnings, and errors for every step in one modeless
-window, without interrupting a running job.
+Open **Nhật ký** at any time: the job panel keeps finished results and the
+live log for every step, without interrupting a running job.
 
 ### Configuration
 
@@ -164,15 +157,14 @@ Settings are stored in `~/.config/novel-pipeline-v2/config.json` (or `XDG_CONFIG
 
 ```
 novel-pipeline-v2/
-├── app.py                      # Optional legacy desktop entry point
 ├── backend/                    # Loopback FastAPI, jobs, SSE, uploads/downloads
 ├── frontend/                   # React + Vite + shadcn/ui workspace
 ├── config/
 │   ├── settings.py             # Settings and configuration
-│   └── validation.py           # Shared Qt-free settings edit validation
+│   └── validation.py           # Shared settings edit validation
 ├── pipeline/
 │   ├── service.py              # Shared workspace actions
-│   ├── media_service.py        # Qt-free TTS/video/YouTube orchestration
+│   ├── media_service.py        # TTS/video/YouTube orchestration
 │   ├── cli.py                  # python -m pipeline
 │   ├── sessions.py             # Existing versioned session store
 │   ├── document.py             # In-memory pipeline document
@@ -193,8 +185,7 @@ novel-pipeline-v2/
 ├── filtering/
 │   ├── ranges.py               # Range parsing & filtering
 │   └── repair.py               # Renumber & repair actions
-└── ui/
-    └── main_window.py          # PyQt6 main window
+└── tests/                      # Offline pytest/unittest suite
 ```
 
 ## Algorithms
@@ -225,7 +216,6 @@ Break preference cascade:
 - **Python 3.11+** - Modern Python with type hints
 - **React + Vite + shadcn/ui** - Local web workspace
 - **FastAPI** - Serial job lifecycle, cooperative cancellation and SSE monitoring
-- **PyQt6 (optional)** - Legacy desktop retained until external-service parity is established
 - **No database** - In-memory pipeline, existing versioned JSON sessions and job provenance
 - **Offline text processing** - Edge-TTS and YouTube require network services when invoked
 

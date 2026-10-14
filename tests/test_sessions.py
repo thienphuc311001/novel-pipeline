@@ -1,14 +1,11 @@
-"""Session restart, provenance, atomic persistence and UI restoration tests."""
+"""Session restart, provenance, atomic persistence and web session restoration tests."""
+import asyncio
 import json
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
 
 from config.settings import Settings
 from media.groups import write_groups, save_job_state
@@ -16,14 +13,10 @@ from pipeline.document import PipelineDocument, SourceFile, Diagnostic, StageKey
 from pipeline.sessions import SessionError, SessionStore, document_to_dict, missing_artifacts
 from tests.test_chapter_groups import document_for
 from tests import test_youtube_pipeline as youtube_fixture
-from ui.main_window import MainWindow
+from tests.web_only_support import FakeTtsClients, WebWorkspaceMixin, make_mp3, tts_clients
 
 
-class SessionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class SessionTests(WebWorkspaceMixin, unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -36,10 +29,24 @@ class SessionTests(unittest.TestCase):
         fixture.root = self.root
         return fixture.ready_document()
 
-    def window(self):
-        window = MainWindow(self.settings.clone(), enable_sessions=True, session_store=self.store)
-        self.addCleanup(window.close)
-        return window
+    # Web sessions: the real application, JobManager, SessionStore and global config.
+    def web(self):
+        self.start_workspace()
+        self.store = self.service.sessions
+
+    def save(self, ui):
+        response = self.client.post("/api/sessions", json={"ui": ui})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["id"]
+
+    def open(self, session_id):
+        return self.client.post(f"/api/sessions/{session_id}/open")
+
+    def ready_groups(self):
+        self.import_story()
+        ids = self.group_story(1)
+        self.video_ready(ids[:1])
+        return ids
 
     def test_roundtrip_retains_text_types_and_validated_media(self):
         document = self.ready_document()
@@ -94,96 +101,121 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(restored.chapter_groups[0].state["tts_status"], "Completed")
         self.assertEqual(restored.require_chapter_groups(), document.require_chapter_groups())
 
+
     def test_close_and_reopen_at_step4_without_repeating_previous_stages(self):
-        first = self.window()
-        first.document = self.ready_document()
-        first._set_job_editors(first.document.job_title, first.document.job_chapter)
-        first.tabs.blockSignals(True)
-        first.tabs.setCurrentIndex(3)
-        first.tabs.blockSignals(False)
-        first.settings.tts_voice = "vi-VN-NamMinhNeural"
-        first.stage6_widget.description_edit.setPlainText("Mô tả chưa upload")
-        first.stage6_widget.ai_check.setChecked(True)
-        first.group6.editor.ai_check.setChecked(True)
-        self.assertTrue(first.close())
-        session_id = first._session_id
+        self.web()
+        default_voice = self.service.settings.tts_voice
+        self.ready_groups()
+        response = self.client.put("/api/settings", json={"tts_voice": "vi-VN-NamMinhNeural"})
+        self.assertEqual(response.status_code, 200, response.text)
+        draft = {"screen": "video", "metadata": {"title": "", "description": "Mô tả chưa upload", "contains_synthetic_media": True}}
+        session_id = self.save({"tab": 3, "web_draft": draft})
+        before = self.state()
+        self.close_app()
         self.assertEqual(self.store.list_sessions()[0]["step"], 4)
-        second = self.window()
-        second.settings.youtube_client_secrets_path = "current-global-client.json"
-        with patch.object(second, "_start_video_detection"), patch.object(second, "_on_normalize") as normalize:
-            self.assertTrue(second._open_session(session_id))
-        normalize.assert_not_called()
-        self.assertEqual(second.tabs.currentIndex(), 3)
-        self.assertEqual(second.settings.tts_voice, "vi-VN-NamMinhNeural")
-        self.assertEqual(second.settings.youtube_client_secrets_path, "current-global-client.json")
-        self.assertEqual(second.document.require_step5_outputs(), first.document.require_step5_outputs())
-        self.assertEqual(second.stage6_widget.description_edit.toPlainText(), "Mô tả chưa upload")
-        self.assertTrue(second.stage6_widget.ai_check.isChecked())
-        self.assertTrue(second.group6.editor.ai_check.isChecked())
-        self.assertEqual(second._video_media.audiobook_path, first.document.audiobook_path)
+        # Global account configuration changes while the application is closed.
+        settings = Settings.load()
+        settings.tts_voice = default_voice
+        settings.youtube_client_secrets_path = "current-global-client.json"
+        settings.save(settings._loaded_config_path)
+        self.open_app()
+        response = self.open(session_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/jobs").json(), [])
+        restored = self.state()
+        self.assertEqual(self.service.settings.tts_voice, "vi-VN-NamMinhNeural")
+        self.assertEqual(self.service.settings.youtube_client_secrets_path, "current-global-client.json")
+        self.assertEqual((restored["normalized_text"], restored["stages"]), (before["normalized_text"], before["stages"]))
+        self.assertEqual(restored["groups"], before["groups"])
+        self.assertEqual(restored["missing_artifacts"], [])
+        self.assertEqual(restored["ui_state"]["web_draft"], draft)
+        audiobook = restored["groups"][0]["state"]["audiobook"]["path"]
+        self.assertIn(audiobook, [row["path"] for row in restored["outputs"]])
 
     def test_multiple_sessions_restore_edited_text_and_group_selection(self):
-        first = self.window()
-        first.document = document_for("Chương 1\nĐã sửa.\nChương 2\nB.", self.root)
-        groups = write_groups(first.document, first.settings, first.document.job_title, 1)
-        first._set_job_editors(first.document.job_title, "")
-        first._refresh_group_panels()
-        first.group5.groups.setCurrentRow(1)
-        first.group5.groups.item(1).setCheckState(Qt.CheckState.Checked)
-        first.tabs.blockSignals(True)
-        first.tabs.setCurrentIndex(3)
-        first.tabs.blockSignals(False)
-        self.assertTrue(first._save_session())
-        first_id = first._session_id
-        first._apply_session(PipelineDocument(), {}, {})
-        first._session_id = None
-        first.document.load_original_input("A different story")
-        self.assertTrue(first._save_session())
-        second_id = first._session_id
-        with patch.object(first, "_enter_stage5", return_value=True):
-            self.assertTrue(first._open_session(first_id))
-        self.assertEqual(first.document.normalized_text, "Chương 1\nĐã sửa.\nChương 2\nB.")
-        self.assertEqual(first.group5.selected_id(), groups[1].group_id)
-        self.assertEqual(first.group5.checked_ids(), [groups[1].group_id])
+        self.web()
+        self.import_story()
+        self.run_job("edit", {"text": "Chương 1\nĐã sửa.\nChương 2\nB."})
+        ids = self.group_story(1)
+        first_id = self.save({"tab": 3, "web_draft": {"screen": "video", "selected": [ids[1]]}})
+        self.assertEqual(self.client.post("/api/sessions/new").status_code, 200)
+        self.import_story("A different story\n", name="Khác.txt", normalize=False)
+        second_id = self.save({"tab": 0})
+        response = self.open(first_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        state = self.state()
+        self.assertEqual(state["normalized_text"], "Chương 1\nĐã sửa.\nChương 2\nB.")
+        self.assertEqual(state["ui_state"]["web_draft"]["selected"], [ids[1]])
+        self.assertEqual([group["group_id"] for group in state["groups"]], ids)
         self.assertNotEqual(first_id, second_id)
-        self.assertEqual(len(self.store.list_sessions()), 2)
+        self.assertEqual(len(self.client.get("/api/sessions").json()), 2)
 
     def test_missing_media_keeps_text_and_reports_missing_files(self):
-        window = self.window()
-        document = self.ready_document()
-        session_id = self.store.save(document, {}, {"tab": 3})
-        Path(document.audiobook_path).unlink()
-        with patch.object(window, "_enter_stage5") as enter:
-            self.assertTrue(window._open_session(session_id))
-        enter.assert_not_called()
-        self.assertEqual(window.document.original_input_text, document.original_input_text)
-        self.assertIn(document.audiobook_path, missing_artifacts(window.document))
-        self.assertIn("Thiếu", window.session_status.text())
+        self.web()
+        self.ready_groups()
+        session_id = self.save({"tab": 3})
+        before = self.state()
+        audiobook = before["groups"][0]["state"]["audiobook"]["path"]
+        self.close_app()
+        Path(audiobook).unlink()
+        self.open_app()
+        response = self.open(session_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/jobs").json(), [])
+        state = self.state()
+        self.assertEqual(state["original_text"], before["original_text"])
+        self.assertIn(audiobook, state["missing_artifacts"])
+        self.assertNotIn(audiobook, [row["path"] for row in state["outputs"]])
 
     def test_busy_session_cannot_be_replaced(self):
-        window = self.window()
-        window.document.original_input_text = "Work in progress"
-        with patch.object(window, "_session_busy", return_value=True):
-            self.assertFalse(window._open_session("0" * 32))
-        self.assertEqual(window.document.original_input_text, "Work in progress")
+        self.web()
+        self.import_story()
+        ids = self.group_story(1)
+        started, release = threading.Event(), threading.Event()
 
-    def test_failed_save_prevents_close_and_retains_document(self):
-        window = self.window()
-        window.document.original_input_text = "Unsaved edits"
-        with patch.object(self.store, "save", side_effect=SessionError("Disk full")), patch.object(window, "_error") as error:
-            self.assertFalse(window.close())
-        error.assert_called_once_with("Disk full")
-        self.assertEqual(window.document.original_input_text, "Unsaved edits")
+        async def gate(text):
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+        with tts_clients(FakeTtsClients(make_mp3(self.root / "voice.mp3"), gate=gate)):
+            job_id = self.submit("tts", {"group_ids": ids[:1]})
+            self.assertTrue(started.wait(30))
+            for request in (lambda: self.open("0" * 32), lambda: self.client.post("/api/sessions/new")):
+                response = request()
+                self.assertEqual(response.status_code, 409, response.text)
+            self.assertIn("Chương 1: Mưa", self.state()["original_text"])
+            release.set()
+            self.assertEqual(self.wait(job_id)["status"], "completed")
+
+    def test_failed_save_retains_document_and_previous_session(self):
+        self.web()
+        self.import_story()
+        session_id = self.save({"tab": 1})
+        # The edit job autosaves; that saved session is what a failed save must not damage.
+        self.run_job("edit", {"text": "Unsaved edits"})
+        saved = (self.store.root / f"{session_id}.json").read_bytes()
+        with patch("media.artifacts.os.replace", side_effect=OSError("Disk full")):
+            response = self.client.post("/api/sessions", json={"ui": {"tab": 2}})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("Disk full", response.json()["detail"])
+        state = self.state()
+        self.assertEqual((state["normalized_text"], state["session_id"]), ("Unsaved edits", session_id))
+        self.assertEqual((self.store.root / f"{session_id}.json").read_bytes(), saved)
+        self.assertFalse(list(self.store.root.glob("*.tmp")))
 
     def test_empty_startup_does_not_create_sessions_and_autosave_updates_one_id(self):
-        window = self.window()
-        window._autosave_session()
+        self.web()
+        self.assertEqual(self.client.get("/api/sessions").json(), [])
+        self.close_app()
         self.assertEqual(self.store.list_sessions(), [])
-        window.document.original_input_text = "Story"
-        window._autosave_session()
-        session_id = window._session_id
-        window.document.normalized_text = "User edits"
-        window._autosave_session()
+        self.open_app()
+        self.store = self.service.sessions
+        self.import_story(normalize=False)
+        session_id = self.state()["session_id"]
+        self.assertIsNotNone(session_id)
+        self.run_job("normalize")
+        self.run_job("edit", {"text": "User edits"})
         restored, settings, _ = self.store.load(session_id)
         self.assertEqual(restored.normalized_text, "User edits")
         self.assertEqual(len(self.store.list_sessions()), 1)
@@ -191,28 +223,31 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("youtube_title_tags", settings)
 
     def test_reopening_older_session_keeps_latest_uploaded_story_tags(self):
-        window = self.window()
-        window.document.original_input_text = "Story A"
-        window.settings.remember_uploaded_title_tags("Truyện A", ["old"])
-        self.assertTrue(window._save_session())
-        session_id = window._session_id
-        window.settings.remember_uploaded_title_tags("Truyện A", ["latest"])
-        self.assertTrue(window._open_session(session_id))
-        self.assertEqual(window.settings.tags_for_uploaded_title("Truyện A"), ["latest"])
+        self.web()
+        self.import_story()
+        self.service.settings.remember_uploaded_title_tags("Truyện A", ["old"])
+        session_id = self.save({"tab": 0})
+        self.service.settings.remember_uploaded_title_tags("Truyện A", ["latest"])
+        response = self.open(session_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.service.settings.tags_for_uploaded_title("Truyện A"), ["latest"])
+        self.assertEqual(self.state()["youtube_tags"]["history"]["Truyện A"], ["latest"])
 
     def test_reopening_youtube_page_preserves_unuploaded_tag_draft(self):
-        first = self.window()
-        first.document = self.ready_document()
-        first.settings.youtube_title_tags = {"Bắc Tống": ["tag đã upload"]}
-        first.stage6_widget.tags_edit.setText("tag mới chưa upload")
-        first.tabs.blockSignals(True)
-        first.tabs.setCurrentIndex(4)
-        first.tabs.blockSignals(False)
-        self.assertTrue(first._save_session())
-        second = self.window()
-        second.settings.youtube_title_tags = {"Bắc Tống": ["tag đã upload"]}
-        self.assertTrue(second._open_session(first._session_id))
-        self.assertEqual(second.stage6_widget.tags_edit.text(), "tag mới chưa upload")
+        self.web()
+        self.import_story()
+        self.service.settings.remember_uploaded_title_tags("Bắc Tống", ["tag đã upload"])
+        draft = {"screen": "youtube", "tagsText": "tag mới chưa upload", "tagsEdited": True,
+                 "metadata": {"title": "", "tags": ["tag mới chưa upload"]}}
+        session_id = self.save({"tab": 4, "web_draft": draft})
+        self.close_app()
+        self.open_app()
+        response = self.open(session_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        state = self.state()
+        self.assertEqual(state["ui_state"]["web_draft"], draft)
+        self.assertEqual(state["ui_state"]["tab"], 4)
+        self.assertEqual(state["youtube_tags"]["current"], ["tag đã upload"])
 
 
 if __name__ == "__main__":
