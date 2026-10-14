@@ -1,0 +1,241 @@
+name: Web / Core CI
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Untrusted PR code receives no repository secrets or write token.
+permissions:
+  contents: read
+
+concurrency:
+  group: web-core-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python Core + FastAPI (${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Checkout PR merge candidate or requested ref
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install local media tools and network-namespace utilities
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/web-core-python/reports"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg iproute2 util-linux
+          {
+            python --version
+            ffmpeg -version | head -n 1
+            ffprobe -version | head -n 1
+          } > "$RUNNER_TEMP/web-core-python/reports/runtime.txt"
+          command -v ffmpeg
+          command -v ffprobe
+          command -v unshare
+          command -v runuser
+
+      - name: Install web/core and test dependencies (no provider call)
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1
+          python -m pip freeze > "$RUNNER_TEMP/web-core-python/reports/dependencies.txt"
+
+      - name: Run full pytest with private config and loopback-only network
+        run: |
+          set -euo pipefail
+          run_root="$RUNNER_TEMP/web-core-python"
+          mkdir -p "$run_root"/{home,tmp,config,xdg-config,xdg-cache,reports}
+          ci_user=$(id -un)
+          ci_python=$(command -v python)
+          # Create the namespace as root, then drop to the runner user.
+          # Every pytest child inherits this network namespace and clean env.
+          # This is network isolation, not a full filesystem/security sandbox.
+          sudo unshare --net -- bash -s -- "$ci_user" "$ci_python" "$GITHUB_WORKSPACE" "$run_root" <<'NET' 2>&1 | tee "$run_root/reports/pytest.log"
+          set -euo pipefail
+          ip link set lo up
+          cd "$3"
+          exec runuser -u "$1" -- env -i             PATH="$(dirname "$2"):/usr/bin:/bin"             HOME="$4/home" TMPDIR="$4/tmp"             XDG_CONFIG_HOME="$4/xdg-config" XDG_CACHE_HOME="$4/xdg-cache"             NOVEL_PIPELINE_CONFIG_DIR="$4/config" CI_REPORTS="$4/reports"             LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC             PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1             PYTHONUTF8=1 PYTHONIOENCODING=utf-8             "$2" -B - <<'PY'
+          import errno
+          import importlib.util
+          import json
+          import os
+          import socket
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          reports = Path(os.environ["CI_REPORTS"])
+          assert importlib.util.find_spec("PyQt6") is None, "Qt must not be installed"
+          with socket.socket() as server:
+              server.bind(("127.0.0.1", 0))
+              server.listen()
+              with socket.create_connection(server.getsockname(), timeout=2):
+                  connection, _ = server.accept()
+                  connection.close()
+          try:
+              socket.create_connection(("1.1.1.1", 443), timeout=2).close()
+          except OSError as exc:
+              assert exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH), exc
+          else:
+              raise AssertionError("External egress unexpectedly available")
+          print("Network controls: loopback PASS; external egress denied", flush=True)
+          (reports / "network-controls.json").write_text(json.dumps({
+              "loopback": "PASS", "external_egress": "DENIED", "qt_installed": False,
+              "mechanism": "private Linux network namespace",
+          }, indent=2) + "\n")
+          result = subprocess.run([
+              sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+              "-q", "-rA", "--junitxml=" + str(reports / "pytest.xml"),
+          ], timeout=900)
+          (reports / "pytest-exit.txt").write_text(str(result.returncode) + "\n")
+          raise SystemExit(result.returncode)
+          PY
+          NET
+
+      - name: Audit approved expected failures and required integration coverage
+        if: ${{ always() }}
+        run: |
+          python -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          reports = Path(os.environ["RUNNER_TEMP"]) / "web-core-python" / "reports"
+          report = reports / "pytest.xml"
+          if not report.exists():
+              raise SystemExit("ERROR: pytest report missing; setup/timeout is not PASS")
+          cases = list(ET.parse(report).iter("testcase"))
+          expected = {
+              "tests.test_tts_preprocessing.HeadlessLegacyTests.test_config_ui_and_downstream_invalidation",
+              "tests.test_youtube_title_tags.UploadedTitleTagTests.test_existing_completed_upload_is_imported_when_its_story_is_opened",
+              "tests.test_web_business_regressions.BusinessRegressionTests.test_auth_failure_pauses_remaining_queue",
+              "tests.test_web_business_regressions.BusinessRegressionTests.test_paused_batch_shared_edits_affect_only_unstarted_sessions",
+              "tests.test_web_business_regressions.BusinessRegressionTests.test_confirmed_duplicate_upload_creates_new_video",
+          }
+          observed, other_skips, failures = set(), [], []
+          executed = set()
+          for case in cases:
+              identity = case.attrib["classname"] + "." + case.attrib["name"]
+              skipped = case.find("skipped")
+              if skipped is not None:
+                  if skipped.attrib.get("type") == "pytest.xfail":
+                      observed.add(identity)
+                  else:
+                      other_skips.append(identity)
+              elif case.find("failure") is not None or case.find("error") is not None:
+                  failures.append(identity)
+              else:
+                  executed.add(identity)
+          required = {
+              "tests.test_video_pages.RealVfrTests.test_real_mp3_merge_and_fractional_static_pages",
+              "tests.test_video_pages.RealVfrTests.test_single_page_holds_to_the_end_at_44100hz",
+              "tests.test_web_only_runtime.WebOnlyRuntimeTests.test_real_backend_health_without_qt",
+              "tests.test_web_only_runtime.WebOnlyRuntimeTests.test_real_backend_host_origin_policy",
+              "tests.test_web_only_runtime.WebOnlyRuntimeTests.test_cli_fixture_pipeline_without_qt",
+          }
+          exit_file = reports / "pytest-exit.txt"
+          exit_ok = exit_file.exists() and exit_file.read_text().strip() == "0"
+          ok = bool(cases) and exit_ok and observed == expected and not other_skips and not failures and required <= executed
+          summary = {
+              "verdict": "PASS" if ok else "FAIL", "reported_testcases": len(cases),
+              "expected_failures": sorted(observed), "other_skips": other_skips,
+              "failures_or_errors": failures, "missing_required": sorted(required - executed),
+              "unexpected_xfail": sorted(observed - expected),
+              "missing_approved_xfail": sorted(expected - observed), "pytest_exit_zero": exit_ok,
+          }
+          reports.mkdir(parents=True, exist_ok=True)
+          (reports / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          print(json.dumps(summary, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("### Python Core / FastAPI\n\n")
+              handle.write("Verdict: **" + summary["verdict"] + "**; approved expected failures: " + str(len(observed)) + ".\n")
+          if not ok:
+              raise SystemExit("FAIL: pytest/xfail/integration contract mismatch")
+          PY
+
+      - name: Upload bounded test evidence (including failures)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-core-python-${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/web-core-python/reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  frontend:
+    name: React tests + production build (Node 22)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout PR merge candidate or requested ref
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.23.3'
+          package-manager-cache: false
+
+      - name: Install frontend from lockfile
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/web-core-frontend"/{home,tmp,reports}
+          npm --prefix frontend ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/web-core-frontend/reports/install.log"
+          node --version > "$RUNNER_TEMP/web-core-frontend/reports/runtime.txt"
+          npm --version >> "$RUNNER_TEMP/web-core-frontend/reports/runtime.txt"
+
+      - name: Run frontend tests and build without external network or credentials
+        run: |
+          set -euo pipefail
+          run_root="$RUNNER_TEMP/web-core-frontend"
+          ci_user=$(id -un)
+          node_bin=$(dirname "$(command -v node)")
+          sudo unshare --net -- bash -s -- "$ci_user" "$node_bin" "$GITHUB_WORKSPACE" "$run_root" <<'NET' 2>&1 | tee "$run_root/reports/frontend.log"
+          set -euo pipefail
+          ip link set lo up
+          cd "$3"
+          exec runuser -u "$1" -- env -i             PATH="$2:/usr/bin:/bin" HOME="$4/home" TMPDIR="$4/tmp"             CI_REPORTS="$4/reports" CI=true LANG=C.UTF-8 LC_ALL=C.UTF-8             bash -c '
+              set -euo pipefail
+              npm --prefix frontend run test 2>&1 | tee "$CI_REPORTS/tests.log"
+              npm --prefix frontend run build 2>&1 | tee "$CI_REPORTS/build.log"
+              test -s frontend/dist/index.html
+            '
+          NET
+
+      - name: Upload frontend logs (including failures)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-core-frontend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/web-core-frontend/reports/
+          if-no-files-found: warn
+          retention-days: 7
