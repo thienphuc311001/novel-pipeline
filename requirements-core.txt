@@ -1,6 +1,7 @@
 # Qt-free normalization, media generation and YouTube integration
 Pillow>=10.0.0
-edge-tts>=7.2.8
+# 7.3+ gửi Sec-MS-GEC v2; bản cũ bị Edge TTS trả 403 khi bắt tay WebSocket.
+edge-tts>=7.3.1
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0
 keyring>=25.0.0
